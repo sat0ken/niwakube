@@ -104,7 +104,7 @@ EOF
       --firmware "$FIRMWARE" \
       --cpus "boot=$CPUS" \
       --memory "size=$MEM" \
-      --disk "path=$VM_DIR/disk.raw" "path=$VM_DIR/seed.iso,readonly=on" \
+      --disk "path=$VM_DIR/disk.raw,image_type=raw" "path=$VM_DIR/seed.iso,readonly=on,image_type=raw" \
       --net "tap=$TAP,mac=$mac" \
       --serial "file=$VM_DIR/serial.log" \
       --console off

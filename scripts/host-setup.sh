@@ -13,7 +13,13 @@ VM_SUBNET=${VM_SUBNET:-172.30.0.0/16}
 # VM 用に取得する Ubuntu クラウドイメージのバージョン (スペース区切りで複数可。例: "26.04 24.04")
 UBUNTU_IMAGES=${UBUNTU_IMAGES:-26.04}
 
-CH_RELEASES=https://github.com/cloud-hypervisor/cloud-hypervisor/releases/latest/download
+# 動作確認したバージョンに固定する (CI の E2E で検証済み)。最新を試すなら CH_VERSION=latest
+CH_VERSION=${CH_VERSION:-v55.0}
+if [[ $CH_VERSION == latest ]]; then
+  CH_RELEASES=https://github.com/cloud-hypervisor/cloud-hypervisor/releases/latest/download
+else
+  CH_RELEASES=https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/$CH_VERSION
+fi
 EDK2_RELEASES=https://github.com/cloud-hypervisor/edk2/releases/latest/download
 
 log()  { printf '\e[1;34m==>\e[0m %s\n' "$*"; }
@@ -52,7 +58,7 @@ install_packages() {
 }
 
 install_cloud_hypervisor() {
-  log "Cloud Hypervisor のインストール (latest)"
+  log "Cloud Hypervisor のインストール ($CH_VERSION)"
   curl -fsSL -o /usr/local/bin/cloud-hypervisor.new "$CH_RELEASES/cloud-hypervisor-static"
   curl -fsSL -o /usr/local/bin/ch-remote.new "$CH_RELEASES/ch-remote-static"
   chmod 0755 /usr/local/bin/cloud-hypervisor.new /usr/local/bin/ch-remote.new
