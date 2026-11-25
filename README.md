@@ -1,5 +1,7 @@
 # niwakube
 
+niwa = 日本語の「庭」。自宅の庭で Kubernetes クラスタを育てる。
+
 Cloud Hypervisor などの仮想化／コンテナ基盤の上に Kubernetes クラスタ (kubeadm / k3s / Talos) を払い出す自宅ラボ用の仕組み。
 設計は [docs/design.md](docs/design.md)、バックエンド差し替えの検討は [docs/backends.md](docs/backends.md) を参照。
 

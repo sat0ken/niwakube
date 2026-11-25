@@ -171,8 +171,10 @@ type Requirements struct {
 
 ## 5. 進め方
 
+**決定: Cloud Hypervisor → systemd-nspawn の順で実装する。**
+
 1. Backend インターフェースは最初から用意するが、実装は Cloud Hypervisor だけで始める
-2. **2 つ目には、CH と一番性質が違う systemd-nspawn (または Incus) を選ぶ**。Firecracker は CH と似すぎていて、
+2. **2 つ目は、CH と一番性質が違う systemd-nspawn にする**。Firecracker は CH と似すぎていて、
    インターフェースの設計が正しいかを確かめる役に立たない
 3. その次に Firecracker (カーネルのビルドが学習テーマになる)、最後に libkrun (実験)
 4. 1 つのクラスタは 1 つのバックエンドに揃えるのを基本にする。ただし全バックエンドが nkbr0 につながるので、

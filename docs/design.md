@@ -1,6 +1,8 @@
 # niwakube 設計メモ
 
-ミニPC (ASRock DeskMini 310 / RAM 64GB) 上の Cloud Hypervisor で、
+名前の由来: niwa = 日本語の「庭」。自宅の庭でクラスタを育てるイメージ。
+
+ミニPC (ASRock DeskMini 310 / RAM 64GB) 上の Cloud Hypervisor などで、
 kubeadm / k3s / Talos の Kubernetes クラスタを払い出す仕組み。用途は学習と自宅の基盤の両方。
 
 ## 決定事項
@@ -8,7 +10,7 @@ kubeadm / k3s / Talos の Kubernetes クラスタを払い出す仕組み。用�
 | 項目 | 決定 |
 |---|---|
 | ホスト OS | Ubuntu Server 24.04 |
-| VMM | Backend インターフェースで差し替え可能。最初の実装は Cloud Hypervisor (詳細は [backends.md](backends.md)) |
+| Backend | インターフェースで差し替え可能。実装順は **Cloud Hypervisor → systemd-nspawn** (詳細は [backends.md](backends.md)) |
 | ファームウェア | CLOUDHV.fd (EDK2 / UEFI) |
 | ネットワーク | ホスト内の NAT ブリッジ `nkbr0` (172.30.0.0/16) |
 | k8s ディストリビューション | kubeadm / k3s / Talos をクラスタごとに選べる |
@@ -127,8 +129,9 @@ GET    /api/host                     CPU / メモリ / ディスクの使用状�
 0. ホストのセットアップと、VM を手で1台起動 (`scripts/host-setup.sh`、`scripts/test-vm.sh`) ← いまここ
 1. niwakubed: VM 単体の作成・削除 (CH クライアント、systemd、IPAM、SQLite)
 2. niwakubed: k3s クラスタの払い出し (一番単純なので最初に)。次に kubeadm、最後に Talos
-3. Web UI
-4. 発展: シリアルコンソール、スケール、事前ビルドしたイメージ、LAN 公開 (DNAT)、スナップショット
+3. systemd-nspawn バックエンド (Backend インターフェースが正しく切れているかの検証を兼ねる)
+4. Web UI
+5. 発展: Firecracker / libkrun バックエンド、 シリアルコンソール、スケール、事前ビルドしたイメージ、LAN 公開 (DNAT)、スナップショット
 
 ## 未検証 (実機で確認すること)
 
