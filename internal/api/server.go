@@ -20,18 +20,35 @@ type Server struct {
 	svc      *machine.Service
 	clusters *cluster.Service
 	log      *slog.Logger
+	opts     Options
 }
 
-func New(svc *machine.Service, clusters *cluster.Service, log *slog.Logger) *Server {
+// Options は API サーバーの設定。
+type Options struct {
+	Version string // niwakubed のバージョン (表示用)
+	DataDir string // ディスクの空きを表示するディレクトリ
+	// LoopbackOnly は localhost だけで待ち受けているとき true。Host ヘッダーが localhost 以外なら拒否する
+	LoopbackOnly bool
+	// UI は Web UI のハンドラー。nil なら Web UI は出さない
+	UI http.Handler
+}
+
+func New(svc *machine.Service, clusters *cluster.Service, log *slog.Logger, opts ...Options) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Server{svc: svc, clusters: clusters, log: log}
+	s := &Server{svc: svc, clusters: clusters, log: log}
+	if len(opts) > 0 {
+		s.opts = opts[0]
+	}
+	return s
 }
 
 // Handler は API のルーティングを返す。
 //
+//	GET    /                         Web UI
 //	GET    /healthz
+//	GET    /api/host                 ホストの CPU / メモリ / ディスクと、VM に割り当てたリソース
 //	GET    /api/backends
 //	GET    /api/vms
 //	POST   /api/vms
@@ -58,6 +75,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+	mux.HandleFunc("GET /api/host", s.hostInfo)
 	mux.HandleFunc("GET /api/backends", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, s.svc.Backends())
 	})
@@ -86,7 +104,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/clusters/{name}/forwards", s.listForwards)
 	mux.HandleFunc("POST /api/clusters/{name}/forwards", s.addForward)
 	mux.HandleFunc("DELETE /api/clusters/{name}/forwards/{proto}/{port}", s.deleteForward)
-	return s.logging(mux)
+	if s.opts.UI != nil {
+		mux.Handle("GET /", s.opts.UI)
+	}
+	return s.logging(protect(mux, s.opts.LoopbackOnly))
 }
 
 func (s *Server) listVMs(w http.ResponseWriter, r *http.Request) {
