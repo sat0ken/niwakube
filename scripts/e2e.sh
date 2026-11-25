@@ -56,6 +56,11 @@ done
 curl -fs "http://$LISTEN/healthz" >/dev/null || die "niwakubed が起動しませんでした"
 log "niwakubed $("$BIN" -version) が起動しました"
 
+# Web UI が配信されていること
+curl -fs "http://$LISTEN/" | grep -q '/ui/app.js' || die "Web UI (/) が返りません"
+curl -fs "http://$LISTEN/ui/app.js" | grep -q 'function route' || die "Web UI (/ui/app.js) が返りません"
+curl -fs "http://$LISTEN/api/host" | grep -q '"cpus"' || die "/api/host が返りません"
+
 # api METHOD PATH [BODY] → 標準出力に body、変数 CODE に HTTP ステータス
 api() {
   local out

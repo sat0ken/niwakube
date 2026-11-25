@@ -233,7 +233,7 @@ func defaultSize(sz *store.NodeSize) {
 		sz.MemoryMiB = 4096
 	}
 	if sz.DiskGiB == 0 {
-		sz.DiskGiB = 20
+		sz.DiskGiB = 30
 	}
 }
 
