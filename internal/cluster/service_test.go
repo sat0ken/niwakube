@@ -3,11 +3,13 @@ package cluster
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/netip"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -17,7 +19,9 @@ import (
 	"github.com/sat0ken/niwakube/internal/distro/kubeadm"
 	"github.com/sat0ken/niwakube/internal/distro/talos"
 	"github.com/sat0ken/niwakube/internal/ipam"
+	"github.com/sat0ken/niwakube/internal/kube"
 	"github.com/sat0ken/niwakube/internal/machine"
+	"github.com/sat0ken/niwakube/internal/netx"
 	"github.com/sat0ken/niwakube/internal/pki"
 	"github.com/sat0ken/niwakube/internal/store"
 )
@@ -54,10 +58,15 @@ func newTest(t *testing.T) (*Service, *machine.Service, *fake.Backend, *fakeProb
 		t.Fatal(err)
 	}
 	pr := &fakeProber{err: errors.New("connection refused")}
-	cs, err := NewService(Config{Subnet: netip.MustParsePrefix("172.30.0.0/16")}, st, ms, pr, nil, k3s.New(), kubeadm.New(), talos.New())
+	cs, err := NewService(Config{
+		Subnet:     netip.MustParsePrefix("172.30.0.0/16"),
+		Forwarder:  &fakeForwarder{},
+		NewApplier: func([]byte) (Applier, error) { return &fakeApplier{}, nil },
+	}, st, ms, pr, nil, k3s.New(), kubeadm.New(), talos.New())
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(cs.Close)
 	return cs, ms, fb, pr
 }
 
@@ -366,12 +375,9 @@ func TestNiwakubeDefaults(t *testing.T) {
 
 func TestTalosCluster(t *testing.T) {
 	// テストでは Talos API への bootstrap を試さない
-	old := bootstrapTimeout
-	bootstrapTimeout = 0
-	t.Cleanup(func() { bootstrapTimeout = old })
-
 	ctx := context.Background()
 	cs, _, fb, _ := newTest(t)
+	cs.postCreateTimeout = 0
 	one := 1
 	c, err := cs.Create(ctx, CreateRequest{Name: "tal", Distro: "talos", Workers: &one})
 	if err != nil {
@@ -412,5 +418,118 @@ func TestTalosCluster(t *testing.T) {
 	}
 	if _, _, err := cs.ClientConfig(ctx, "k"); !errors.Is(err, backend.ErrNotSupported) {
 		t.Errorf("k3s talosconfig: want ErrNotSupported, got %v", err)
+	}
+}
+
+type fakeForwarder struct {
+	mu   sync.Mutex
+	last []netx.PortForward
+	n    int
+}
+
+func (f *fakeForwarder) Apply(_ context.Context, fs []netx.PortForward) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.last, f.n = fs, f.n+1
+	return nil
+}
+
+type fakeApplier struct {
+	mu       sync.Mutex
+	applied  []string
+	notReady map[string]bool // この文字列を含むマニフェストは ErrNotReady にする
+}
+
+func (a *fakeApplier) Apply(_ context.Context, m string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for k := range a.notReady {
+		if strings.Contains(m, k) {
+			return fmt.Errorf("%s: %w", k, kube.ErrNotReady)
+		}
+	}
+	a.applied = append(a.applied, m)
+	return nil
+}
+
+func TestForwards(t *testing.T) {
+	ctx := context.Background()
+	cs, _, _, _ := newTest(t)
+	fw := cs.cfg.Forwarder.(*fakeForwarder)
+	zero := 0
+	if _, err := cs.Create(ctx, CreateRequest{Name: "demo", Workers: &zero}); err != nil {
+		t.Fatal(err)
+	}
+	f, err := cs.AddForward(ctx, "demo", ForwardRequest{HostPort: 8080, IP: "172.30.1.100", Port: 80})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Proto != "tcp" || len(fw.last) != 1 || fw.last[0].TargetIP.String() != "172.30.1.100" || fw.last[0].HostPort != 8080 {
+		t.Errorf("forward: %+v applied=%+v", f, fw.last)
+	}
+	for _, req := range []ForwardRequest{
+		{HostPort: 8080, IP: "172.30.1.100", Port: 80}, // 重複
+		{HostPort: 8081, IP: "192.168.1.10", Port: 80}, // クラスタのサブネットの外
+		{HostPort: 22, IP: "172.30.1.100", Port: 22},   // SSH 用に予約
+		{HostPort: 8082, IP: "172.30.1.100", Port: 0},  // ポートが不正
+		{HostPort: 8083, IP: "172.30.1.100", Port: 80, Proto: "sctp"},
+	} {
+		if _, err := cs.AddForward(ctx, "demo", req); err == nil {
+			t.Errorf("%+v: expected error", req)
+		}
+	}
+	if list, _ := cs.ListForwards(ctx, "demo"); len(list) != 1 {
+		t.Errorf("list: %+v", list)
+	}
+	// クラスタを消すと転送も消える
+	if err := cs.Delete(ctx, "demo"); err != nil {
+		t.Fatal(err)
+	}
+	if len(fw.last) != 0 {
+		t.Errorf("forwards must be removed with the cluster: %+v", fw.last)
+	}
+}
+
+func TestLoadBalancerAddons(t *testing.T) {
+	ctx := context.Background()
+	cs, _, _, pr := newTest(t)
+	cs.postCreateInterval = 10 * time.Millisecond
+	fa := &fakeApplier{notReady: map[string]bool{"cilium.io/v2\n": true}} // v2 の CRD はまだ無い → v2alpha1 を使う
+	cs.cfg.NewApplier = func([]byte) (Applier, error) { return fa, nil }
+	pr.mu.Lock()
+	pr.ready, pr.err = 1, nil
+	pr.mu.Unlock()
+
+	zero := 0
+	c, err := cs.Create(ctx, CreateRequest{Name: "lb", Workers: &zero})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.LoadBalancerPool != "172.30.1.100-172.30.1.199" {
+		t.Errorf("pool: %q", c.LoadBalancerPool)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for cs.addonStatus("lb") != "applied" {
+		if time.Now().After(deadline) {
+			t.Fatalf("addons not applied: %q", cs.addonStatus("lb"))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	fa.mu.Lock()
+	all := strings.Join(fa.applied, "---")
+	fa.mu.Unlock()
+	if !strings.Contains(all, "kind: CiliumLoadBalancerIPPool") || !strings.Contains(all, `start: "172.30.1.100"`) ||
+		!strings.Contains(all, "kind: CiliumL2AnnouncementPolicy") || !strings.Contains(all, "cilium.io/v2alpha1") {
+		t.Errorf("applied manifests:\n%s", all)
+	}
+
+	// flannel のクラスタには LB のアドオンは入れない
+	f := false
+	c, err = cs.Create(ctx, CreateRequest{Name: "fl", Workers: &zero, CNI: "flannel", Hubble: &f})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.LoadBalancerPool != "" || c.Addons != "" {
+		t.Errorf("flannel cluster: pool=%q addons=%q", c.LoadBalancerPool, c.Addons)
 	}
 }

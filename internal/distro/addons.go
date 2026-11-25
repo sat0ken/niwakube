@@ -133,6 +133,11 @@ func (a Addons) RuntimeClassManifest() string {
 func (a Addons) CiliumInstallScript(kubeconfig, apiHost string, apiPort int) string {
 	sets := []string{
 		"ipam.mode=kubernetes",
+		// LoadBalancer: LB IPAM で割り当てた IP を L2 アナウンス (ARP) で広告する
+		"l2announcements.enabled=true",
+		"externalIPs.enabled=true",
+		"k8sClientRateLimit.qps=50",
+		"k8sClientRateLimit.burst=100",
 		"kubeProxyReplacement=true",
 		"k8sServiceHost=" + apiHost,
 		fmt.Sprintf("k8sServicePort=%d", apiPort),

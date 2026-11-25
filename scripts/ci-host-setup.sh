@@ -22,4 +22,6 @@ sudo TALOS_VERSIONS="$TALOS_VERSIONS" ./scripts/host-setup.sh
 if sudo iptables -nL DOCKER-USER >/dev/null 2>&1; then
   sudo iptables -I DOCKER-USER -i nkbr0 -j ACCEPT
   sudo iptables -I DOCKER-USER -o nkbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+  # niwakubed の転送 (DNAT) で LAN から入ってくる接続も通す
+  sudo iptables -I DOCKER-USER -o nkbr0 -m conntrack --ctstate DNAT -j ACCEPT
 fi

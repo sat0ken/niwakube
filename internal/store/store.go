@@ -55,6 +55,16 @@ CREATE TABLE IF NOT EXISTS machines (
 	created_at    TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS forwards (
+	proto       TEXT NOT NULL,
+	host_port   INTEGER NOT NULL,
+	cluster     TEXT NOT NULL,
+	target_ip   TEXT NOT NULL,
+	target_port INTEGER NOT NULL,
+	created_at  TEXT NOT NULL,
+	PRIMARY KEY (proto, host_port)
+);
+
 CREATE TABLE IF NOT EXISTS clusters (
 	name          TEXT PRIMARY KEY,
 	distro        TEXT NOT NULL,

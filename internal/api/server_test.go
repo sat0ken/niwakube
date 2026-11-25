@@ -150,6 +150,12 @@ func TestClusterAPI(t *testing.T) {
 		{http.MethodPost, "/demo/start", "", http.StatusOK},
 		{http.MethodGet, "/nope/kubeconfig", "", http.StatusNotFound},
 		{http.MethodGet, "/demo/talosconfig", "", http.StatusNotImplemented},
+		{http.MethodPost, "/demo/forwards", `{"hostPort":18080,"ip":"172.30.1.100","port":8080}`, http.StatusCreated},
+		{http.MethodPost, "/demo/forwards", `{"hostPort":18080,"ip":"172.30.1.100","port":8080}`, http.StatusConflict},
+		{http.MethodPost, "/demo/forwards", `{"hostPort":18081,"ip":"10.0.0.1","port":8080}`, http.StatusBadRequest},
+		{http.MethodGet, "/demo/forwards", "", http.StatusOK},
+		{http.MethodDelete, "/demo/forwards/tcp/18080", "", http.StatusNoContent},
+		{http.MethodDelete, "/demo/forwards/tcp/18080", "", http.StatusNotFound},
 	}
 	for _, c := range cases {
 		resp, body := do(t, c.method, base+c.path, c.body)

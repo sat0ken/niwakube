@@ -251,6 +251,10 @@ func ciliumInstallManifest(a distro.Addons) string {
 		"--set", "cgroup.hostRoot=/sys/fs/cgroup",
 		"--set", "k8sServiceHost=localhost",
 		"--set", "k8sServicePort=7445",
+		"--set", "l2announcements.enabled=true",
+		"--set", "externalIPs.enabled=true",
+		"--set", "k8sClientRateLimit.qps=50",
+		"--set", "k8sClientRateLimit.burst=100",
 	}
 	if a.Hubble {
 		args = append(args, "--set", "hubble.relay.enabled=true", "--set", "hubble.ui.enabled=true")

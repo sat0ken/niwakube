@@ -50,6 +50,9 @@ func New(svc *machine.Service, clusters *cluster.Service, log *slog.Logger) *Ser
 //	POST   /api/clusters/{name}/stop
 //	GET    /api/clusters/{name}/kubeconfig
 //	GET    /api/clusters/{name}/talosconfig  Talos のみ
+//	GET    /api/clusters/{name}/forwards     ホストのポートからクラスタへの転送の一覧
+//	POST   /api/clusters/{name}/forwards     {"hostPort":8080,"ip":"172.30.1.100","port":80}
+//	DELETE /api/clusters/{name}/forwards/{proto}/{port}
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -80,6 +83,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/clusters/{name}/stop", s.stopCluster)
 	mux.HandleFunc("GET /api/clusters/{name}/kubeconfig", s.kubeconfig)
 	mux.HandleFunc("GET /api/clusters/{name}/talosconfig", s.clientConfig)
+	mux.HandleFunc("GET /api/clusters/{name}/forwards", s.listForwards)
+	mux.HandleFunc("POST /api/clusters/{name}/forwards", s.addForward)
+	mux.HandleFunc("DELETE /api/clusters/{name}/forwards/{proto}/{port}", s.deleteForward)
 	return s.logging(mux)
 }
 
@@ -253,6 +259,41 @@ func (s *Server) clientConfig(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/yaml")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 	_, _ = w.Write(b)
+}
+
+func (s *Server) listForwards(w http.ResponseWriter, r *http.Request) {
+	fs, err := s.clusters.ListForwards(r.Context(), r.PathValue("name"))
+	if err != nil {
+		s.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, fs)
+}
+
+func (s *Server) addForward(w http.ResponseWriter, r *http.Request) {
+	var req cluster.ForwardRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	f, err := s.clusters.AddForward(r.Context(), r.PathValue("name"), req)
+	if err != nil {
+		s.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, f)
+}
+
+func (s *Server) deleteForward(w http.ResponseWriter, r *http.Request) {
+	port, err := strconv.Atoi(r.PathValue("port"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody{Error: "invalid port"})
+		return
+	}
+	if err := s.clusters.DeleteForward(r.Context(), r.PathValue("name"), r.PathValue("proto"), port); err != nil {
+		s.writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 type errorBody struct {
