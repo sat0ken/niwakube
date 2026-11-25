@@ -19,11 +19,12 @@ network:
   dns: [192.168.1.1]
 
 storage:
-  disk: largest                 # 一番大きいディスク。無人インストールでは {model: "..."} か {serial: "..."} が必須
+  disk:                         # 無人インストールでは {model: "..."} か {serial: "..."} が必須
+    model: "860 EVO"            # Samsung SSD 860 EVO (SATA)。前後を * にして照合する
   root_size: 50G                # 残りはすべて /var/lib/niwakube (XFS)
 
 install:
-  mode: confirm                 # confirm: 消去の前に確認する / unattended: 確認なし (GRUB の既定の項目)
+  mode: unattended              # confirm: 消去の前に確認する / unattended: 確認なし (GRUB の既定の項目)
   after: poweroff               # インストール後は電源を切る (USB を抜いてから起動する)
 
 niwakube:
