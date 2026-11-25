@@ -8,6 +8,7 @@ package k3s
 import (
 	"fmt"
 	"regexp"
+	"slices"
 
 	"gopkg.in/yaml.v3"
 
@@ -17,7 +18,24 @@ import (
 
 const Name = "k3s"
 
-const tlsDir = "/var/lib/rancher/k3s/server/tls"
+const (
+	tlsDir         = "/var/lib/rancher/k3s/server/tls"
+	manifestsDir   = "/var/lib/rancher/k3s/server/manifests"
+	containerdTmpl = "/var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.tmpl"
+	runtimeScript  = "/usr/local/sbin/niwakube-install-runtimes.sh"
+	ciliumScript   = "/usr/local/sbin/niwakube-install-cilium.sh"
+)
+
+// youkiTemplate は k3s の containerd 設定テンプレート。k3s の既定 ("base") に youki を足す。
+const youkiTemplate = `{{ template "base" . }}
+
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.youki]
+  runtime_type = "io.containerd.runc.v2"
+
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.youki.options]
+  BinaryName = "/usr/local/bin/youki"
+  SystemdCgroup = {{ .SystemdCgroup }}
+`
 
 // k3s がカスタム CA として読むファイル (Secrets.CAs のキー → tlsDir からの相対パス)
 var caFiles = map[string]string{
@@ -77,11 +95,28 @@ func (k K3s) UserData(c *distro.Cluster, n *distro.Node) (map[string]any, error)
 	if c.Secrets == nil || c.Secrets.Token == "" {
 		return nil, fmt.Errorf("cluster %s has no secrets", c.Name)
 	}
+	if err := c.Addons.Validate(); err != nil {
+		return nil, err
+	}
 	cfg := map[string]any{
 		"token":   c.Secrets.Token,
 		"node-ip": n.IP.String(),
 	}
+	if rt := c.Addons.DefaultRuntime; rt != "" && rt != distro.RuntimeRunc {
+		cfg["default-runtime"] = rt
+	}
 	var files []writeFile
+	var runcmd []any
+	if len(c.Addons.Runtimes) > 0 {
+		// k3s を起動する前に入れておく (crun は k3s が自動で検出する)
+		files = append(files, writeFile{Path: runtimeScript, Permissions: "0755", Content: c.Addons.RuntimeInstallScript()})
+		runcmd = append(runcmd, []string{"/bin/bash", runtimeScript})
+	}
+	if slices.Contains(c.Addons.Runtimes, distro.RuntimeYouki) {
+		// youki は k3s が検出しないので、containerd の設定テンプレートで足す
+		files = append(files, writeFile{Path: containerdTmpl, Permissions: "0644", Content: youkiTemplate})
+	}
+	var after []any // k3s のインストール後に CP で実行するもの
 	subcommand := "server"
 	switch n.Role {
 	case distro.RoleControlPlane:
@@ -101,6 +136,19 @@ func (k K3s) UserData(c *distro.Cluster, n *distro.Node) (map[string]any, error)
 			)
 		}
 		files = append(files, writeFile{Path: tlsDir + "/service.key", Permissions: "0600", Content: c.Secrets.ServiceAccountKey})
+		if len(c.Addons.Runtimes) > 0 {
+			// server/manifests に置いたマニフェストは k3s が自動で適用する
+			files = append(files, writeFile{Path: manifestsDir + "/niwakube-runtimeclasses.yaml", Permissions: "0600", Content: c.Addons.RuntimeClassManifest()})
+		}
+		if c.Addons.CNI == distro.CNICilium {
+			// flannel と kube-proxy を止めて Cilium を入れる
+			cfg["flannel-backend"] = "none"
+			cfg["disable-network-policy"] = true
+			cfg["disable-kube-proxy"] = true
+			files = append(files, writeFile{Path: ciliumScript, Permissions: "0755",
+				Content: c.Addons.CiliumInstallScript("/etc/rancher/k3s/k3s.yaml", c.APIAddr.String(), k.APIPort())})
+			after = append(after, []string{"/bin/bash", ciliumScript})
+		}
 	case distro.RoleWorker:
 		subcommand = "agent"
 		cfg["server"] = fmt.Sprintf("https://%s:%d", c.APIAddr, k.APIPort())
@@ -123,8 +171,10 @@ func (k K3s) UserData(c *distro.Cluster, n *distro.Node) (map[string]any, error)
 	}
 	install := fmt.Sprintf("curl -sfL https://get.k3s.io | %s sh -s - %s", env, subcommand)
 
+	runcmd = append(runcmd, []string{"sh", "-c", install})
+	runcmd = append(runcmd, after...)
 	return map[string]any{
 		"write_files": files,
-		"runcmd":      []any{[]string{"sh", "-c", install}},
+		"runcmd":      runcmd,
 	}, nil
 }

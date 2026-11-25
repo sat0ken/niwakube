@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net/netip"
 	"regexp"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -34,7 +35,34 @@ const (
 )
 
 type Config struct {
-	Subnet netip.Prefix // VM のサブネット。/16 であること (例: 172.30.0.0/16)
+	Subnet   netip.Prefix // VM のサブネット。/16 であること (例: 172.30.0.0/16)
+	Defaults Defaults     // リクエストで省略したときの CNI とランタイム
+}
+
+// Defaults はクラスタを作るときの既定値 (niwakubed の起動オプションで変えられる)。
+type Defaults struct {
+	CNI     string        `json:"cni"`    // 空なら cilium
+	Hubble  bool          `json:"hubble"` // 参考情報 (CNI が cilium なら true)
+	Runtime store.Runtime `json:"runtime"`
+}
+
+func (d Defaults) withFallback() Defaults {
+	if d.CNI == "" {
+		d.CNI = distro.CNICilium
+	}
+	d.Hubble = d.CNI == distro.CNICilium
+	if d.Runtime.Default == "" {
+		d.Runtime.Default = distro.RuntimeRunc
+	}
+	if d.Runtime.Default != distro.RuntimeRunc && !slices.Contains(d.Runtime.Install, d.Runtime.Default) {
+		d.Runtime.Install = append(d.Runtime.Install, d.Runtime.Default)
+	}
+	if d.Runtime.Install == nil {
+		d.Runtime.Install = []string{}
+	}
+	slices.Sort(d.Runtime.Install)
+	d.Runtime.Install = slices.Compact(d.Runtime.Install)
+	return d
 }
 
 type Service struct {
@@ -54,6 +82,10 @@ type Service struct {
 func NewService(cfg Config, st *store.Store, ms *machine.Service, prober Prober, log *slog.Logger, distros ...distro.Distro) (*Service, error) {
 	if cfg.Subnet.Bits() != 16 || !cfg.Subnet.Addr().Is4() {
 		return nil, fmt.Errorf("cluster subnet must be an IPv4 /16: %s", cfg.Subnet)
+	}
+	cfg.Defaults = cfg.Defaults.withFallback()
+	if err := addonsOf(cfg.Defaults.CNI, cfg.Defaults.Hubble, cfg.Defaults.Runtime).Validate(); err != nil {
+		return nil, fmt.Errorf("invalid cluster defaults: %w", err)
 	}
 	if len(distros) == 0 {
 		return nil, errors.New("at least one distro is required")
@@ -102,6 +134,9 @@ type CreateRequest struct {
 	ControlPlane      store.NodeSize `json:"controlPlane,omitempty"`
 	Worker            store.NodeSize `json:"worker,omitempty"`
 	SSHAuthorizedKeys []string       `json:"sshAuthorizedKeys,omitempty"`
+	CNI               string         `json:"cni,omitempty"`    // cilium (既定) | flannel
+	Hubble            *bool          `json:"hubble,omitempty"` // 既定は Cilium なら true
+	Runtime           store.Runtime  `json:"runtime,omitempty"`
 }
 
 // Status はクラスタの現在の状態。
@@ -123,6 +158,9 @@ type Cluster struct {
 	Workers       int                `json:"workers"`
 	ControlPlane  store.NodeSize     `json:"controlPlane"`
 	Worker        store.NodeSize     `json:"worker"`
+	CNI           string             `json:"cni"`
+	Hubble        bool               `json:"hubble"`
+	Runtime       store.Runtime      `json:"runtime"`
 	Subnet        string             `json:"subnet"`
 	Endpoint      string             `json:"endpoint"`
 	DesiredState  string             `json:"desiredState"`
@@ -189,6 +227,36 @@ func (s *Service) normalize(req *CreateRequest) (distro.Distro, error) {
 	}
 	defaultSize(&req.ControlPlane)
 	defaultSize(&req.Worker)
+
+	def := s.cfg.Defaults
+	if req.CNI == "" {
+		req.CNI = def.CNI
+	}
+	if req.Hubble == nil {
+		h := req.CNI == distro.CNICilium
+		req.Hubble = &h
+	}
+	// ランタイムを何も指定しなければ niwakubed の既定を使う。default だけ指定した場合は追加のランタイムは入れない
+	if req.Runtime.Default == "" && req.Runtime.Install == nil {
+		req.Runtime = store.Runtime{Default: def.Runtime.Default, Install: slices.Clone(def.Runtime.Install)}
+	}
+	if req.Runtime.Default == "" {
+		req.Runtime.Default = def.Runtime.Default
+	}
+	// 既定にしたランタイムは自動で入れる
+	if req.Runtime.Default != distro.RuntimeRunc && !slices.Contains(req.Runtime.Install, req.Runtime.Default) {
+		req.Runtime.Install = append(req.Runtime.Install, req.Runtime.Default)
+	}
+	slices.Sort(req.Runtime.Install)
+	req.Runtime.Install = slices.Compact(req.Runtime.Install)
+	addons := addonsOf(req.CNI, *req.Hubble, req.Runtime)
+	if err := addons.Validate(); err != nil {
+		return nil, invalid("%v", err)
+	}
+	// Cilium の eBPF はホストのカーネルを共有するコンテナ型では他のクラスタとぶつかるので、VM 型に限る
+	if req.CNI == distro.CNICilium && !caps.OwnKernel {
+		return nil, invalid("cni cilium needs a backend with its own kernel; use cni: flannel with backend %s", name)
+	}
 	return d, nil
 }
 
@@ -251,6 +319,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (*Cluster, erro
 			Version: req.Version, Backend: req.Backend, Image: d.Image(),
 			ControlPlanes: req.ControlPlanes, Workers: *req.Workers,
 			ControlPlane: req.ControlPlane, Worker: req.Worker, SSHKeys: req.SSHAuthorizedKeys,
+			CNI: req.CNI, Hubble: *req.Hubble, Runtime: req.Runtime,
 		},
 		Secrets: rawSecrets, DesiredState: machine.DesiredRunning, CreatedAt: time.Now(),
 	}
@@ -270,6 +339,7 @@ func (s *Service) createNodes(ctx context.Context, d distro.Distro, rec *store.C
 	dc := &distro.Cluster{
 		Name: rec.Name, Version: rec.Spec.Version, Secrets: secrets,
 		APIAddr: s.hostIP(rec.Index, cpHostBase+1),
+		Addons:  addonsOf(cniOf(rec), rec.Spec.Hubble, rec.Spec.Runtime),
 	}
 	type node struct {
 		n    distro.Node
@@ -348,6 +418,7 @@ func (s *Service) view(ctx context.Context, rec *store.Cluster) (*Cluster, error
 		Name: rec.Name, Distro: rec.Distro, Version: rec.Spec.Version, Backend: rec.Spec.Backend,
 		ControlPlanes: rec.Spec.ControlPlanes, Workers: rec.Spec.Workers,
 		ControlPlane: rec.Spec.ControlPlane, Worker: rec.Spec.Worker,
+		CNI: cniOf(rec), Hubble: rec.Spec.Hubble, Runtime: runtimeOf(rec),
 		Subnet: s.subnetOf(rec.Index).String(), Endpoint: s.endpoint(rec),
 		DesiredState: rec.DesiredState, Machines: ms, CreatedAt: rec.CreatedAt,
 	}
@@ -541,3 +612,30 @@ func (s *Service) setState(ctx context.Context, name, state string) (*Cluster, e
 	}
 	return s.view(ctx, rec)
 }
+
+func addonsOf(cni string, hubble bool, rt store.Runtime) distro.Addons {
+	def := rt.Default
+	if def == "" {
+		def = distro.RuntimeRunc
+	}
+	return distro.Addons{CNI: cni, Hubble: hubble, DefaultRuntime: def, Runtimes: rt.Install}
+}
+
+// cniOf は CNI を返す。CNI を選べるようになる前に作ったクラスタは flannel。
+func cniOf(rec *store.Cluster) string {
+	if rec.Spec.CNI == "" {
+		return distro.CNIFlannel
+	}
+	return rec.Spec.CNI
+}
+
+func runtimeOf(rec *store.Cluster) store.Runtime {
+	rt := rec.Spec.Runtime
+	if rt.Default == "" {
+		rt.Default = distro.RuntimeRunc
+	}
+	return rt
+}
+
+// Defaults は、リクエストで省略したときに使う CNI とランタイムを返す。
+func (s *Service) Defaults() Defaults { return s.cfg.Defaults }

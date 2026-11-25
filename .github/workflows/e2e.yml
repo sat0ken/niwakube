@@ -40,13 +40,16 @@ jobs:
           path: e2e-logs/
 
   cluster:
-    name: Cluster (${{ matrix.distro }})
+    name: Cluster (${{ matrix.distro }}, ${{ matrix.cni }}, ${{ matrix.runtime }})
     runs-on: ubuntu-26.04
     timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
-        distro: [k3s, kubeadm]
+        include:
+          - { distro: k3s, cni: cilium, runtime: runc, runtimes: "crun youki" }
+          - { distro: kubeadm, cni: cilium, runtime: crun, runtimes: "crun youki" }
+          - { distro: k3s, cni: flannel, runtime: runc, runtimes: "" }
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
@@ -55,12 +58,12 @@ jobs:
       - name: Host setup
         run: ./scripts/ci-host-setup.sh
       - name: niwakubed E2E (cluster)
-        run: make e2e-cluster DISTRO=${{ matrix.distro }}
+        run: make e2e-cluster DISTRO=${{ matrix.distro }} CNI=${{ matrix.cni }} RUNTIME=${{ matrix.runtime }} RUNTIMES="${{ matrix.runtimes }}"
       - name: Collect logs
         if: failure()
         run: ./scripts/ci-collect-logs.sh
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: e2e-logs-${{ matrix.distro }}
+          name: e2e-logs-${{ matrix.distro }}-${{ matrix.cni }}-${{ matrix.runtime }}
           path: e2e-logs/

@@ -164,6 +164,10 @@ func TestClusterAPI(t *testing.T) {
 	if resp, _ := do(t, http.MethodGet, ts.URL+"/api/distros", ""); resp.StatusCode != http.StatusOK {
 		t.Errorf("distros: %d", resp.StatusCode)
 	}
+	if resp, body := do(t, http.MethodGet, ts.URL+"/api/cluster-defaults", ""); resp.StatusCode != http.StatusOK ||
+		!strings.Contains(body, `"cni":"cilium"`) || !strings.Contains(body, `"default":"runc"`) {
+		t.Errorf("cluster-defaults: %d %s", resp.StatusCode, body)
+	}
 	if resp, body := do(t, http.MethodDelete, base+"/demo", ""); resp.StatusCode != http.StatusNoContent {
 		t.Errorf("delete: %d %s", resp.StatusCode, body)
 	}

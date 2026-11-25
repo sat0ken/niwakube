@@ -16,7 +16,8 @@ func TestUserData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := &distro.Cluster{Name: "demo", Version: "v1.34.2+k3s1", APIAddr: netip.MustParseAddr("172.30.1.11"), Secrets: sec}
+	c := &distro.Cluster{Name: "demo", Version: "v1.34.2+k3s1", APIAddr: netip.MustParseAddr("172.30.1.11"), Secrets: sec,
+		Addons: distro.Addons{CNI: distro.CNIFlannel, DefaultRuntime: distro.RuntimeRunc}}
 
 	cp, err := k.UserData(c, &distro.Node{Name: "demo-cp-1", Role: distro.RoleControlPlane, Index: 1, IP: netip.MustParseAddr("172.30.1.11")})
 	if err != nil {
@@ -85,5 +86,63 @@ func TestValidateVersion(t *testing.T) {
 		if err := k.ValidateVersion(v); err == nil {
 			t.Errorf("%q should be invalid", v)
 		}
+	}
+}
+
+func TestUserDataCiliumAndRuntimes(t *testing.T) {
+	k := New()
+	sec, _ := k.GenerateSecrets("demo")
+	c := &distro.Cluster{Name: "demo", APIAddr: netip.MustParseAddr("172.30.1.11"), Secrets: sec,
+		Addons: distro.Addons{CNI: distro.CNICilium, Hubble: true, DefaultRuntime: distro.RuntimeYouki, Runtimes: []string{distro.RuntimeCrun, distro.RuntimeYouki}}}
+
+	cp, err := k.UserData(c, &distro.Node{Name: "demo-cp-1", Role: distro.RoleControlPlane, Index: 1, IP: netip.MustParseAddr("172.30.1.11")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs := map[string]writeFile{}
+	for _, f := range cp["write_files"].([]writeFile) {
+		fs[f.Path] = f
+	}
+	var cfg map[string]any
+	if err := yaml.Unmarshal([]byte(fs["/etc/rancher/k3s/config.yaml"].Content), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg["flannel-backend"] != "none" || cfg["disable-kube-proxy"] != true || cfg["disable-network-policy"] != true || cfg["default-runtime"] != "youki" {
+		t.Errorf("server config for cilium: %v", cfg)
+	}
+	if !strings.Contains(fs[containerdTmpl].Content, "runtimes.youki") || !strings.Contains(fs[containerdTmpl].Content, `{{ template "base" . }}`) {
+		t.Error("youki must be added through the containerd template")
+	}
+	if !strings.Contains(fs[manifestsDir+"/niwakube-runtimeclasses.yaml"].Content, "handler: youki") {
+		t.Error("RuntimeClasses must be deployed through the manifests directory")
+	}
+	if !strings.Contains(fs[ciliumScript].Content, "KUBECONFIG=/etc/rancher/k3s/k3s.yaml") {
+		t.Error("cilium script must use the k3s kubeconfig")
+	}
+	// 実行順: ランタイム → k3s → Cilium
+	var cmds []string
+	for _, c := range cp["runcmd"].([]any) {
+		cmds = append(cmds, strings.Join(c.([]string), " "))
+	}
+	if len(cmds) != 3 || !strings.Contains(cmds[0], runtimeScript) || !strings.Contains(cmds[1], "get.k3s.io") || !strings.Contains(cmds[2], ciliumScript) {
+		t.Errorf("runcmd order: %v", cmds)
+	}
+
+	// ワーカーにはランタイムと default-runtime は入るが、Cilium のインストールや flannel の設定は入らない
+	w, err := k.UserData(c, &distro.Node{Name: "demo-worker-1", Role: distro.RoleWorker, Index: 1, IP: netip.MustParseAddr("172.30.1.21")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wcfg map[string]any
+	for _, f := range w["write_files"].([]writeFile) {
+		if f.Path == "/etc/rancher/k3s/config.yaml" {
+			_ = yaml.Unmarshal([]byte(f.Content), &wcfg)
+		}
+		if f.Path == ciliumScript {
+			t.Error("worker must not install cilium")
+		}
+	}
+	if wcfg["default-runtime"] != "youki" || wcfg["flannel-backend"] != nil {
+		t.Errorf("agent config: %v", wcfg)
 	}
 }
