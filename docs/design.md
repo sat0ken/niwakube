@@ -128,8 +128,10 @@ GET    /api/host                     CPU / メモリ / ディスクの使用状�
 ## フェーズ
 
 0. ホストのセットアップと、VM を手で1台起動 (`scripts/host-setup.sh`、`scripts/test-vm.sh`)
-1. niwakubed: VM 単体の作成・削除 (CH クライアント、systemd、IPAM、SQLite) ← いまここ (実装済み・実機未検証)
+1. niwakubed: VM 単体の作成・削除 (CH クライアント、systemd、IPAM、SQLite) (完了)
 2. niwakubed: k3s クラスタの払い出し (一番単純なので最初に)。次に kubeadm、最後に Talos
+   - 2a: クラスタの仕組み + k3s (CP 1 台 + ワーカー N 台) ← いまここ
+   - 2b: kubeadm、2c: Talos、その後 CP の HA (VIP)、ワーカー数の変更
 3. systemd-nspawn バックエンド (Backend インターフェースが正しく切れているかの検証を兼ねる)
 4. Web UI
 5. 発展: Firecracker / libkrun バックエンド、シリアルコンソール、スケール、事前ビルドしたイメージ、LAN 公開 (DNAT)、スナップショット
@@ -145,3 +147,7 @@ GET    /api/host                     CPU / メモリ / ディスクの使用状�
 - nkbr0 + nftables の NAT で VM から外部に出られる
 - ACPI の電源ボタンで正常停止し、その後 vm.create からやり直して再起動できる
 - v55 からディスクに `image_type` の指定が必須 (指定しないと `Image type required for disk`)
+- k3s (v1.37.2+k3s1) が niwakubed の作ったカスタム CA で起動し、niwakubed が発行した admin 証明書で API を操作できる。
+  CP 1 + ワーカー 1 が約 40 秒で Ready になり、Service・クラスタ内 DNS・ノードをまたぐ Pod 間通信 (flannel VXLAN) も動く
+- Cloud Hypervisor の API サーバーは同時接続数に上限がある。keep-alive で接続を残すと約 40 秒で新しい接続が拒否されるため、
+  クライアントはリクエストごとに接続を閉じる

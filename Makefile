@@ -2,7 +2,7 @@ BIN := bin/niwakubed
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: build test vet install e2e
+.PHONY: build test vet install e2e e2e-cluster
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/niwakubed
@@ -22,3 +22,8 @@ install: build
 # 実機 (または KVM の使える CI) で niwakubed の API を通しで試す。host-setup.sh を済ませておくこと
 e2e: build
 	sudo ./scripts/e2e.sh $(BIN)
+
+# クラスタを作る E2E。DISTRO=k3s (既定)
+DISTRO ?= k3s
+e2e-cluster: build
+	sudo DISTRO=$(DISTRO) ./scripts/e2e-cluster.sh $(BIN)

@@ -23,6 +23,10 @@ func NewClient(socket string) *Client {
 			var d net.Dialer
 			return d.DialContext(ctx, "unix", socket)
 		},
+		// Cloud Hypervisor の API サーバーは同時に保持できる接続数に上限がある。
+		// keep-alive で接続を残すと、状態確認を繰り返すうちに上限に達して新しい接続が拒否される
+		// (k3s の E2E で 40 秒ほどで全 VM が "止まった" ように見えた原因)。リクエストごとに閉じる。
+		DisableKeepAlives: true,
 	}
 	return &Client{http: &http.Client{Transport: tr, Timeout: 30 * time.Second}}
 }

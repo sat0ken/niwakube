@@ -29,6 +29,7 @@ type fakeVMM struct {
 	state  string // "" (未作成) | Created | Running | Shutdown
 	calls  []string
 	closed bool
+	open   int // 開いている接続の数
 }
 
 func startFakeVMM(t *testing.T, sock string) *fakeVMM {
@@ -90,7 +91,16 @@ func startFakeVMM(t *testing.T, sock string) *fakeVMM {
 		w.WriteHeader(http.StatusNoContent)
 		go f.srv.Close()
 	})
-	f.srv = &http.Server{Handler: mux}
+	f.srv = &http.Server{Handler: mux, ConnState: func(_ net.Conn, st http.ConnState) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		switch st {
+		case http.StateNew:
+			f.open++
+		case http.StateClosed, http.StateHijacked:
+			f.open--
+		}
+	}}
 	go func() { _ = f.srv.Serve(ln) }()
 	t.Cleanup(func() { f.srv.Close() })
 	return f
@@ -203,6 +213,26 @@ func TestLifecycle(t *testing.T) {
 		cfg.Serial.Mode != "File" {
 		t.Errorf("unexpected vm config: %+v", cfg)
 	}
+	// 状態確認を何度繰り返しても接続がたまらない (CH の API サーバーには接続数の上限がある)
+	for range 50 {
+		if s, _ := b.Status(ctx, "vm1"); s.State != backend.StateRunning {
+			t.Fatalf("status = %+v", s)
+		}
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		vmm.mu.Lock()
+		open := vmm.open
+		vmm.mu.Unlock()
+		if open == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d connections to the VMM API are left open", open)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
 	// 2 回目の Start は何もしない
 	if err := b.Start(ctx, "vm1"); err != nil {
 		t.Fatal(err)

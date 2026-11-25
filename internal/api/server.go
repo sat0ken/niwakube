@@ -10,21 +10,23 @@ import (
 	"time"
 
 	"github.com/sat0ken/niwakube/internal/backend"
+	"github.com/sat0ken/niwakube/internal/cluster"
 	"github.com/sat0ken/niwakube/internal/ipam"
 	"github.com/sat0ken/niwakube/internal/machine"
 	"github.com/sat0ken/niwakube/internal/store"
 )
 
 type Server struct {
-	svc *machine.Service
-	log *slog.Logger
+	svc      *machine.Service
+	clusters *cluster.Service
+	log      *slog.Logger
 }
 
-func New(svc *machine.Service, log *slog.Logger) *Server {
+func New(svc *machine.Service, clusters *cluster.Service, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Server{svc: svc, log: log}
+	return &Server{svc: svc, clusters: clusters, log: log}
 }
 
 // Handler は API のルーティングを返す。
@@ -38,6 +40,14 @@ func New(svc *machine.Service, log *slog.Logger) *Server {
 //	POST   /api/vms/{name}/start
 //	POST   /api/vms/{name}/stop      ?force=true で強制停止
 //	GET    /api/vms/{name}/serial    ?bytes=N でシリアルログの末尾 N バイト (既定 64KiB)
+//	GET    /api/distros
+//	GET    /api/clusters
+//	POST   /api/clusters
+//	GET    /api/clusters/{name}
+//	DELETE /api/clusters/{name}
+//	POST   /api/clusters/{name}/start
+//	POST   /api/clusters/{name}/stop
+//	GET    /api/clusters/{name}/kubeconfig
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -53,6 +63,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/vms/{name}/start", s.startVM)
 	mux.HandleFunc("POST /api/vms/{name}/stop", s.stopVM)
 	mux.HandleFunc("GET /api/vms/{name}/serial", s.serialLog)
+
+	mux.HandleFunc("GET /api/distros", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, s.clusters.Distros())
+	})
+	mux.HandleFunc("GET /api/clusters", s.listClusters)
+	mux.HandleFunc("POST /api/clusters", s.createCluster)
+	mux.HandleFunc("GET /api/clusters/{name}", s.getCluster)
+	mux.HandleFunc("DELETE /api/clusters/{name}", s.deleteCluster)
+	mux.HandleFunc("POST /api/clusters/{name}/start", s.startCluster)
+	mux.HandleFunc("POST /api/clusters/{name}/stop", s.stopCluster)
+	mux.HandleFunc("GET /api/clusters/{name}/kubeconfig", s.kubeconfig)
 	return s.logging(mux)
 }
 
@@ -67,10 +88,7 @@ func (s *Server) listVMs(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) createVM(w http.ResponseWriter, r *http.Request) {
 	var req machine.CreateRequest
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody{Error: "invalid JSON: " + err.Error()})
+	if !decode(w, r, &req) {
 		return
 	}
 	vm, err := s.svc.Create(r.Context(), req)
@@ -141,6 +159,85 @@ func (s *Server) serialLog(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(b)
 }
 
+func decode(w http.ResponseWriter, r *http.Request, v any) bool {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody{Error: "invalid JSON: " + err.Error()})
+		return false
+	}
+	return true
+}
+
+func (s *Server) listClusters(w http.ResponseWriter, r *http.Request) {
+	cs, err := s.clusters.List(r.Context())
+	if err != nil {
+		s.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, cs)
+}
+
+func (s *Server) createCluster(w http.ResponseWriter, r *http.Request) {
+	var req cluster.CreateRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	c, err := s.clusters.Create(r.Context(), req)
+	if err != nil {
+		s.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, c)
+}
+
+func (s *Server) getCluster(w http.ResponseWriter, r *http.Request) {
+	c, err := s.clusters.Get(r.Context(), r.PathValue("name"))
+	if err != nil {
+		s.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, c)
+}
+
+func (s *Server) deleteCluster(w http.ResponseWriter, r *http.Request) {
+	if err := s.clusters.Delete(r.Context(), r.PathValue("name")); err != nil {
+		s.writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) startCluster(w http.ResponseWriter, r *http.Request) {
+	c, err := s.clusters.Start(r.Context(), r.PathValue("name"))
+	if err != nil {
+		s.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, c)
+}
+
+func (s *Server) stopCluster(w http.ResponseWriter, r *http.Request) {
+	c, err := s.clusters.Stop(r.Context(), r.PathValue("name"))
+	if err != nil {
+		s.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, c)
+}
+
+func (s *Server) kubeconfig(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	b, err := s.clusters.Kubeconfig(r.Context(), name)
+	if err != nil {
+		s.writeError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/yaml")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`.kubeconfig"`)
+	_, _ = w.Write(b)
+}
+
 type errorBody struct {
 	Error string           `json:"error"`
 	VM    *machine.Machine `json:"vm,omitempty"`
@@ -152,7 +249,8 @@ func statusFor(err error) int {
 		return http.StatusBadRequest
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, backend.ErrNotFound):
 		return http.StatusNotFound
-	case errors.Is(err, store.ErrExists), errors.Is(err, backend.ErrAlreadyExists), errors.Is(err, ipam.ErrExhausted):
+	case errors.Is(err, store.ErrExists), errors.Is(err, backend.ErrAlreadyExists), errors.Is(err, ipam.ErrExhausted),
+		errors.Is(err, machine.ErrPartOfCluster):
 		return http.StatusConflict
 	case errors.Is(err, backend.ErrNotSupported):
 		return http.StatusNotImplemented

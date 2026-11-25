@@ -31,6 +31,8 @@ type Machine struct {
 	MAC          string
 	SSHKeys      []string
 	DesiredState string // "running" | "stopped"
+	Cluster      string // 所属するクラスタ (単体の VM なら空)
+	Role         string // クラスタ内の役割 (control-plane / worker)
 	CreatedAt    time.Time
 }
 
@@ -52,7 +54,38 @@ CREATE TABLE IF NOT EXISTS machines (
 	desired_state TEXT NOT NULL,
 	created_at    TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS clusters (
+	name          TEXT PRIMARY KEY,
+	distro        TEXT NOT NULL,
+	idx           INTEGER NOT NULL UNIQUE,
+	spec          TEXT NOT NULL,
+	secrets       TEXT NOT NULL,
+	desired_state TEXT NOT NULL,
+	created_at    TEXT NOT NULL
+);
 `
+
+// migrations は既存の DB に後から足した列。列が無ければ追加する。
+var migrations = []struct{ table, column, ddl string }{
+	{"machines", "cluster", `ALTER TABLE machines ADD COLUMN cluster TEXT NOT NULL DEFAULT ''`},
+	{"machines", "role", `ALTER TABLE machines ADD COLUMN role TEXT NOT NULL DEFAULT ''`},
+}
+
+func migrate(db *sql.DB) error {
+	for _, m := range migrations {
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, m.table, m.column).Scan(&n); err != nil {
+			return err
+		}
+		if n == 0 {
+			if _, err := db.Exec(m.ddl); err != nil {
+				return fmt.Errorf("%s: %w", m.ddl, err)
+			}
+		}
+	}
+	return nil
+}
 
 // Open は path の SQLite を開き、スキーマを用意する。
 func Open(path string) (*Store, error) {
@@ -65,6 +98,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
+	if err := migrate(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
 	return &Store{db: db}, nil
 }
 
@@ -76,10 +113,10 @@ func (s *Store) InsertMachine(ctx context.Context, m *Machine) error {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO machines (name, backend, image, cpus, memory_mib, disk_gib, ip, mac, ssh_keys, desired_state, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO machines (name, backend, image, cpus, memory_mib, disk_gib, ip, mac, ssh_keys, desired_state, cluster, role, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.Name, m.Backend, m.Image, m.CPUs, m.MemoryMiB, m.DiskGiB, m.IP.String(), m.MAC, string(keys),
-		m.DesiredState, m.CreatedAt.UTC().Format(time.RFC3339Nano))
+		m.DesiredState, m.Cluster, m.Role, m.CreatedAt.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		// name / ip / mac のどれが重複しても ErrExists にする (どの制約が先に報告されるかは SQLite 次第)
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
@@ -90,14 +127,14 @@ func (s *Store) InsertMachine(ctx context.Context, m *Machine) error {
 	return nil
 }
 
-const selectMachine = `SELECT name, backend, image, cpus, memory_mib, disk_gib, ip, mac, ssh_keys, desired_state, created_at FROM machines`
+const selectMachine = `SELECT name, backend, image, cpus, memory_mib, disk_gib, ip, mac, ssh_keys, desired_state, cluster, role, created_at FROM machines`
 
 func scanMachine(row interface{ Scan(...any) error }) (*Machine, error) {
 	var (
 		m                 Machine
 		ip, keys, created string
 	)
-	if err := row.Scan(&m.Name, &m.Backend, &m.Image, &m.CPUs, &m.MemoryMiB, &m.DiskGiB, &ip, &m.MAC, &keys, &m.DesiredState, &created); err != nil {
+	if err := row.Scan(&m.Name, &m.Backend, &m.Image, &m.CPUs, &m.MemoryMiB, &m.DiskGiB, &ip, &m.MAC, &keys, &m.DesiredState, &m.Cluster, &m.Role, &created); err != nil {
 		return nil, err
 	}
 	var err error

@@ -18,6 +18,8 @@ import (
 
 	"github.com/sat0ken/niwakube/internal/api"
 	"github.com/sat0ken/niwakube/internal/backend/ch"
+	"github.com/sat0ken/niwakube/internal/cluster"
+	"github.com/sat0ken/niwakube/internal/distro/k3s"
 	"github.com/sat0ken/niwakube/internal/ipam"
 	"github.com/sat0ken/niwakube/internal/machine"
 	"github.com/sat0ken/niwakube/internal/store"
@@ -101,6 +103,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	clusters, err := cluster.NewService(cluster.Config{Subnet: cfg.Subnet}, st, svc, nil, log, k3s.New())
+	if err != nil {
+		return err
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -110,7 +116,7 @@ func run() error {
 
 	srv := &http.Server{
 		Addr:              *listen,
-		Handler:           api.New(svc, log).Handler(),
+		Handler:           api.New(svc, clusters, log).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	errCh := make(chan error, 1)
