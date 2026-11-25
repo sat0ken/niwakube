@@ -24,6 +24,7 @@ import (
 	"github.com/sat0ken/niwakube/internal/distro/talos"
 	"github.com/sat0ken/niwakube/internal/ipam"
 	"github.com/sat0ken/niwakube/internal/machine"
+	"github.com/sat0ken/niwakube/internal/netx"
 	"github.com/sat0ken/niwakube/internal/store"
 	"github.com/sat0ken/niwakube/internal/sys"
 )
@@ -109,7 +110,9 @@ func run() error {
 		return err
 	}
 	defaults := cluster.Defaults{CNI: *defCNI, Runtime: store.Runtime{Default: *defRT, Install: splitList(*defRTs)}}
-	clusters, err := cluster.NewService(cluster.Config{Subnet: cfg.Subnet, Defaults: defaults}, st, svc, nil, log, k3s.New(), kubeadm.New(), talos.New())
+	fwd := netx.Forwarder{Run: sys.ExecRunner{}, Bridge: *bridge, Dir: *runDir}
+	clusters, err := cluster.NewService(cluster.Config{Subnet: cfg.Subnet, Defaults: defaults, Forwarder: fwd},
+		st, svc, nil, log, k3s.New(), kubeadm.New(), talos.New())
 	if err != nil {
 		return err
 	}

@@ -134,7 +134,8 @@ GET    /api/host                     CPU / メモリ / ディスクの使用状�
    - 2a: クラスタの仕組み + k3s (CP 1 台 + ワーカー N 台) (完了)
    - 2b: kubeadm (完了)
    - 2b+: CNI の選択 (Cilium を既定、kube-proxy の置き換え、Hubble) とコンテナランタイムの選択 (runc / crun / youki) (完了)
-   - 2c: Talos ← いまここ
+   - 2c: Talos (完了)
+   - 2d: LoadBalancer (Cilium LB IPAM + L2 アナウンス、ホストでの DNAT) ← いまここ、次に PV (local-path + ホストの NFS)
    - その後 LoadBalancer (Cilium LB IPAM + L2 アナウンス、ホストでの DNAT)、PV (local-path + ホストの NFS)、
      CP の HA (VIP)、ワーカー数の変更
 3. systemd-nspawn バックエンド (Backend インターフェースが正しく切れているかの検証を兼ねる)
