@@ -49,6 +49,7 @@ func New(svc *machine.Service, clusters *cluster.Service, log *slog.Logger) *Ser
 //	POST   /api/clusters/{name}/start
 //	POST   /api/clusters/{name}/stop
 //	GET    /api/clusters/{name}/kubeconfig
+//	GET    /api/clusters/{name}/talosconfig  Talos のみ
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -78,6 +79,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/clusters/{name}/start", s.startCluster)
 	mux.HandleFunc("POST /api/clusters/{name}/stop", s.stopCluster)
 	mux.HandleFunc("GET /api/clusters/{name}/kubeconfig", s.kubeconfig)
+	mux.HandleFunc("GET /api/clusters/{name}/talosconfig", s.clientConfig)
 	return s.logging(mux)
 }
 
@@ -239,6 +241,17 @@ func (s *Server) kubeconfig(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/yaml")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`.kubeconfig"`)
+	_, _ = w.Write(b)
+}
+
+func (s *Server) clientConfig(w http.ResponseWriter, r *http.Request) {
+	filename, b, err := s.clusters.ClientConfig(r.Context(), r.PathValue("name"))
+	if err != nil {
+		s.writeError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/yaml")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 	_, _ = w.Write(b)
 }
 

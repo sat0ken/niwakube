@@ -56,7 +56,7 @@ func New() Kubeadm { return Kubeadm{} }
 func (Kubeadm) Name() string                      { return Name }
 func (Kubeadm) DefaultVersion() string            { return "stable" }
 func (Kubeadm) Requirements() distro.Requirements { return distro.Requirements{} }
-func (Kubeadm) Image() string                     { return "ubuntu-26.04" }
+func (Kubeadm) Image(string) string               { return "ubuntu-26.04" }
 func (Kubeadm) AdminCAs() (server, client string) { return "ca", "ca" }
 func (Kubeadm) APIPort() int                      { return apiPort }
 

@@ -248,7 +248,7 @@ sudo ./scripts/test-vm.sh down test
 
 ### 6.4 niwakubed のインストール
 
-ビルドには Go 1.26 以上が必要。snap で入れるのが簡単:
+ビルドには Go 1.26.5 以上が必要 (Talos の machinery ライブラリの要件)。snap で入れるのが簡単:
 
 ```bash
 sudo snap install go --classic

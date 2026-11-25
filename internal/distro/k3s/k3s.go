@@ -57,7 +57,7 @@ func New() K3s { return K3s{} }
 func (K3s) Name() string                      { return Name }
 func (K3s) DefaultVersion() string            { return "stable" }
 func (K3s) Requirements() distro.Requirements { return distro.Requirements{} }
-func (K3s) Image() string                     { return "ubuntu-26.04" }
+func (K3s) Image(string) string               { return "ubuntu-26.04" }
 func (K3s) AdminCAs() (server, client string) { return "server-ca", "client-ca" }
 func (K3s) APIPort() int                      { return 6443 }
 
