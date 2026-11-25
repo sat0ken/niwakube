@@ -14,6 +14,7 @@ import (
 	"github.com/sat0ken/niwakube/internal/backend"
 	"github.com/sat0ken/niwakube/internal/backend/fake"
 	"github.com/sat0ken/niwakube/internal/distro/k3s"
+	"github.com/sat0ken/niwakube/internal/distro/kubeadm"
 	"github.com/sat0ken/niwakube/internal/ipam"
 	"github.com/sat0ken/niwakube/internal/machine"
 	"github.com/sat0ken/niwakube/internal/pki"
@@ -52,7 +53,7 @@ func newTest(t *testing.T) (*Service, *machine.Service, *fake.Backend, *fakeProb
 		t.Fatal(err)
 	}
 	pr := &fakeProber{err: errors.New("connection refused")}
-	cs, err := NewService(Config{Subnet: netip.MustParsePrefix("172.30.0.0/16")}, st, ms, pr, nil, k3s.New())
+	cs, err := NewService(Config{Subnet: netip.MustParsePrefix("172.30.0.0/16")}, st, ms, pr, nil, k3s.New(), kubeadm.New())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,5 +220,45 @@ func TestKubeconfig(t *testing.T) {
 	}
 	if _, err := cs.Kubeconfig(ctx, "nope"); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("want ErrNotFound, got %v", err)
+	}
+}
+
+func TestKubeadmCluster(t *testing.T) {
+	ctx := context.Background()
+	cs, _, fb, _ := newTest(t)
+	one := 1
+	c, err := cs.Create(ctx, CreateRequest{Name: "kadm", Distro: "kubeadm", Version: "v1.37", Workers: &one})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Distro != "kubeadm" || c.Version != "v1.37" || len(c.Machines) != 2 {
+		t.Fatalf("unexpected cluster: %+v", c)
+	}
+	cp, _ := fb.Spec("kadm-cp-1")
+	if !strings.Contains(string(cp.Seed.UserData), "/etc/kubernetes/pki/ca.key") {
+		t.Error("CP must receive the kubeadm CA")
+	}
+	raw, err := cs.Kubeconfig(ctx, "kadm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// kubeconfig の CA は kubeadm の "ca" (クライアント証明書も同じ CA で署名される)
+	rec, _ := cs.store.GetCluster(ctx, "kadm")
+	sec, _, _ := cs.secrets(rec)
+	var kc struct {
+		Clusters []struct {
+			Cluster struct {
+				CA string `yaml:"certificate-authority-data"`
+			} `yaml:"cluster"`
+		} `yaml:"clusters"`
+	}
+	if err := yaml.Unmarshal(raw, &kc); err != nil {
+		t.Fatal(err)
+	}
+	if kc.Clusters[0].Cluster.CA != b64(sec.CAs["ca"].CertPEM) {
+		t.Error("kubeconfig must trust the kubeadm cluster CA")
+	}
+	if _, err := cs.Create(ctx, CreateRequest{Name: "bad", Distro: "kubeadm", Version: "v1.37.2+k3s1"}); !errors.Is(err, machine.ErrInvalid) {
+		t.Errorf("k3s style version must be rejected for kubeadm: %v", err)
 	}
 }

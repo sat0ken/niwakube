@@ -20,6 +20,7 @@ import (
 	"github.com/sat0ken/niwakube/internal/backend/ch"
 	"github.com/sat0ken/niwakube/internal/cluster"
 	"github.com/sat0ken/niwakube/internal/distro/k3s"
+	"github.com/sat0ken/niwakube/internal/distro/kubeadm"
 	"github.com/sat0ken/niwakube/internal/ipam"
 	"github.com/sat0ken/niwakube/internal/machine"
 	"github.com/sat0ken/niwakube/internal/store"
@@ -103,7 +104,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	clusters, err := cluster.NewService(cluster.Config{Subnet: cfg.Subnet}, st, svc, nil, log, k3s.New())
+	clusters, err := cluster.NewService(cluster.Config{Subnet: cfg.Subnet}, st, svc, nil, log, k3s.New(), kubeadm.New())
 	if err != nil {
 		return err
 	}
