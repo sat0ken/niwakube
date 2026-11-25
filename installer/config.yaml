@@ -14,9 +14,9 @@ user:
 
 # network を書かなければ DHCP
 network:
-  address: 192.168.1.50/24
-  gateway: 192.168.1.1
-  dns: [192.168.1.1]
+  address: 192.168.0.50/24
+  gateway: 192.168.0.1
+  dns: [192.168.0.1]
 
 storage:
   disk: internal                # 内蔵 (SATA / NVMe) のうち一番大きいディスク。USB のディスクは選ばない
