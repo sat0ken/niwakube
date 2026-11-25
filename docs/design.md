@@ -131,7 +131,7 @@ GET    /api/host                     CPU / メモリ / ディスクの使用状�
 2. niwakubed: k3s クラスタの払い出し (一番単純なので最初に)。次に kubeadm、最後に Talos
 3. systemd-nspawn バックエンド (Backend インターフェースが正しく切れているかの検証を兼ねる)
 4. Web UI
-5. 発展: Firecracker / libkrun バックエンド、 シリアルコンソール、スケール、事前ビルドしたイメージ、LAN 公開 (DNAT)、スナップショット
+5. 発展: Firecracker / libkrun バックエンド、シリアルコンソール、スケール、事前ビルドしたイメージ、LAN 公開 (DNAT)、スナップショット
 
 ## 未検証 (実機で確認すること)
 
