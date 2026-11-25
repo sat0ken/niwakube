@@ -54,6 +54,14 @@ cleanup() {
       echo "----- tail $f"
       tail -n 80 "$f"
     done
+    echo "----- machine status (niwakubed)"
+    jq -c '.machines[]? | {name, ip, status}' "$LOG_DIR/cluster.json" 2>/dev/null || true
+    echo "----- vm.info (直接)"
+    for sock in /run/niwakube/"$NAME"-*.sock; do
+      [[ -S $sock ]] || continue
+      printf '%s: ' "$sock"
+      curl -s --max-time 5 --unix-socket "$sock" http://localhost/api/v1/vm.info | jq -c '{state}' 2>&1 || echo "(failed)"
+    done
     echo "----- systemctl status niwakube-vm-*"
     systemctl status --no-pager -l 'niwakube-vm-*' 2>&1 | tail -n 60 || true
     echo "----- journalctl -u niwakube-vm-*"
