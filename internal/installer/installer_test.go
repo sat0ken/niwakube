@@ -378,3 +378,25 @@ func TestDiskInternal(t *testing.T) {
 		}
 	}
 }
+
+func TestNetworkIPv6Off(t *testing.T) {
+	c := parse(t, "hostname: h\nuser: {name: u, github_keys: u}\nnetwork: {address: 192.168.0.50/24, gateway: 192.168.0.1, dns: [1.1.1.1, 8.8.8.8], ipv6: false}\n")
+	ud, err := c.UserData()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"accept-ra: false", "- 1.1.1.1", "- 8.8.8.8", "dhcp4: false"} {
+		if !strings.Contains(string(ud), want) {
+			t.Errorf("user-data does not contain %q:\n%s", want, ud)
+		}
+	}
+	if !strings.Contains(c.Summary(), "DNS 1.1.1.1 8.8.8.8, IPv6 off") {
+		t.Errorf("summary:\n%s", c.Summary())
+	}
+	// 書かなければ RA を受け取る (既定)
+	c = parse(t, "hostname: h\nuser: {name: u, github_keys: u}\nnetwork: {address: 192.168.0.50/24, gateway: 192.168.0.1}\n")
+	ud, _ = c.UserData()
+	if strings.Contains(string(ud), "accept-ra") {
+		t.Errorf("accept-ra must not be set by default:\n%s", ud)
+	}
+}

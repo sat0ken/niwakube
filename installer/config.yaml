@@ -16,7 +16,8 @@ user:
 network:
   address: 192.168.0.50/24
   gateway: 192.168.0.1
-  dns: [192.168.0.1]
+  dns: [1.1.1.1, 8.8.8.8]       # ルーター (192.168.0.1) は DNS に答えないので、公開の DNS を使う
+  ipv6: false                   # ルーターが配る IPv6 (アドレスと DNS) を使わない (IPv6 の経路が通らないため)
 
 storage:
   disk: internal                # 内蔵 (SATA / NVMe) のうち一番大きいディスク。USB のディスクは選ばない

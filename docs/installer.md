@@ -61,7 +61,8 @@ niwakube:
 | `ubuntu.release` | `26.04` | Ubuntu のリリース。インストール時はその最新のポイントリリースを使う |
 | `user.name` | (必須) | ログインするユーザー。sudo はパスワードなしで使える |
 | `user.github_keys` / `user.ssh_authorized_keys` | どちらか必須 | **ログインは SSH 鍵のみ。パスワードはロックする** |
-| `network` | DHCP | 固定 IP にする場合に書く |
+| `network` | DHCP | 固定 IP にする場合に書く (`address` / `gateway` / `dns`)。`dns` はルーターが DNS に答えるか確かめてから書く (`dig @<ルーター> ubuntu.com`)。答えなければ `1.1.1.1` などを書く |
+| `network.ipv6` | `true` | `false` にするとルーターが配る IPv6 (RA のアドレスと DNS サーバー) を受け取らない。IPv6 の経路が通らない回線で、名前解決や接続が止まるのを防ぐ |
 | `storage.disk` | `largest` | インストール先。`largest` / `internal` / `{model: ...}` / `{serial: ...}` (下記) |
 | `storage.root_size` | `100G` | ルートの LV のサイズ。残りは `/var/lib/niwakube` (XFS) |
 | `install.mode` | `confirm` | GRUB の既定の項目 (下記) |

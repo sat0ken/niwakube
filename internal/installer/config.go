@@ -49,6 +49,9 @@ type Network struct {
 	Address string   `yaml:"address"` // 例: 192.168.1.50/24
 	Gateway string   `yaml:"gateway"`
 	DNS     []string `yaml:"dns"`
+	// IPv6 を false にすると、ルーターが配る IPv6 (RA のアドレスと DNS サーバー) を受け取らない。
+	// IPv6 の経路が使えない回線で、名前解決や接続が IPv6 に向かって止まるのを防ぐ (既定 true)
+	IPv6 *bool `yaml:"ipv6"`
 }
 
 // DiskMatch はインストール先のディスクの選び方。"largest"、"internal" か、モデル名 / シリアル番号。

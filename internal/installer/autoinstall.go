@@ -94,6 +94,9 @@ func (c *Config) netplan() map[string]any {
 		if len(n.DNS) > 0 {
 			eth["nameservers"] = map[string]any{"addresses": n.DNS}
 		}
+		if n.IPv6 != nil && !*n.IPv6 {
+			eth["accept-ra"] = false
+		}
 	}
 	return map[string]any{"version": 2, "ethernets": map[string]any{"lan": eth}}
 }
@@ -205,7 +208,11 @@ func (c *Config) Summary() string {
 	if c.Network == nil {
 		b.WriteString("network:  DHCP\n")
 	} else {
-		fmt.Fprintf(&b, "network:  %s via %s\n", c.Network.Address, c.Network.Gateway)
+		fmt.Fprintf(&b, "network:  %s via %s, DNS %s", c.Network.Address, c.Network.Gateway, strings.Join(c.Network.DNS, " "))
+		if c.Network.IPv6 != nil && !*c.Network.IPv6 {
+			b.WriteString(", IPv6 off")
+		}
+		b.WriteString("\n")
 	}
 	fmt.Fprintf(&b, "disk:     %s (root %s, 残りは /var/lib/niwakube)\n", c.Storage.Disk, c.Storage.RootSize)
 	fmt.Fprintf(&b, "install:  %s, %s after install\n", c.Install.Mode, c.Install.After)
