@@ -58,6 +58,8 @@ HOST_NAME=$(go run ./cmd/niwakube-iso get -config "$CONFIG" hostname)
 SETUP=$(go run ./cmd/niwakube-iso get -config "$CONFIG" niwakube.setup)
 
 qemu-img create -q -f qcow2 "$T/disk.qcow2" 60G
+# インストール先にしてはいけない、小さい SATA のディスク (disk: internal が一番大きい内蔵ディスクを選ぶことを確かめる)
+qemu-img create -q -f qcow2 "$T/decoy.qcow2" 20G
 cp "$OVMF_VARS" "$T/vars.fd"
 
 qemu() { # 追加の引数をそのまま渡す
@@ -66,6 +68,8 @@ qemu() { # 追加の引数をそのまま渡す
     -drive if=pflash,format=raw,unit=1,file="$T/vars.fd" \
     -drive if=none,id=disk0,file="$T/disk.qcow2",format=qcow2 \
     -device nvme,serial=$DISK_SERIAL,drive=disk0,bootindex=1 \
+    -drive if=none,id=decoy,file="$T/decoy.qcow2",format=qcow2 \
+    -device ide-hd,drive=decoy,bus=ide.0 \
     -netdev user,id=n0,hostfwd=tcp:127.0.0.1:$SSH_PORT-:22 -device virtio-net-pci,netdev=n0 \
     -display none -monitor none "$@"
 }
@@ -166,6 +170,8 @@ check "SSH のパスワード認証は無効" "passwordauthentication no" "$(ssh
 check "/var/lib/niwakube は XFS" "xfs" "$(ssh_vm 'findmnt -n -o FSTYPE /var/lib/niwakube')"
 check "ルートは LVM 上の ext4" "ext4" "$(ssh_vm 'findmnt -n -o FSTYPE /')"
 check "UEFI で起動している" "yes" "$(ssh_vm '[ -d /sys/firmware/efi ] && echo yes || echo no')"
+# 小さい SATA のディスク (sda) や USB ではなく、60G の NVMe に入っていること
+check "インストール先は NVMe" "nvme" "$(ssh_vm "sudo pvs --noheadings -o pv_name | tr -d ' ' | sed -E 's#^/dev/(nvme|sd).*#\\1#'")"
 if [[ $SETUP == true ]]; then
   if ! ssh_vm 'test -f /var/lib/niwakube/.firstboot-done'; then
     ssh_vm 'sudo tail -n 60 /var/log/niwakube-firstboot.log' || true

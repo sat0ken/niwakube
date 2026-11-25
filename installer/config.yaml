@@ -19,12 +19,13 @@ network:
   dns: [192.168.1.1]
 
 storage:
-  disk:                         # 無人インストールでは {model: "..."} か {serial: "..."} が必須
-    model: "Samsung SSD 860"    # lsblk の MODEL のとおり (SATA は 16 文字で切れるので "EVO" は入らない)
+  disk: internal                # 内蔵 (SATA / NVMe) のうち一番大きいディスク。USB のディスクは選ばない
+                                # 特定のディスクにするなら {model: "..."} か {serial: "..."} (lsblk の表示のとおり)
   root_size: 50G                # 残りはすべて /var/lib/niwakube (XFS)
 
 install:
   mode: unattended              # confirm: 消去の前に確認する / unattended: 確認なし (GRUB の既定の項目)
+                                # unattended + internal の USB は、起動した PC の内蔵ディスクを確認なしで消す
   after: poweroff               # インストール後は電源を切る (USB を抜いてから起動する)
   # Server ISO (約 3GB) を取るミラー。止まったら releases.ubuntu.com と交互に試す。中身は SHA256 で確かめる
   # 他の例: https://ftp.riken.jp/Linux/ubuntu-releases、https://ftp.yz.yamagata-u.ac.jp/pub/linux/ubuntu-releases

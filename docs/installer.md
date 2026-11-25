@@ -42,7 +42,7 @@ user:
 #   dns: [192.168.1.1]
 
 storage:
-  disk: largest                 # {model: "..."} か {serial: "..."} でも指定できる
+  disk: largest                 # internal / {model: "..."} / {serial: "..."} でも指定できる
   root_size: 100G               # 残りはすべて /var/lib/niwakube (XFS)
 
 install:
@@ -62,7 +62,7 @@ niwakube:
 | `user.name` | (必須) | ログインするユーザー。sudo はパスワードなしで使える |
 | `user.github_keys` / `user.ssh_authorized_keys` | どちらか必須 | **ログインは SSH 鍵のみ。パスワードはロックする** |
 | `network` | DHCP | 固定 IP にする場合に書く |
-| `storage.disk` | `largest` | インストール先。`largest` / `{model: ...}` / `{serial: ...}` |
+| `storage.disk` | `largest` | インストール先。`largest` / `internal` / `{model: ...}` / `{serial: ...}` (下記) |
 | `storage.root_size` | `100G` | ルートの LV のサイズ。残りは `/var/lib/niwakube` (XFS) |
 | `install.mode` | `confirm` | GRUB の既定の項目 (下記) |
 | `install.after` | `poweroff` | インストール後に電源を切るか再起動するか |
@@ -89,11 +89,21 @@ GRUB のメニューには次の項目が出る。
 | 項目 | 動き |
 |---|---|
 | install Ubuntu Server ... (asks before erasing the disk) | インストーラーが「Continue with autoinstall?」と聞くので `yes` と入力すると始まる |
-| UNATTENDED install - ERASES THE DISK ... | 確認なしで始まる。**`storage.disk` をモデル名かシリアル番号で指定したときだけ出る** |
+| UNATTENDED install - ERASES ... | 確認なしで始まる。**`storage.disk` が `internal` かモデル名 / シリアル番号のときだけ出る** |
 | Choose an Ubuntu version to install | 元の mini ISO のメニュー |
 
 `install.mode: unattended` にすると無人の項目が既定になり、USB を挿して電源を入れるだけでインストールが終わる。
-ほかの PC を誤って消さないよう、`unattended` はディスクの指定が必須。
+`unattended` では `storage.disk` を `largest` 以外にする (外付けの USB ディスクを消さないため)。
+
+| `storage.disk` | 選ばれるディスク |
+|---|---|
+| `largest` | 一番大きいディスク (USB のディスクも含む)。確認ありのインストール専用 |
+| `internal` | 内蔵の SATA / NVMe のうち一番大きいディスク。USB メモリや外付けの USB ディスクは選ばない。ディスクを交換しても設定を変えなくてよい |
+| `{model: ...}` / `{serial: ...}` | そのモデル名 / シリアル番号のディスク。そのディスクが無い PC では何も消さずに止まる |
+
+`internal` は udev の `ID_PATH` が `…-ata-…` (SATA) か `…-nvme-…` (NVMe) のディスクから、一番大きいものを選ぶ。
+**`unattended` + `internal` の USB は、どの PC で起動しても、その PC の内蔵ディスクを確認なしで消す**ので、
+インストールが終わったら USB を抜いておくこと。
 
 ディスクのモデル名とシリアル番号は、Ubuntu のライブ環境などで確認できる:
 

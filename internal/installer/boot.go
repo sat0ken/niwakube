@@ -116,11 +116,11 @@ func (c *Config) GrubConfig(iso ServerISO) ([]byte, error) {
 		{Title: fmt.Sprintf("niwakube: install Ubuntu Server %s on %s (asks before erasing the disk)", iso.Version, c.Hostname), Args: base},
 	}
 	def := 0
-	// 無人インストールの項目は、ディスクをモデル名かシリアル番号で指定したときだけ出す
-	// ("largest" のままだと、どの PC で起動しても一番大きいディスクを確認なしで消してしまうため)
+	// 無人インストールの項目は、ディスクを internal かモデル名 / シリアル番号で指定したときだけ出す
+	// ("largest" のままだと、どの PC で起動しても USB のディスクを含めて一番大きいディスクを確認なしで消してしまうため)
 	if !c.Storage.Disk.Largest {
 		entries = append(entries, grubEntry{
-			Title: fmt.Sprintf("niwakube: UNATTENDED install - ERASES THE DISK WITH %s WITHOUT ASKING", strings.ToUpper(c.Storage.Disk.String())),
+			Title: unattendedTitle(c.Storage.Disk),
 			Args:  base + " nk.autoinstall",
 		})
 		if c.Install.Mode == "unattended" {
@@ -180,4 +180,11 @@ func InitrdOverlay() ([]byte, error) {
 		buf.WriteByte(0)
 	}
 	return buf.Bytes(), nil
+}
+
+func unattendedTitle(d DiskMatch) string {
+	if d.Internal {
+		return "niwakube: UNATTENDED install - ERASES THE LARGEST INTERNAL DISK (SATA / NVMe) WITHOUT ASKING"
+	}
+	return fmt.Sprintf("niwakube: UNATTENDED install - ERASES THE DISK WITH %s WITHOUT ASKING", strings.ToUpper(d.String()))
 }

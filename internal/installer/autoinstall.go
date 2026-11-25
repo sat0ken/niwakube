@@ -107,6 +107,9 @@ func (c *Config) storage() map[string]any {
 		match["serial"] = diskGlob(d.Serial)
 	case d.Model != "":
 		match["model"] = diskGlob(d.Model)
+	case d.Internal:
+		match["id_path"] = internalIDPath
+		match["size"] = "largest"
 	default:
 		match["size"] = "largest"
 	}
@@ -126,6 +129,13 @@ func (c *Config) storage() map[string]any {
 	}
 	return map[string]any{"swap": map[string]any{"size": 0}, "config": cfg}
 }
+
+// internalIDPath は内蔵の SATA / NVMe のディスクに合う udev の ID_PATH のパターン。
+// 例: SATA "pci-0000:00:17.0-ata-1" (または ata-1.0)、NVMe "pci-0000:01:00.0-nvme-1"。
+// USB のディスクは "pci-0000:00:14.0-usb-0:1:1.0-scsi-0:0:0:0" なので合わない。
+// subiquity の照合 (fnmatch) には「または」が無いので、"-ata" と "-nvm" の両方に合う文字クラスにしている。
+// 起動に使った USB は、size を指定すると使用中のディスクとして外される。
+const internalIDPath = "*-[an][tv][am]*"
 
 // diskGlob は lsblk で見えるモデル名 / シリアル番号を、curtin の照合に使うパターンに変換する。
 // udev の値は lsblk の表示と違い、スペースが "_" になったり (ID_MODEL)、NVMe ではシリアルの前に

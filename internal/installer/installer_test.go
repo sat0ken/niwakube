@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -173,6 +174,7 @@ func TestValidate(t *testing.T) {
 	bad := map[string]string{
 		"no ssh key":           "hostname: h\nuser: {name: u}\n",
 		"bad hostname":         "hostname: Bad_Host\nuser: {name: u, github_keys: u}\n",
+		"bad disk word":        "hostname: h\nuser: {name: u, github_keys: u}\nstorage: {disk: external}\n",
 		"unattended + largest": "hostname: h\nuser: {name: u, github_keys: u}\ninstall: {mode: unattended}\n",
 		"model and serial":     "hostname: h\nuser: {name: u, github_keys: u}\nstorage: {disk: {model: a, serial: b}}\n",
 		"bad disk scalar":      "hostname: h\nuser: {name: u, github_keys: u}\nstorage: {disk: smallest}\n",
@@ -332,5 +334,47 @@ func TestCheckMirror(t *testing.T) {
 	}
 	if err := CheckMirror(ctx, ts.Client(), ts.URL+"/26.04/missing.iso", 1234); err == nil {
 		t.Error("404 must fail")
+	}
+}
+
+func TestDiskInternal(t *testing.T) {
+	c := parse(t, "hostname: h\nuser: {name: u, github_keys: u}\nstorage: {disk: internal}\ninstall: {mode: unattended}\n")
+	if !c.Storage.Disk.Internal || c.Storage.Disk.Largest {
+		t.Fatalf("disk = %+v", c.Storage.Disk)
+	}
+	ud, err := c.UserData()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(ud), "id_path: '*-[an][tv][am]*'") || !strings.Contains(string(ud), "size: largest") {
+		t.Errorf("match must select the largest SATA / NVMe disk:\n%s", ud)
+	}
+	g, err := c.GrubConfig(testISO)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(g), "ERASES THE LARGEST INTERNAL DISK (SATA / NVMe) WITHOUT ASKING") || !strings.Contains(string(g), "set default=1") {
+		t.Errorf("grub:\n%s", g)
+	}
+	// CI の VM でも internal のまま試す
+	c.ForTest()
+	if !c.Storage.Disk.Internal {
+		t.Errorf("ForTest must keep internal: %+v", c.Storage.Disk)
+	}
+
+	// subiquity は fnmatch で照合する。ID_PATH に "/" は入らないので path.Match と同じ結果になる
+	for idPath, want := range map[string]bool{
+		"pci-0000:00:17.0-ata-1":                    true,
+		"pci-0000:00:17.0-ata-1.0":                  true,
+		"pci-0000:01:00.0-nvme-1":                   true,
+		"pci-0000:00:14.0-usb-0:1:1.0-scsi-0:0:0:0": false,
+		"pci-0000:00:04.0":                          false,
+		"pci-0000:03:00.0-sas-phy0-lun-0":           false,
+		"pci-0000:00:12.0-mmc-0x1":                  false,
+	} {
+		got, err := path.Match(internalIDPath, idPath)
+		if err != nil || got != want {
+			t.Errorf("%s: match = %v (%v), want %v", idPath, got, err, want)
+		}
 	}
 }
