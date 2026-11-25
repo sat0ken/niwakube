@@ -30,10 +30,12 @@ import (
 	"github.com/siderolabs/talos/pkg/machinery/config/generate"
 	"github.com/siderolabs/talos/pkg/machinery/config/generate/secrets"
 	"github.com/siderolabs/talos/pkg/machinery/config/machine"
+	"github.com/siderolabs/talos/pkg/machinery/config/types/block"
 	"github.com/siderolabs/talos/pkg/machinery/config/types/k8s"
 	"github.com/siderolabs/talos/pkg/machinery/config/types/network"
 	"github.com/siderolabs/talos/pkg/machinery/config/types/v1alpha1"
 	"github.com/siderolabs/talos/pkg/machinery/constants"
+	blockres "github.com/siderolabs/talos/pkg/machinery/resources/block"
 	"github.com/siderolabs/talos/pkg/machinery/version"
 
 	"github.com/sat0ken/niwakube/internal/distro"
@@ -192,6 +194,13 @@ func customize(docs []configdoc.Document, c *distro.Cluster, n *distro.Node, con
 			h.ConfigHostname = n.Name
 		}
 	}
+	// local-path の保存先 (/var/mnt/local-path-provisioner) を Talos のユーザーボリューム (ディレクトリ) として作る。
+	// kubelet は /var/mnt を読み取り専用で見ているので、hostPath の DirectoryOrCreate では作れないため
+	uv := block.NewUserVolumeConfigV1Alpha1()
+	uv.MetaName = localPathVolume
+	vt := blockres.VolumeTypeDirectory
+	uv.VolumeType = &vt
+	docs = append(docs, uv)
 	if c.Addons.CNI != distro.CNICilium {
 		return docs, nil // flannel は Talos の既定のまま
 	}
@@ -371,4 +380,13 @@ func isAlreadyBootstrapped(err error) bool {
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "AlreadyExists") || strings.Contains(msg, "etcd data directory is not empty")
+}
+
+// localPathVolume は local-path 用のユーザーボリュームの名前 (/var/mnt/<名前> にできる)。
+const localPathVolume = "local-path-provisioner"
+
+// LocalStorage: 保存先は Talos のユーザーボリューム (/var/mnt/local-path-provisioner)。
+// Pod Security が既定で厳しいので Namespace を privileged にする。
+func (Talos) LocalStorage() distro.LocalStorage {
+	return distro.LocalStorage{Dir: constants.UserVolumeMountPoint + "/" + localPathVolume, PrivilegedNamespace: true}
 }

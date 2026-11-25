@@ -213,6 +213,30 @@ curl -s -X POST localhost:8080/api/clusters/demo/forwards -d '{"hostPort":8443,"
 転送はクラスタを消すと一緒に消え、niwakubed の起動時に設定し直される。ホストに Docker が入っていると
 FORWARD が DROP になるので、`DOCKER-USER` チェーンで `nkbr0` 向けの転送を許可すること。
 
+### PV (永続ボリューム)
+
+| StorageClass | 保存先 | 特徴 |
+|---|---|---|
+| `local-path` (既定) | ノードのディスク | k3s は組み込み、kubeadm / Talos は niwakubed が local-path-provisioner を入れる。ノードを消すとデータも消える |
+| `niwakube-nfs` | ホストの `/var/lib/niwakube/nfs/<クラスタ名>` | ホストの NFS サーバー + csi-driver-nfs。ノードを作り直してもデータが残り、`ReadWriteMany` も使える |
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data
+spec:
+  storageClassName: niwakube-nfs
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 1Gi
+```
+
+NFS サーバーは `host-setup.sh` が用意する (`/var/lib/niwakube/nfs` を `172.30.0.0/16` に公開)。PV ごとに
+`<namespace>-<PVC 名>-<PV 名>` のサブディレクトリができるので、ホストから中身を確認・バックアップできる。
+**クラスタを削除すると、そのクラスタの NFS のディレクトリも削除される。**
+
 ### 仕組み
 
 - クラスタ N には `172.30.N.0/24` を割り当てる。CP は `.11`、ワーカーは `.21` から順に使う (`.10` は将来の VIP 用)
