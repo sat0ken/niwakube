@@ -56,6 +56,13 @@ func startFakeVMM(t *testing.T, sock string) *fakeVMM {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		// v55 と同じく image_type の無いディスクは拒否する
+		for _, d := range cfg.Disks {
+			if d.ImageType == "" {
+				http.Error(w, "Image type required for disk", http.StatusBadRequest)
+				return
+			}
+		}
 		f.cfg, f.state = &cfg, "Created"
 		w.WriteHeader(http.StatusNoContent)
 	})

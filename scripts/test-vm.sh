@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016  # ssh_vm に渡すコマンドは VM 側で展開させるため
 # フェーズ0: Cloud Hypervisor で VM を 1 台手で起動して、
 # ファームウェア / cloud-init / ブリッジ / NAT が動くことを確認するスクリプト。
 # 後で Go のサーバーがやることを、そのまま shell で書いたもの。
@@ -8,7 +9,7 @@
 #   sudo ./scripts/test-vm.sh info test            # CH API (vm.info) を叩く
 #   sudo ./scripts/test-vm.sh down test            # 停止して後片付け
 #
-# 環境変数: IP (既定 172.30.0.10), CPUS (2), MEM (4G), DISK_SIZE (20G),
+# 環境変数: IP (既定 172.30.0.10), CPUS (2), MEM (4G), DISK_SIZE (20G), BOOT_TIMEOUT (180),
 #           BASE_IMAGE (既定 /var/lib/niwakube/images/ubuntu-26.04.raw)
 set -euo pipefail
 
@@ -19,6 +20,7 @@ PREFIX=${PREFIX:-16}
 IP=${IP:-172.30.0.10}
 CPUS=${CPUS:-2}
 MEM=${MEM:-4G}
+BOOT_TIMEOUT=${BOOT_TIMEOUT:-180} # SSH が通るまで待つ秒数
 DISK_SIZE=${DISK_SIZE:-20G}
 BASE_IMAGE=${BASE_IMAGE:-$NIWAKUBE_DIR/images/ubuntu-26.04.raw}
 FIRMWARE=$NIWAKUBE_DIR/firmware/CLOUDHV.fd
@@ -102,27 +104,28 @@ EOF
       --firmware "$FIRMWARE" \
       --cpus "boot=$CPUS" \
       --memory "size=$MEM" \
-      --disk "path=$VM_DIR/disk.raw" "path=$VM_DIR/seed.iso,readonly=on" \
+      --disk "path=$VM_DIR/disk.raw,image_type=raw" "path=$VM_DIR/seed.iso,readonly=on,image_type=raw" \
       --net "tap=$TAP,mac=$mac" \
       --serial "file=$VM_DIR/serial.log" \
       --console off
 
   log "SSH が通るまで待機 (シリアルログ: tail -f $VM_DIR/serial.log)"
-  for i in $(seq 1 90); do
+  local tries=$((BOOT_TIMEOUT / 2))
+  for i in $(seq 1 "$tries"); do
     if ssh_vm true 2>/dev/null; then break; fi
     systemctl is-active --quiet "$UNIT" || { journalctl -u "$UNIT" --no-pager | tail -20; die "VMM が終了しました"; }
-    [[ $i -eq 90 ]] && die "タイムアウト。シリアルログを確認してください"
+    [[ $i -eq $tries ]] && die "タイムアウト。シリアルログを確認してください"
     sleep 2
   done
 
   log "cloud-init の完了待ち"
-  ssh_vm 'cloud-init status --wait >/dev/null; cloud-init status'
+  # 終了コード: 0 = 成功, 1 = エラー, 2 = 警告つきで完了 (degraded)。1 だけを失敗にする
+  ssh_vm 'cloud-init status --wait >/dev/null; rc=$?; cloud-init status; [ $rc -ne 1 ]'
 
   log "VM からインターネットへの疎通 (NAT の確認)"
   ssh_vm 'curl -fsS -o /dev/null -w "    https://cloud-images.ubuntu.com -> HTTP %{http_code}\n" https://cloud-images.ubuntu.com/'
 
   log "VM の中から見たリソース"
-  # shellcheck disable=SC2016  # VM 側で展開させる
   ssh_vm 'echo "    vCPU: $(nproc)  MEM: $(free -h | awk "/Mem:/{print \$2}")  DISK: $(df -h / | awk "NR==2{print \$2}")"'
 
   log "OK! 'sudo $0 ssh $NAME' でログイン、'sudo $0 down $NAME' で削除"

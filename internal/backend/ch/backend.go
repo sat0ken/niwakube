@@ -139,8 +139,9 @@ func (b *Backend) Create(ctx context.Context, spec *backend.MachineSpec) (err er
 			Memory:  MemoryConfig{Size: int64(spec.MemoryMiB) << 20},
 			Payload: PayloadConfig{Firmware: b.cfg.Firmware},
 			Disks: []DiskConfig{
-				{Path: disk},
-				{Path: iso, Readonly: true},
+				{Path: disk, ImageType: "Raw"},
+				// seed.iso は ISO9660 だが、CH から見ればただのバイト列なので Raw として渡す
+				{Path: iso, Readonly: true, ImageType: "Raw"},
 			},
 			Net:     []NetConfig{{Tap: netx.TapName(spec.Name), Mac: spec.NIC.MAC}},
 			Rng:     &RngConfig{Src: "/dev/urandom"},

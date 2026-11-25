@@ -131,6 +131,8 @@ type PayloadConfig struct {
 type DiskConfig struct {
 	Path     string `json:"path"`
 	Readonly bool   `json:"readonly,omitempty"`
+	// ImageType は "Raw" | "Qcow2" | "Vhdx" | "FixedVhd" | "FlatVmdk"。v55 以降は必須。
+	ImageType string `json:"image_type,omitempty"`
 }
 
 type NetConfig struct {

@@ -1,5 +1,8 @@
 # niwakube
 
+[![CI](https://github.com/sat0ken/niwakube/actions/workflows/ci.yml/badge.svg)](https://github.com/sat0ken/niwakube/actions/workflows/ci.yml)
+[![E2E (KVM)](https://github.com/sat0ken/niwakube/actions/workflows/e2e.yml/badge.svg)](https://github.com/sat0ken/niwakube/actions/workflows/e2e.yml)
+
 niwa = 日本語の「庭」。自宅の庭で Kubernetes クラスタを育てる。
 
 Cloud Hypervisor などの仮想化／コンテナ基盤の上に Kubernetes クラスタ (kubeadm / k3s / Talos) を払い出す自宅ラボ用の仕組み。
@@ -88,3 +91,16 @@ curl -s -X DELETE localhost:8080/api/vms/vm1
   「起動しているはずの VM」を起動し直す
 - 状態は `/var/lib/niwakube/niwakube.db` (SQLite)、VM のファイルは `/var/lib/niwakube/vms/<name>/` にある
 - 動きを見るには `journalctl -u niwakubed -f`、VM のプロセスは `systemctl status niwakube-vm-<name>`
+
+## CI
+
+| ワークフロー | 内容 |
+|---|---|
+| `CI` (`.github/workflows/ci.yml`) | `go vet` / `gofmt` / `go test -race` / shellcheck、linux/amd64・arm64 のバイナリをビルドして Artifacts に保存。`v*` のタグを push すると Release を作ってバイナリと `SHA256SUMS` を添付する |
+| `E2E (KVM)` (`.github/workflows/e2e.yml`) | ランナーの `/dev/kvm` を使い (nested virtualization)、`host-setup.sh` → `test-vm.sh` → `scripts/e2e.sh` で実際に VM を作って API を一通り試す |
+
+E2E は実機でも同じスクリプトで試せる (`host-setup.sh` を済ませておくこと):
+
+```bash
+make e2e
+```
