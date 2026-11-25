@@ -48,7 +48,18 @@ cleanup() {
       ssh_to "$ip" 'sudo cat /var/log/cloud-init-output.log; sudo journalctl --no-pager -u "k3s*" | tail -300' \
         >"$LOG_DIR/$name-guest.log" 2>&1 || true
     done
-    tail -30 "$LOG_DIR/niwakubed-cluster.log" || true
+    # Artifacts を取れない環境でも原因が分かるように、要点をジョブのログにも出す
+    for f in "$LOG_DIR"/*-serial.log "$LOG_DIR"/*-guest.log; do
+      [[ -s $f ]] || continue
+      echo "----- tail $f"
+      tail -n 80 "$f"
+    done
+    echo "----- systemctl status niwakube-vm-*"
+    systemctl status --no-pager -l 'niwakube-vm-*' 2>&1 | tail -n 60 || true
+    echo "----- journalctl -u niwakube-vm-*"
+    journalctl --no-pager -u 'niwakube-vm-*' 2>&1 | tail -n 80 || true
+    echo "----- niwakubed"
+    grep -v 'msg=http ' "$LOG_DIR/niwakubed-cluster.log" | tail -n 40 || true
   fi
   if [[ ${KEEP:-} != 1 ]]; then
     curl -s -o /dev/null -X DELETE "$API/clusters/$NAME" || true
@@ -89,6 +100,7 @@ jq -c '{name, distro, version, subnet, endpoint, machines: [.machines[] | {name,
 log "準備完了を待つ (最大 ${CLUSTER_TIMEOUT}s)"
 start=$SECONDS
 last=""
+degraded_since=""
 while :; do
   st=$(curl -s "$API/clusters/$NAME" | jq -r '"\(.status.phase) \(.status.readyNodes)/\(.status.nodes) \(.status.message // "")"')
   if [[ $st != "$last" ]]; then
@@ -96,6 +108,13 @@ while :; do
     last=$st
   fi
   [[ $st == ready* ]] && break
+  # VM が止まった状態が続いたら、待たずに失敗にする
+  if [[ $st == degraded* ]]; then
+    degraded_since=${degraded_since:-$SECONDS}
+    (( SECONDS - degraded_since < 60 )) || die "VM が止まったままです: $st"
+  else
+    degraded_since=""
+  fi
   (( SECONDS - start < CLUSTER_TIMEOUT )) || die "${CLUSTER_TIMEOUT}s 待っても準備完了になりませんでした"
   sleep 5
 done
