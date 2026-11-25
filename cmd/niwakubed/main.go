@@ -24,6 +24,9 @@ import (
 	"github.com/sat0ken/niwakube/internal/sys"
 )
 
+// version はビルド時に -ldflags "-X main.version=..." で埋め込む。
+var version = "dev"
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "niwakubed:", err)
@@ -33,6 +36,7 @@ func main() {
 
 func run() error {
 	var (
+		showVer  = flag.Bool("version", false, "バージョンを表示して終了する")
 		listen   = flag.String("listen", "127.0.0.1:8080", "HTTP の待ち受けアドレス")
 		dataDir  = flag.String("data-dir", "/var/lib/niwakube", "データディレクトリ")
 		runDir   = flag.String("run-dir", "/run/niwakube", "API socket を置くディレクトリ")
@@ -45,6 +49,10 @@ func run() error {
 		sshKey   = flag.String("ssh-key", "", "全 VM に入れる公開鍵 (既定: <data-dir>/ssh/id_ed25519.pub)")
 	)
 	flag.Parse()
+	if *showVer {
+		fmt.Println(version)
+		return nil
+	}
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	if os.Geteuid() != 0 {
@@ -107,7 +115,7 @@ func run() error {
 	}
 	errCh := make(chan error, 1)
 	go func() {
-		log.Info("listening", "addr", *listen)
+		log.Info("listening", "addr", *listen, "version", version)
 		errCh <- srv.ListenAndServe()
 	}()
 

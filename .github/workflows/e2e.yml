@@ -1,0 +1,73 @@
+# GitHub Actions のランナー上で /dev/kvm を使い、実際に Cloud Hypervisor で VM を起動して確かめる。
+# ランナー自体が VM なので、その中でさらに VM を動かす nested virtualization になる。
+name: E2E (KVM)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kvm:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Enable KVM
+        run: |
+          # 一般ユーザーからも /dev/kvm を使えるようにする (GitHub が案内している udev ルール)
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          echo "--- runner"
+          lscpu | grep -E '^(Model name|CPU\(s\)|Virtualization|Hypervisor vendor)' || true
+          free -h
+          df -h /
+          echo "--- kvm"
+          ls -l /dev/kvm
+          grep -Ewc 'vmx|svm' /proc/cpuinfo
+
+      - name: Host setup
+        run: sudo ./scripts/host-setup.sh
+
+      - name: Let VM traffic through Docker's FORWARD policy
+        # ランナーには Docker が入っていて FORWARD が DROP になっているため、nkbr0 の転送を許可する
+        run: |
+          if sudo iptables -nL DOCKER-USER >/dev/null 2>&1; then
+            sudo iptables -I DOCKER-USER -i nkbr0 -j ACCEPT
+            sudo iptables -I DOCKER-USER -o nkbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+          fi
+
+      - name: Boot a VM with test-vm.sh
+        run: sudo MEM=2G BOOT_TIMEOUT=300 ./scripts/test-vm.sh up ci
+
+      - name: Delete the test VM
+        if: always()
+        run: sudo ./scripts/test-vm.sh down ci || true
+
+      - name: niwakubed E2E
+        run: make e2e
+
+      - name: Collect logs
+        if: failure()
+        run: |
+          mkdir -p e2e-logs
+          for f in /var/lib/niwakube/vms/*/serial.log; do
+            [ -f "$f" ] && sudo cp "$f" "e2e-logs/$(basename "$(dirname "$f")")-serial.log"
+          done
+          sudo journalctl --no-pager -u 'niwakube-vm-*' > e2e-logs/journal-vms.txt || true
+          sudo chown -R "$USER" e2e-logs
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: e2e-logs
+          path: e2e-logs/
