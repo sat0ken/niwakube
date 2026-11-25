@@ -53,6 +53,16 @@ func (c *Config) Build(ctx context.Context, r sys.Runner, o BuildOptions) error 
 	if err != nil {
 		return err
 	}
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return err
+	}
+	// カーネルは 4 バイト境界から始まる cpio しか cpio として読まない (ずれると圧縮データとみなして失敗する)。
+	// 元の initrd のサイズは境界に揃っていないので、ゼロで 512 バイト境界まで埋めてから足す (ゼロは読み飛ばされる)。
+	if pad := (512 - fi.Size()%512) % 512; pad > 0 {
+		overlay = append(make([]byte, pad), overlay...)
+	}
 	if _, err := f.Write(overlay); err != nil {
 		f.Close()
 		return err

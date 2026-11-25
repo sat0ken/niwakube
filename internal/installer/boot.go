@@ -35,7 +35,11 @@ type grubEntry struct {
 const grubTmpl = `# niwakube installer ({{.Hostname}}) - generated from installer/config.yaml
 set timeout={{.Timeout}}
 set default={{.Default}}
-
+{{if .Serial}}
+serial --unit=0 --speed=115200
+terminal_input console serial
+terminal_output console serial
+{{end}}
 loadfont unicode
 
 set menu_color_normal=white/black
@@ -58,6 +62,10 @@ func (c *Config) GrubConfig(iso ServerISO) ([]byte, error) {
 	for _, a := range c.Install.KernelArgs {
 		base += " nk." + a
 	}
+	if c.serialConsole {
+		// mini ISO のカーネル (1 段目・2 段目) の出力もシリアルに出す
+		base += " console=tty0 console=ttyS0,115200"
+	}
 	entries := []grubEntry{
 		{Title: fmt.Sprintf("niwakube: install Ubuntu Server %s on %s (asks before erasing the disk)", iso.Version, c.Hostname), Args: base},
 	}
@@ -76,7 +84,7 @@ func (c *Config) GrubConfig(iso ServerISO) ([]byte, error) {
 	entries = append(entries, grubEntry{Title: "Choose an Ubuntu version to install (original mini ISO menu)", Args: "iso-chooser-menu ip=dhcp"})
 	var buf bytes.Buffer
 	err := template.Must(template.New("").Parse(grubTmpl)).Execute(&buf, map[string]any{
-		"Hostname": c.Hostname, "Timeout": c.Install.Timeout, "Default": def, "Entries": entries,
+		"Hostname": c.Hostname, "Timeout": c.Install.Timeout, "Default": def, "Entries": entries, "Serial": c.serialConsole,
 	})
 	return buf.Bytes(), err
 }

@@ -79,15 +79,31 @@ qemu -device qemu-xhci \
 QEMU_PID=$!
 start=$SECONDS
 last=""
+last_size=0
+last_change=$SECONDS
 while kill -0 "$QEMU_PID" 2>/dev/null; do
   (( SECONDS - start < INSTALL_TIMEOUT )) || die "${INSTALL_TIMEOUT}s 待ってもインストールが終わりませんでした"
-  # 進み具合 (subiquity / curtin のログの最後の行) を 1 分ごとに表示する
-  line=$(sed 's/\x1b\[[0-9;?]*[A-Za-z]//g' "$T/install-serial.log" 2>/dev/null | grep -a -E 'subiquity|curtin|Downloading|checksum|autoinstall|finish' | tail -n1 | cut -c1-150 || true)
+  clean=$(sed 's/\x1b\[[0-9;?]*[A-Za-z]//g' "$T/install-serial.log" 2>/dev/null || true)
+  # mini ISO のスクリプトが失敗して debug shell で止まったら、待たずに失敗にする
+  if grep -a -q 'niwakube: ERROR' <<<"$clean"; then
+    sleep 5
+    die "mini ISO のスクリプトが失敗しました"
+  fi
+  # シリアルの出力が長く止まったら失敗にする
+  size=$(stat -c %s "$T/install-serial.log" 2>/dev/null || echo 0)
+  if (( size != last_size )); then
+    last_size=$size
+    last_change=$SECONDS
+  elif (( SECONDS - last_change > 900 )); then
+    die "15 分間シリアルコンソールの出力がありません"
+  fi
+  # 進み具合を 30 秒ごとに表示する
+  line=$(grep -a -v -E '^\s*$' <<<"$clean" | tail -n1 | tr -d '\r' | cut -c1-150 || true)
   if [[ -n $line && $line != "$last" ]]; then
     printf '    [%4ds] %s\n' $((SECONDS - start)) "$line"
     last=$line
   fi
-  sleep 60
+  sleep 30
 done
 wait "$QEMU_PID" || true
 QEMU_PID=""

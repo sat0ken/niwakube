@@ -30,6 +30,9 @@ type Config struct {
 	Niwakube NiwakubeSetup `yaml:"niwakube"`
 	// Autoinstall は生成した autoinstall の設定に深くマージして上書きする (上級者向け)。
 	Autoinstall map[string]any `yaml:"autoinstall"`
+
+	// serialConsole は CI のテスト用。GRUB と mini ISO のカーネルもシリアルに出力する。
+	serialConsole bool
 }
 
 type UbuntuConfig struct {
@@ -269,4 +272,5 @@ func (c *Config) ForTest() {
 	c.Install.After = "poweroff"
 	c.Install.Timeout = 3
 	c.Install.KernelArgs = append(c.Install.KernelArgs, "console=tty0", "console=ttyS0,115200")
+	c.serialConsole = true
 }

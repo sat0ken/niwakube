@@ -2,11 +2,16 @@ package installer
 
 import (
 	"bytes"
+	"context"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/sat0ken/niwakube/internal/sys"
 )
 
 const sample = `
@@ -237,5 +242,31 @@ func TestInitrdOverlay(t *testing.T) {
 	script := files["scripts/casper-premount/30mini-iso-menu"]
 	if !bytes.HasPrefix(script, []byte("#!/bin/sh")) || !bytes.Contains(script, []byte("niwakube-iso-url=")) {
 		t.Errorf("premount script not found in overlay: %v", len(files))
+	}
+}
+
+// TestBuildPadsInitrd は、元の initrd のサイズが 4 バイト境界に揃っていなくても、
+// 追加する cpio が 512 バイト境界から始まることを確かめる (揃っていないとカーネルが読めない)。
+func TestBuildPadsInitrd(t *testing.T) {
+	c := parse(t, "hostname: h\nuser: {name: u, github_keys: u}\n")
+	work := t.TempDir()
+	var initrd []byte
+	r := &sys.FakeRunner{Handler: func(name string, args []string) ([]byte, error) {
+		switch {
+		case name == "xorriso" && args[0] == "-osirrox":
+			return nil, os.WriteFile(args[len(args)-1], bytes.Repeat([]byte{0x28}, 1001), 0o444) // 4 の倍数でないサイズ
+		case name == "xorriso":
+			b, err := os.ReadFile(filepath.Join(work, "initrd"))
+			initrd = b
+			return nil, err
+		}
+		return nil, nil
+	}}
+	if err := c.Build(context.Background(), r, BuildOptions{MiniISO: "mini.iso", Server: testISO, Output: filepath.Join(work, "out.iso"), WorkDir: work}); err != nil {
+		t.Fatal(err)
+	}
+	i := bytes.Index(initrd, []byte("070701"))
+	if i != 1024 || !bytes.Equal(initrd[1001:1024], make([]byte, 23)) {
+		t.Errorf("overlay must start at a 512-byte boundary after zero padding: got offset %d", i)
 	}
 }

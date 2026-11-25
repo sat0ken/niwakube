@@ -27,7 +27,7 @@ is_casper_path() { return 0; }
 mountpoint=/cdrom
 
 debug_shell() {
-    echo "niwakube: $*"
+    echo "niwakube: ERROR: $*"
     echo "debug shell (exit で続行)"
     /bin/sh
 }
@@ -37,6 +37,7 @@ NK_URL=""
 NK_SIZE=""
 NK_SUM=""
 NK_ARGS=""
+CONSOLE_ARGS=""
 for x in $(cat /proc/cmdline); do
     case $x in
         iso-chooser-*)         MENU_STEP=$x ;;
@@ -48,10 +49,12 @@ for x in $(cat /proc/cmdline); do
         niwakube-iso-size=*)   NK_SIZE="${x#niwakube-iso-size=}" ;;
         niwakube-iso-256sum=*) NK_SUM="${x#niwakube-iso-256sum=}" ;;
         nk.*)                  NK_ARGS="$NK_ARGS $x" ;;
+        console=*)             CONSOLE_ARGS="$CONSOLE_ARGS $x" ;;
     esac
 done
 
 step1() {
+    echo "niwakube: step1 (url=$NK_URL)"
     if [ -n "$NK_URL" ]; then
         MEDIA_URL="$NK_URL"
         MEDIA_SIZE="$NK_SIZE"
@@ -81,7 +84,8 @@ step1() {
     if [ -n "$MEDIA_256SUM" ]; then
         cmdline="$cmdline iso-256sum=$MEDIA_256SUM"
     fi
-    cmdline="$cmdline iso-chooser-step2 memmap=$memmap_size nokaslr$NK_ARGS ---"
+    # console= は 2 段目にも引き継ぐ (シリアルコンソールでの調査用)
+    cmdline="$cmdline iso-chooser-step2 memmap=$memmap_size nokaslr$CONSOLE_ARGS$NK_ARGS ---"
 
     kexec --command-line="$cmdline" \
         --load "$mountpoint/casper/vmlinuz" \
@@ -90,6 +94,7 @@ step1() {
 }
 
 step2() {
+    echo "niwakube: step2"
     configure_networking
 
     target="/dev/pmem0"
