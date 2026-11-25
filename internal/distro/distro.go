@@ -87,3 +87,16 @@ type Bootstrapper interface {
 type ClientConfigProvider interface {
 	ClientConfig(c *Cluster) (filename string, data []byte, err error)
 }
+
+// LocalStorage はノードのディスクを使う PV (local-path) の設定。
+type LocalStorage struct {
+	Builtin             bool   // ディストリに組み込まれている (k3s)。niwakubed は入れない
+	Dir                 string // ノード上の保存先
+	PrivilegedNamespace bool   // local-path の Namespace を Pod Security の privileged にする (Talos)
+}
+
+// LocalStorageProvider は local-path の設定がディストリごとに違う場合に実装する。
+// 実装しなければ /opt/local-path-provisioner に niwakubed が入れる。
+type LocalStorageProvider interface {
+	LocalStorage() LocalStorage
+}

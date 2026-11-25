@@ -58,7 +58,7 @@ install_packages() {
   log "パッケージのインストール"
   apt-get update -qq
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-    qemu-utils cloud-image-utils nftables curl jq xz-utils iproute2 openssh-client netcat-openbsd
+    qemu-utils cloud-image-utils nftables curl jq xz-utils iproute2 openssh-client netcat-openbsd nfs-kernel-server
 }
 
 install_cloud_hypervisor() {
@@ -195,6 +195,17 @@ fetch_ubuntu_images() {
   done
 }
 
+setup_nfs() {
+  log "NFS サーバー ($NIWAKUBE_DIR/nfs を $VM_SUBNET に公開)"
+  # クラスタごとに $NIWAKUBE_DIR/nfs/<クラスタ名> を niwakubed が作り、csi-driver-nfs の StorageClass (niwakube-nfs) で使う
+  mkdir -p "$NIWAKUBE_DIR/nfs"
+  mkdir -p /etc/exports.d
+  echo "$NIWAKUBE_DIR/nfs $VM_SUBNET(rw,sync,no_subtree_check,no_root_squash)" >/etc/exports.d/niwakube.exports
+  systemctl enable --now nfs-server >/dev/null 2>&1
+  exportfs -ra
+  exportfs -v | grep -F "$NIWAKUBE_DIR/nfs" | sed 's/^/    /'
+}
+
 fetch_talos_images() {
   local ver raw url
   for ver in $TALOS_VERSIONS; do
@@ -219,5 +230,6 @@ setup_bridge
 setup_nat
 fetch_ubuntu_images
 fetch_talos_images
+setup_nfs
 
 log "完了。次は: sudo ./scripts/test-vm.sh up test"

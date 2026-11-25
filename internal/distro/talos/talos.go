@@ -372,3 +372,8 @@ func isAlreadyBootstrapped(err error) bool {
 	msg := err.Error()
 	return strings.Contains(msg, "AlreadyExists") || strings.Contains(msg, "etcd data directory is not empty")
 }
+
+// LocalStorage: Talos で書き込めるのは /var 以下。Pod Security が既定で厳しいので Namespace を privileged にする。
+func (Talos) LocalStorage() distro.LocalStorage {
+	return distro.LocalStorage{Dir: "/var/mnt/local-path-provisioner", PrivilegedNamespace: true}
+}

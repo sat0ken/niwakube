@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -531,5 +532,61 @@ func TestLoadBalancerAddons(t *testing.T) {
 	}
 	if c.LoadBalancerPool != "" || c.Addons != "" {
 		t.Errorf("flannel cluster: pool=%q addons=%q", c.LoadBalancerPool, c.Addons)
+	}
+}
+
+func TestStorageAddons(t *testing.T) {
+	ctx := context.Background()
+	cs, _, _, pr := newTest(t)
+	cs.postCreateInterval = 10 * time.Millisecond
+	root := t.TempDir()
+	cs.cfg.NFS = NFSConfig{Server: netip.MustParseAddr("172.30.0.1"), Root: root}
+	fa := &fakeApplier{}
+	cs.cfg.NewApplier = func([]byte) (Applier, error) { return fa, nil }
+	pr.mu.Lock()
+	pr.ready, pr.err = 1, nil
+	pr.mu.Unlock()
+
+	zero := 0
+	f := false
+	c, err := cs.Create(ctx, CreateRequest{Name: "st", Distro: "kubeadm", Workers: &zero, CNI: "flannel", Hubble: &f})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(c.StorageClasses, ",") != "local-path,niwakube-nfs" {
+		t.Errorf("storage classes: %v", c.StorageClasses)
+	}
+	if fi, err := os.Stat(filepath.Join(root, "st")); err != nil || !fi.IsDir() {
+		t.Fatalf("nfs dir not created: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for cs.addonStatus("st") != "applied" {
+		if time.Now().After(deadline) {
+			t.Fatalf("addons: %q", cs.addonStatus("st"))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	fa.mu.Lock()
+	all := strings.Join(fa.applied, "\n---\n")
+	fa.mu.Unlock()
+	if !strings.Contains(all, "local-path-provisioner") || !strings.Contains(all, "/opt/local-path-provisioner") ||
+		!strings.Contains(all, "name: niwakube-nfs") || !strings.Contains(all, filepath.Join(root, "st")) {
+		t.Errorf("kubeadm must get local-path and NFS:\n%.500s", all)
+	}
+	if strings.Contains(all, "CiliumLoadBalancerIPPool") {
+		t.Error("no LoadBalancer addon for flannel")
+	}
+
+	// k3s は local-path が組み込みなので入れない
+	if ms := cs.addonManifests(&store.Cluster{Name: "x", Distro: "k3s", Spec: store.ClusterSpec{CNI: "flannel"}}); len(ms) != 1 || ms[0].Name != "csi-driver-nfs" {
+		t.Errorf("k3s addons: %+v", ms)
+	}
+
+	// クラスタを消すと NFS のディレクトリも消える
+	if err := cs.Delete(ctx, "st"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "st")); !os.IsNotExist(err) {
+		t.Errorf("nfs dir must be removed: %v", err)
 	}
 }

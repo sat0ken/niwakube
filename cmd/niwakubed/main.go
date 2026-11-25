@@ -55,6 +55,7 @@ func run() error {
 		defCNI   = flag.String("default-cni", "cilium", "クラスタの既定の CNI (cilium | flannel)")
 		defRT    = flag.String("default-runtime", "runc", "クラスタの既定のコンテナランタイム (runc | crun | youki)")
 		defRTs   = flag.String("default-runtimes", "", "クラスタに既定で追加するランタイム (カンマ区切り。例: crun,youki)")
+		nfsRoot  = flag.String("nfs-root", "", "NFS で export しているディレクトリ (既定: <data-dir>/nfs。無ければ NFS の StorageClass は作らない)")
 	)
 	flag.Parse()
 	if *showVer {
@@ -111,7 +112,15 @@ func run() error {
 	}
 	defaults := cluster.Defaults{CNI: *defCNI, Runtime: store.Runtime{Default: *defRT, Install: splitList(*defRTs)}}
 	fwd := netx.Forwarder{Run: sys.ExecRunner{}, Bridge: *bridge, Dir: *runDir}
-	clusters, err := cluster.NewService(cluster.Config{Subnet: cfg.Subnet, Defaults: defaults, Forwarder: fwd},
+	nfs := cluster.NFSConfig{Server: cfg.Gateway, Root: *nfsRoot}
+	if nfs.Root == "" {
+		nfs.Root = filepath.Join(*dataDir, "nfs")
+	}
+	if fi, err := os.Stat(nfs.Root); err != nil || !fi.IsDir() {
+		log.Warn("NFS is disabled (run host-setup.sh to set up the NFS server)", "root", nfs.Root)
+		nfs.Root = ""
+	}
+	clusters, err := cluster.NewService(cluster.Config{Subnet: cfg.Subnet, Defaults: defaults, Forwarder: fwd, NFS: nfs},
 		st, svc, nil, log, k3s.New(), kubeadm.New(), talos.New())
 	if err != nil {
 		return err
