@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/sat0ken/niwakube/internal/backend/fake"
+	"github.com/sat0ken/niwakube/internal/cluster"
+	"github.com/sat0ken/niwakube/internal/distro/k3s"
 	"github.com/sat0ken/niwakube/internal/ipam"
 	"github.com/sat0ken/niwakube/internal/machine"
 	"github.com/sat0ken/niwakube/internal/store"
@@ -32,7 +34,11 @@ func newTestServer(t *testing.T) *httptest.Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ts := httptest.NewServer(New(svc, nil).Handler())
+	cs, err := cluster.NewService(cluster.Config{Subnet: netip.MustParsePrefix("172.30.0.0/16")}, st, svc, nil, nil, k3s.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(New(svc, cs, nil).Handler())
 	t.Cleanup(ts.Close)
 	return ts
 }
@@ -106,5 +112,62 @@ func TestBackendsAndHealthz(t *testing.T) {
 	resp, body := do(t, http.MethodGet, ts.URL+"/api/backends", "")
 	if resp.StatusCode != http.StatusOK || !strings.Contains(body, `"name":"fake"`) || !strings.Contains(body, `"default":true`) {
 		t.Errorf("backends: %d %s", resp.StatusCode, body)
+	}
+}
+
+func TestClusterAPI(t *testing.T) {
+	ts := newTestServer(t)
+	base := ts.URL + "/api/clusters"
+
+	resp, body := do(t, http.MethodPost, base, `{"name":"demo","workers":1}`)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create: %d %s", resp.StatusCode, body)
+	}
+	var c cluster.Cluster
+	if err := json.Unmarshal([]byte(body), &c); err != nil {
+		t.Fatal(err)
+	}
+	if c.Name != "demo" || len(c.Machines) != 2 || c.Status.Phase != "provisioning" {
+		t.Errorf("unexpected cluster: %+v", c)
+	}
+
+	resp, body = do(t, http.MethodGet, base+"/demo/kubeconfig", "")
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "current-context: demo") ||
+		resp.Header.Get("Content-Type") != "application/yaml" {
+		t.Errorf("kubeconfig: %d %s", resp.StatusCode, body)
+	}
+
+	cases := []struct {
+		method, path, body string
+		want               int
+	}{
+		{http.MethodGet, "", "", http.StatusOK},
+		{http.MethodGet, "/demo", "", http.StatusOK},
+		{http.MethodGet, "/nope", "", http.StatusNotFound},
+		{http.MethodPost, "", `{"name":"demo"}`, http.StatusConflict},
+		{http.MethodPost, "", `{"name":"x","distro":"nope"}`, http.StatusBadRequest},
+		{http.MethodPost, "/demo/stop", "", http.StatusOK},
+		{http.MethodPost, "/demo/start", "", http.StatusOK},
+		{http.MethodGet, "/nope/kubeconfig", "", http.StatusNotFound},
+	}
+	for _, c := range cases {
+		resp, body := do(t, c.method, base+c.path, c.body)
+		if resp.StatusCode != c.want {
+			t.Errorf("%s %s: got %d, want %d (%s)", c.method, c.path, resp.StatusCode, c.want, body)
+		}
+	}
+
+	// クラスタのノードは /api/vms からは消せない
+	if resp, _ := do(t, http.MethodDelete, ts.URL+"/api/vms/demo-worker-1", ""); resp.StatusCode != http.StatusConflict {
+		t.Errorf("delete cluster vm: %d", resp.StatusCode)
+	}
+	if resp, _ := do(t, http.MethodGet, ts.URL+"/api/distros", ""); resp.StatusCode != http.StatusOK {
+		t.Errorf("distros: %d", resp.StatusCode)
+	}
+	if resp, body := do(t, http.MethodDelete, base+"/demo", ""); resp.StatusCode != http.StatusNoContent {
+		t.Errorf("delete: %d %s", resp.StatusCode, body)
+	}
+	if resp, _ := do(t, http.MethodGet, ts.URL+"/api/vms/demo-cp-1", ""); resp.StatusCode != http.StatusNotFound {
+		t.Errorf("vm should be gone: %d", resp.StatusCode)
 	}
 }

@@ -128,8 +128,10 @@ GET    /api/host                     CPU / メモリ / ディスクの使用状�
 ## フェーズ
 
 0. ホストのセットアップと、VM を手で1台起動 (`scripts/host-setup.sh`、`scripts/test-vm.sh`)
-1. niwakubed: VM 単体の作成・削除 (CH クライアント、systemd、IPAM、SQLite) ← いまここ (実装済み・実機未検証)
+1. niwakubed: VM 単体の作成・削除 (CH クライアント、systemd、IPAM、SQLite) (完了)
 2. niwakubed: k3s クラスタの払い出し (一番単純なので最初に)。次に kubeadm、最後に Talos
+   - 2a: クラスタの仕組み + k3s (CP 1 台 + ワーカー N 台) ← いまここ
+   - 2b: kubeadm、2c: Talos、その後 CP の HA (VIP)、ワーカー数の変更
 3. systemd-nspawn バックエンド (Backend インターフェースが正しく切れているかの検証を兼ねる)
 4. Web UI
 5. 発展: Firecracker / libkrun バックエンド、シリアルコンソール、スケール、事前ビルドしたイメージ、LAN 公開 (DNAT)、スナップショット

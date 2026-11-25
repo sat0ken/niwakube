@@ -20,8 +20,12 @@ import (
 	"github.com/sat0ken/niwakube/internal/store"
 )
 
-// ErrInvalid はリクエストの値が不正なときのエラー。
-var ErrInvalid = errors.New("invalid request")
+var (
+	// ErrInvalid はリクエストの値が不正なときのエラー。
+	ErrInvalid = errors.New("invalid request")
+	// ErrPartOfCluster はクラスタに属するマシンを単体で消そうとしたときのエラー。
+	ErrPartOfCluster = errors.New("machine belongs to a cluster; delete the cluster instead")
+)
 
 const (
 	DesiredRunning = "running"
@@ -96,6 +100,12 @@ type CreateRequest struct {
 	MemoryMiB         int      `json:"memoryMiB,omitempty"`
 	DiskGiB           int      `json:"diskGiB,omitempty"`
 	SSHAuthorizedKeys []string `json:"sshAuthorizedKeys,omitempty"`
+
+	// 以下はクラスタのノードを作るときに cluster パッケージが使う (API からは指定できない)
+	IP       netip.Addr     `json:"-"` // 固定の IP。ゼロ値ならプールから払い出す
+	Cluster  string         `json:"-"`
+	Role     string         `json:"-"`
+	UserData map[string]any `json:"-"` // cloud-init の user-data に追加するキー
 }
 
 // Machine は API で返す VM の情報 (望ましい状態 + 現在の状態)。
@@ -109,6 +119,8 @@ type Machine struct {
 	IP           string         `json:"ip"`
 	MAC          string         `json:"mac"`
 	DesiredState string         `json:"desiredState"`
+	Cluster      string         `json:"cluster,omitempty"`
+	Role         string         `json:"role,omitempty"`
 	Status       backend.Status `json:"status"`
 	CreatedAt    time.Time      `json:"createdAt"`
 }
@@ -177,8 +189,15 @@ func (s *Service) allocate(ctx context.Context, req *CreateRequest) (*store.Mach
 		usedIP[m.IP] = true
 		usedMAC[m.MAC] = true
 	}
-	ip, err := s.cfg.Pool.Allocate(usedIP)
-	if err != nil {
+	ip := req.IP
+	if ip.IsValid() {
+		if !s.cfg.Subnet.Contains(ip) || ip == s.cfg.Gateway {
+			return nil, fmt.Errorf("%w: ip %s is not usable in %s", ErrInvalid, ip, s.cfg.Subnet)
+		}
+		if usedIP[ip] {
+			return nil, fmt.Errorf("ip %s: %w", ip, store.ErrExists)
+		}
+	} else if ip, err = s.cfg.Pool.Allocate(usedIP); err != nil {
 		return nil, err
 	}
 	var mac string
@@ -194,7 +213,7 @@ func (s *Service) allocate(ctx context.Context, req *CreateRequest) (*store.Mach
 		Name: req.Name, Backend: req.Backend, Image: req.Image,
 		CPUs: req.CPUs, MemoryMiB: req.MemoryMiB, DiskGiB: req.DiskGiB,
 		IP: ip, MAC: mac, SSHKeys: req.SSHAuthorizedKeys,
-		DesiredState: DesiredRunning, CreatedAt: time.Now(),
+		DesiredState: DesiredRunning, Cluster: req.Cluster, Role: req.Role, CreatedAt: time.Now(),
 	}
 	if err := s.store.InsertMachine(ctx, m); err != nil {
 		return nil, err
@@ -202,9 +221,9 @@ func (s *Service) allocate(ctx context.Context, req *CreateRequest) (*store.Mach
 	return m, nil
 }
 
-func (s *Service) spec(m *store.Machine) (*backend.MachineSpec, error) {
+func (s *Service) spec(m *store.Machine, extra map[string]any) (*backend.MachineSpec, error) {
 	keys := append(append([]string{}, s.cfg.DefaultSSHKeys...), m.SSHKeys...)
-	user, err := seed.UserData(seed.User{SSHAuthorizedKeys: keys})
+	user, err := seed.UserData(seed.User{SSHAuthorizedKeys: keys, Extra: extra})
 	if err != nil {
 		return nil, err
 	}
@@ -237,7 +256,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (*Machine, erro
 		return nil, err
 	}
 	b := s.backends[m.Backend]
-	spec, err := s.spec(m)
+	spec, err := s.spec(m, req.UserData)
 	if err == nil {
 		err = b.Create(ctx, spec)
 	}
@@ -261,7 +280,8 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (*Machine, erro
 func (s *Service) view(ctx context.Context, m *store.Machine) *Machine {
 	v := &Machine{
 		Name: m.Name, Backend: m.Backend, Image: m.Image, CPUs: m.CPUs, MemoryMiB: m.MemoryMiB, DiskGiB: m.DiskGiB,
-		IP: m.IP.String(), MAC: m.MAC, DesiredState: m.DesiredState, CreatedAt: m.CreatedAt,
+		IP: m.IP.String(), MAC: m.MAC, DesiredState: m.DesiredState, Cluster: m.Cluster, Role: m.Role,
+		CreatedAt: m.CreatedAt,
 	}
 	b, ok := s.backends[m.Backend]
 	if !ok {
@@ -342,12 +362,25 @@ func (s *Service) Stop(ctx context.Context, name string, force bool) (*Machine, 
 	return s.view(ctx, m), nil
 }
 
+// Delete は単体の VM を削除する。クラスタに属するマシンは消せない (クラスタごと消す)。
 func (s *Service) Delete(ctx context.Context, name string) error {
+	return s.delete(ctx, name, false)
+}
+
+// DeleteClusterMachine はクラスタに属するマシンを削除する (cluster パッケージ用)。
+func (s *Service) DeleteClusterMachine(ctx context.Context, name string) error {
+	return s.delete(ctx, name, true)
+}
+
+func (s *Service) delete(ctx context.Context, name string, allowCluster bool) error {
 	unlock := s.locks.Lock(name)
 	defer unlock()
-	_, b, err := s.backendFor(ctx, name)
+	m, b, err := s.backendFor(ctx, name)
 	if err != nil {
 		return err
+	}
+	if m.Cluster != "" && !allowCluster {
+		return fmt.Errorf("%s (cluster %s): %w", name, m.Cluster, ErrPartOfCluster)
 	}
 	if err := b.Delete(ctx, name); err != nil {
 		return err
@@ -419,4 +452,31 @@ func (k *keyedMutex) Lock(key string) func() {
 	k.mu.Unlock()
 	l.Lock()
 	return l.Unlock
+}
+
+// ListCluster はクラスタに属するマシンを返す。
+func (s *Service) ListCluster(ctx context.Context, cluster string) ([]*Machine, error) {
+	all, err := s.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := []*Machine{}
+	for _, m := range all {
+		if m.Cluster == cluster {
+			out = append(out, m)
+		}
+	}
+	return out, nil
+}
+
+// ResolveBackend はバックエンド名 (空なら既定) を解決し、その能力を返す。
+func (s *Service) ResolveBackend(name string) (string, backend.Capabilities, error) {
+	if name == "" {
+		name = s.cfg.DefaultBackend
+	}
+	b, ok := s.backends[name]
+	if !ok {
+		return "", backend.Capabilities{}, fmt.Errorf("%w: unknown backend %q", ErrInvalid, name)
+	}
+	return name, b.Capabilities(), nil
 }

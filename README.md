@@ -92,15 +92,68 @@ curl -s -X DELETE localhost:8080/api/vms/vm1
 - 状態は `/var/lib/niwakube/niwakube.db` (SQLite)、VM のファイルは `/var/lib/niwakube/vms/<name>/` にある
 - 動きを見るには `journalctl -u niwakubed -f`、VM のプロセスは `systemctl status niwakube-vm-<name>`
 
+## フェーズ2: クラスタの払い出し
+
+いまは **k3s** に対応 (コントロールプレーン 1 台 + ワーカー N 台)。kubeadm と Talos はこれから。
+
+```bash
+curl -s -X POST localhost:8080/api/clusters -d '{"name":"demo","distro":"k3s","workers":2}'
+```
+
+```bash
+curl -s localhost:8080/api/clusters/demo | jq .status
+```
+
+`status.phase` が `ready` になったら kubeconfig を取得して使う (ホストから。LAN からの接続は今後対応):
+
+```bash
+curl -s localhost:8080/api/clusters/demo/kubeconfig > demo.kubeconfig
+```
+
+```bash
+kubectl --kubeconfig demo.kubeconfig get nodes
+```
+
+```bash
+curl -s -X DELETE localhost:8080/api/clusters/demo
+```
+
+| メソッド | パス | 説明 |
+|---|---|---|
+| GET | `/api/distros` | 使えるディストリビューションの一覧 |
+| GET | `/api/clusters` | クラスタ一覧 |
+| POST | `/api/clusters` | クラスタを作成する (ノードを作って起動し、構築は VM の中で非同期に進む) |
+| GET | `/api/clusters/{name}` | 詳細 (`status.phase`: provisioning / ready / degraded / stopping / stopped) |
+| DELETE | `/api/clusters/{name}` | ノードをすべて削除する |
+| POST | `/api/clusters/{name}/start` | すべてのノードを起動 (CP から) |
+| POST | `/api/clusters/{name}/stop` | すべてのノードを正常停止 (ワーカーから) |
+| GET | `/api/clusters/{name}/kubeconfig` | admin の kubeconfig |
+
+`POST /api/clusters` の項目 (省略時の既定値): `name` (必須、20 文字以内)、`distro` (k3s)、
+`version` (k3s なら `stable`。`latest` や `v1.34.2+k3s1` も可)、`controlPlanes` (1。いまは 1 のみ)、`workers` (2)、
+`controlPlane` / `worker` (`{"cpus":2,"memoryMiB":4096,"diskGiB":20}`)、`sshAuthorizedKeys`。
+
+### 仕組み
+
+- クラスタ N には `172.30.N.0/24` を割り当てる。CP は `.11`、ワーカーは `.21` から順に使う (`.10` は将来の VIP 用)
+- CA などの秘密情報は niwakubed が作り、cloud-init で CP に渡す (k3s の「カスタム CA」の仕組み)。
+  そのため niwakubed が admin の kubeconfig を自分で発行でき、VM に SSH して取りに行く必要がない
+- `status` は取得のたびに API サーバー (`/api/v1/nodes`) に問い合わせて、Ready なノードを数える
+- クラスタに属する VM は `/api/vms` に `cluster` / `role` 付きで表示される。単体では削除できない
+
 ## CI
 
 | ワークフロー | 内容 |
 |---|---|
 | `CI` (`.github/workflows/ci.yml`) | `go vet` / `gofmt` / `go test -race` / shellcheck、linux/amd64・arm64 のバイナリをビルドして Artifacts に保存。`v*` のタグを push すると Release を作ってバイナリと `SHA256SUMS` を添付する |
-| `E2E (KVM)` (`.github/workflows/e2e.yml`) | ランナーの `/dev/kvm` を使い (nested virtualization)、`host-setup.sh` → `test-vm.sh` → `scripts/e2e.sh` で実際に VM を作って API を一通り試す |
+| `E2E (KVM)` (`.github/workflows/e2e.yml`) | ランナーの `/dev/kvm` を使い (nested virtualization)、実際に VM を作って試す。`VM` ジョブは `test-vm.sh` と `scripts/e2e.sh`、`Cluster` ジョブは `scripts/e2e-cluster.sh` で k3s クラスタを作り、Deployment・Service・クラスタ内 DNS まで確かめる |
 
 E2E は実機でも同じスクリプトで試せる (`host-setup.sh` を済ませておくこと):
 
 ```bash
 make e2e
+```
+
+```bash
+make e2e-cluster DISTRO=k3s
 ```
