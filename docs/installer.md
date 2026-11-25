@@ -121,7 +121,9 @@ lsblk -d -o NAME,MODEL,SERIAL,SIZE
 
 1. PR の Checks → 「Installer ISO」→ Summary の Artifacts から `niwakube-installer` をダウンロードして展開する
 2. `niwakube-installer.iso` を USB メモリに書き込む ([install.md](install.md#2-インストール用-usb-を作る) と同じ方法)
-3. DeskMini に USB と**有線 LAN** を挿して電源を入れ、`F11` で USB から起動する
+3. DeskMini に USB と**有線 LAN** を挿して電源を入れ、`F11` で USB から起動する。
+   **`UEFI:` で始まる項目を選ぶ** (UEFI 用のパーティション構成なので、レガシー BIOS (CSM) で起動すると
+   ダウンロードの前に `booted the USB in legacy BIOS (CSM) mode` と出て止まる。BIOS の設定で CSM を無効にしてもよい)
 4. インストールが終わると電源が切れる (`install.after: poweroff`)。USB を抜いてから電源を入れる
 5. 初回起動で niwakube のセットアップ (`host-setup.sh`) が走る。終わったら SSH でログインできる
 

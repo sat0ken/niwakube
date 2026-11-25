@@ -53,9 +53,25 @@ for x in $(cat /proc/cmdline); do
     esac
 done
 
+# niwakube のパーティション構成 (ESP を /boot/efi) は UEFI 用。レガシー BIOS (CSM) で起動すると、
+# Server ISO を 3GB ダウンロードしたあとに "autoinstall config did not create needed bootloader partition" で
+# 止まってしまうので、最初に止めて UEFI で起動し直すよう案内する。
+require_uefi() {
+    [ -d /sys/firmware/efi ] && return 0
+    echo ""
+    echo "niwakube: ERROR: this PC booted the USB in legacy BIOS (CSM) mode."
+    echo "niwakube: niwakube installs Ubuntu for UEFI. Turn the PC off and boot the USB in UEFI mode:"
+    echo "niwakube:   - in the boot menu (F11 on ASRock), choose the entry that starts with \"UEFI:\""
+    echo "niwakube:   - or disable CSM in the BIOS setup (F2 > Boot > CSM > Disabled)"
+    echo ""
+    debug_shell "booted in legacy BIOS mode (power off and boot in UEFI mode)"
+    return 1
+}
+
 step1() {
     echo "niwakube: step1 (url=$NK_URL)"
     if [ -n "$NK_URL" ]; then
+        require_uefi || return
         MEDIA_URL="$NK_URL"
         MEDIA_SIZE="$NK_SIZE"
         MEDIA_256SUM="$NK_SUM"
