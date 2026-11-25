@@ -95,7 +95,7 @@ internal/store/         SQLite
 internal/distro/        kubeadm/ k3s/ talos/
 internal/reconcile/     望ましい状態 (DB) と実際の VM を一致させるループ
 internal/api/           REST API と WebSocket (シリアルコンソール)
-web/                    React + Vite。ビルド結果を embed で取り込む
+internal/webui/          Web UI。素の HTML / CSS / JavaScript を embed で取り込む (ビルドの手順は無い)
 scripts/                ホストのセットアップと検証用スクリプト
 ```
 
@@ -135,13 +135,12 @@ GET    /api/host                     CPU / メモリ / ディスクの使用状�
    - 2b: kubeadm (完了)
    - 2b+: CNI の選択 (Cilium を既定、kube-proxy の置き換え、Hubble) とコンテナランタイムの選択 (runc / crun / youki) (完了)
    - 2c: Talos (完了)
-   - 2d: LoadBalancer (Cilium LB IPAM + L2 アナウンス、ホストでの DNAT)
-   - 2e: PV (local-path + ホストの NFS) ← いまここ
-   - その後 LoadBalancer (Cilium LB IPAM + L2 アナウンス、ホストでの DNAT)、PV (local-path + ホストの NFS)、
-     CP の HA (VIP)、ワーカー数の変更
-3. systemd-nspawn バックエンド (Backend インターフェースが正しく切れているかの検証を兼ねる)
-4. Web UI
-5. 発展: Firecracker / libkrun バックエンド、シリアルコンソール、スケール、事前ビルドしたイメージ、LAN 公開 (DNAT)、スナップショット
+   - 2d: LoadBalancer (Cilium LB IPAM + L2 アナウンス、ホストでの DNAT) (完了)
+   - 2e: PV (local-path + ホストの NFS) (完了)
+   - その後 CP の HA (VIP)、ワーカー数の変更
+3. Web UI (v0.1.0 に入れる) ← いまここ
+4. systemd-nspawn バックエンド (Backend インターフェースが正しく切れているかの検証を兼ねる)
+5. 発展: Firecracker / libkrun バックエンド、対話できるシリアルコンソール、スケール、事前ビルドしたイメージ、スナップショット
 
 ## 未検証 (実機で確認すること)
 
@@ -160,3 +159,19 @@ GET    /api/host                     CPU / メモリ / ディスクの使用状�
   クライアントはリクエストごとに接続を閉じる
 - kubeadm (v1.37.2、containerd 2.2) が niwakubed の作った CA・SA 鍵で init でき、ワーカーは事前に計算した CA hash で join できる。
   CP 1 + ワーカー 1 が約 70 秒で Ready になり、Service・クラスタ内 DNS・ノードをまたぐ Pod 間通信 (flannel VXLAN) も動く
+
+## Web UI
+
+niwakubed が `/` で配信する。React などのフレームワークやビルドの手順は使わず、素の HTML / CSS / JavaScript を
+`internal/webui/static/` に置いて `go:embed` で埋め込む (Node.js が無くてもビルドでき、バイナリ 1 つで完結する)。
+
+- 画面: ダッシュボード (ホストの CPU・メモリ・ディスクとクラスタの一覧)、クラスタの作成、クラスタの詳細
+  (ノード、kubeconfig / talosconfig のダウンロード、起動・停止・削除、ポートの転送、シリアルログ)、VM の一覧と作成
+- 表示中の画面は 5 秒ごとに更新する
+- 認証はまだ無い。既定は `127.0.0.1:8080` で待ち受けるので、LAN の PC からは SSH のポート転送で開く
+- ブラウザ経由の攻撃への対策 (`internal/api/security.go`):
+  - DNS リバインディング: loopback で待ち受けているときは Host ヘッダーが localhost / 127.0.0.1 / ::1 以外なら拒否
+  - CSRF: 変更を伴うリクエストは Origin が自分と違えば拒否、Sec-Fetch-Site が same-origin / none 以外なら拒否
+    (curl などこれらを付けないクライアントはそのまま通す)
+  - CSP (`default-src 'self'`) で外部のスクリプトとインラインのスクリプト・スタイル、フレームへの埋め込みを禁止
+- KVM の無い PC で UI を触るには `niwakubed --dev-fake-backend` (VM を実際には作らない) を使う

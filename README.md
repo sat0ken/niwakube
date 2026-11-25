@@ -48,10 +48,30 @@ sudo systemctl enable --now niwakubed
 既定では `127.0.0.1:8080` で待ち受ける (認証がまだ無いため)。LAN から使う場合は
 `deploy/niwakubed.service` の `--listen` を変える。
 
+### Web UI
+
+ブラウザで `http://localhost:8080/` を開くと Web UI が出る。クラスタの作成・削除・起動・停止、kubeconfig のダウンロード、
+ポートの転送、シリアルログの確認、単体 VM の作成ができる。
+
+LAN の PC からは SSH のポート転送で開く (niwakubed は認証が無いので、既定では LAN に公開しない):
+
+```bash
+ssh -L 8080:localhost:8080 niwa
+```
+
+そのまま PC のブラウザで `http://localhost:8080/` を開く。
+
+KVM の無い PC で UI だけを触るときは、VM を実際には作らない fake バックエンドで起動できる:
+
+```bash
+go run ./cmd/niwakubed --dev-fake-backend --data-dir /tmp/niwakube-dev --run-dir /tmp/niwakube-dev/run
+```
+
 ### API
 
 | メソッド | パス | 説明 |
 |---|---|---|
+| GET | `/api/host` | ホストの CPU・メモリ・ディスクと、VM に割り当てた量 |
 | GET | `/api/backends` | 使えるバックエンドの一覧 |
 | GET | `/api/vms` | VM 一覧 (望ましい状態と現在の状態) |
 | POST | `/api/vms` | VM を作成して起動する |
@@ -185,7 +205,7 @@ kubectl --kubeconfig demo.kubeconfig -n kube-system port-forward svc/hubble-ui 1
 
 `POST /api/clusters` の項目 (省略時の既定値): `name` (必須、20 文字以内)、`distro` (k3s)、
 `version` (既定は `stable`。k3s は `latest` や `v1.37.2+k3s1`、kubeadm は `v1.37` (その minor の最新) や `v1.37.2` も可)、`controlPlanes` (1。いまは 1 のみ)、`workers` (2)、
-`controlPlane` / `worker` (`{"cpus":2,"memoryMiB":4096,"diskGiB":20}`)、`sshAuthorizedKeys`、
+`controlPlane` / `worker` (`{"cpus":2,"memoryMiB":4096,"diskGiB":30}`)、`sshAuthorizedKeys`、
 `cni` (`cilium` / `flannel`)、`hubble` (Cilium なら `true`)、`runtime.default` (`runc` / `crun` / `youki`)、
 `runtime.install` (追加で入れるランタイム。既定にしたものは自動で入る)。
 

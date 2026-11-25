@@ -18,7 +18,7 @@ import (
 	"github.com/sat0ken/niwakube/internal/store"
 )
 
-func newTestServer(t *testing.T) *httptest.Server {
+func newTestServer(t *testing.T, opts ...Options) *httptest.Server {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
@@ -38,7 +38,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ts := httptest.NewServer(New(svc, cs, nil).Handler())
+	ts := httptest.NewServer(New(svc, cs, nil, opts...).Handler())
 	t.Cleanup(ts.Close)
 	return ts
 }

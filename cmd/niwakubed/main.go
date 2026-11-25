@@ -17,7 +17,9 @@ import (
 	"time"
 
 	"github.com/sat0ken/niwakube/internal/api"
+	"github.com/sat0ken/niwakube/internal/backend"
 	"github.com/sat0ken/niwakube/internal/backend/ch"
+	"github.com/sat0ken/niwakube/internal/backend/fake"
 	"github.com/sat0ken/niwakube/internal/cluster"
 	"github.com/sat0ken/niwakube/internal/distro/k3s"
 	"github.com/sat0ken/niwakube/internal/distro/kubeadm"
@@ -27,6 +29,7 @@ import (
 	"github.com/sat0ken/niwakube/internal/netx"
 	"github.com/sat0ken/niwakube/internal/store"
 	"github.com/sat0ken/niwakube/internal/sys"
+	"github.com/sat0ken/niwakube/internal/webui"
 )
 
 // version はビルド時に -ldflags "-X main.version=..." で埋め込む。
@@ -56,6 +59,7 @@ func run() error {
 		defRT    = flag.String("default-runtime", "runc", "クラスタの既定のコンテナランタイム (runc | crun | youki)")
 		defRTs   = flag.String("default-runtimes", "", "クラスタに既定で追加するランタイム (カンマ区切り。例: crun,youki)")
 		nfsRoot  = flag.String("nfs-root", "", "NFS で export しているディレクトリ (既定: <data-dir>/nfs。無ければ NFS の StorageClass は作らない)")
+		devFake  = flag.Bool("dev-fake-backend", false, "VM を実際には作らない (KVM の無い PC で Web UI を開発するため)")
 	)
 	flag.Parse()
 	if *showVer {
@@ -64,7 +68,7 @@ func run() error {
 	}
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	if os.Geteuid() != 0 {
+	if os.Geteuid() != 0 && !*devFake {
 		log.Warn("not running as root; creating taps and systemd units will fail")
 	}
 
@@ -105,13 +109,20 @@ func run() error {
 	}
 	defer st.Close()
 
-	chb := ch.New(ch.Config{Binary: *chBinary, DataDir: *dataDir, RunDir: *runDir}, sys.ExecRunner{})
-	svc, err := machine.NewService(cfg, st, log, chb)
+	var be backend.Backend = ch.New(ch.Config{Binary: *chBinary, DataDir: *dataDir, RunDir: *runDir}, sys.ExecRunner{})
+	if *devFake {
+		log.Warn("using the fake backend: VMs are not actually created (for UI development)")
+		be = fake.New()
+	}
+	svc, err := machine.NewService(cfg, st, log, be)
 	if err != nil {
 		return err
 	}
 	defaults := cluster.Defaults{CNI: *defCNI, Runtime: store.Runtime{Default: *defRT, Install: splitList(*defRTs)}}
-	fwd := netx.Forwarder{Run: sys.ExecRunner{}, Bridge: *bridge, Dir: *runDir}
+	var fwd cluster.ForwardApplier = netx.Forwarder{Run: sys.ExecRunner{}, Bridge: *bridge, Dir: *runDir}
+	if *devFake {
+		fwd = nil
+	}
 	nfs := cluster.NFSConfig{Server: cfg.Gateway, Root: *nfsRoot}
 	if nfs.Root == "" {
 		nfs.Root = filepath.Join(*dataDir, "nfs")
@@ -136,8 +147,13 @@ func run() error {
 	}()
 
 	srv := &http.Server{
-		Addr:              *listen,
-		Handler:           api.New(svc, clusters, log).Handler(),
+		Addr: *listen,
+		Handler: api.New(svc, clusters, log, api.Options{
+			Version:      version,
+			DataDir:      *dataDir,
+			LoopbackOnly: api.IsLoopbackListen(*listen),
+			UI:           webui.Handler(),
+		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	errCh := make(chan error, 1)
