@@ -101,7 +101,9 @@ GRUB のメニューには次の項目が出る。
 lsblk -d -o NAME,MODEL,SERIAL,SIZE
 ```
 
-`lsblk` に表示されたままの値を書けばよい。udev の値はスペースが `_` になったり、NVMe ではシリアルの前に
+`lsblk` に表示されたままの値を書けばよい。製品名とは違うことがあるので注意 (SATA の SSD はモデル名が 16 文字で切れる。
+例: Samsung SSD 860 EVO 1TB は `Samsung SSD 860`)。インストーラーが照合しているのは udev の `ID_MODEL` / `ID_SERIAL` で、
+`udevadm info -q property -n /dev/sda | grep -E '^ID_(MODEL|SERIAL)='` で確かめられる。udev の値はスペースが `_` になったり、NVMe ではシリアルの前に
 モデル名が付いたりするので、niwakube は前後を `*`、スペースを `?` にしたパターンで照合する
 (例: `Samsung SSD 980 1TB` → `*Samsung?SSD?980?1TB*`)。
 

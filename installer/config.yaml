@@ -20,7 +20,7 @@ network:
 
 storage:
   disk:                         # 無人インストールでは {model: "..."} か {serial: "..."} が必須
-    model: "860 EVO"            # Samsung SSD 860 EVO (SATA)。前後を * にして照合する
+    model: "Samsung SSD 860"    # lsblk の MODEL のとおり (SATA は 16 文字で切れるので "EVO" は入らない)
   root_size: 50G                # 残りはすべて /var/lib/niwakube (XFS)
 
 install:
