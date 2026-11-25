@@ -1,0 +1,89 @@
+package k3s
+
+import (
+	"net/netip"
+	"strings"
+	"testing"
+
+	"gopkg.in/yaml.v3"
+
+	"github.com/sat0ken/niwakube/internal/distro"
+)
+
+func TestUserData(t *testing.T) {
+	k := New()
+	sec, err := k.GenerateSecrets("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &distro.Cluster{Name: "demo", Version: "v1.34.2+k3s1", APIAddr: netip.MustParseAddr("172.30.1.11"), Secrets: sec}
+
+	cp, err := k.UserData(c, &distro.Node{Name: "demo-cp-1", Role: distro.RoleControlPlane, Index: 1, IP: netip.MustParseAddr("172.30.1.11")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := cp["write_files"].([]writeFile)
+	paths := map[string]writeFile{}
+	for _, f := range files {
+		paths[f.Path] = f
+	}
+	for _, p := range []string{
+		tlsDir + "/server-ca.crt", tlsDir + "/server-ca.key", tlsDir + "/client-ca.key",
+		tlsDir + "/request-header-ca.crt", tlsDir + "/etcd/peer-ca.crt", tlsDir + "/etcd/server-ca.key",
+		tlsDir + "/service.key", "/etc/rancher/k3s/config.yaml",
+	} {
+		if _, ok := paths[p]; !ok {
+			t.Errorf("missing %s", p)
+		}
+	}
+	if paths[tlsDir+"/server-ca.key"].Permissions != "0600" {
+		t.Error("CA key must be 0600")
+	}
+	var cfg map[string]any
+	if err := yaml.Unmarshal([]byte(paths["/etc/rancher/k3s/config.yaml"].Content), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg["token"] != sec.Token || cfg["node-ip"] != "172.30.1.11" || cfg["server"] != nil {
+		t.Errorf("server config: %v", cfg)
+	}
+	cmd := strings.Join(cp["runcmd"].([]any)[0].([]string), " ")
+	if !strings.Contains(cmd, "INSTALL_K3S_VERSION=v1.34.2+k3s1") || !strings.HasSuffix(cmd, "sh -s - server") {
+		t.Errorf("server install: %s", cmd)
+	}
+
+	w, err := k.UserData(c, &distro.Node{Name: "demo-worker-1", Role: distro.RoleWorker, Index: 1, IP: netip.MustParseAddr("172.30.1.21")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wfiles := w["write_files"].([]writeFile)
+	if len(wfiles) != 1 {
+		t.Fatalf("worker must not receive CA files: %d files", len(wfiles))
+	}
+	if err := yaml.Unmarshal([]byte(wfiles[0].Content), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg["server"] != "https://172.30.1.11:6443" || cfg["node-ip"] != "172.30.1.21" {
+		t.Errorf("agent config: %v", cfg)
+	}
+	if cmd := strings.Join(w["runcmd"].([]any)[0].([]string), " "); !strings.HasSuffix(cmd, "sh -s - agent") {
+		t.Errorf("agent install: %s", cmd)
+	}
+
+	if _, err := k.UserData(c, &distro.Node{Role: distro.RoleControlPlane, Index: 2}); err == nil {
+		t.Error("second control plane should be rejected for now")
+	}
+}
+
+func TestValidateVersion(t *testing.T) {
+	k := New()
+	for _, v := range []string{"", "stable", "latest", "v1.34.2+k3s1"} {
+		if err := k.ValidateVersion(v); err != nil {
+			t.Errorf("%q: %v", v, err)
+		}
+	}
+	for _, v := range []string{"1.34", "v1.34.2", "v1.34.2+k3s1; rm -rf /"} {
+		if err := k.ValidateVersion(v); err == nil {
+			t.Errorf("%q should be invalid", v)
+		}
+	}
+}

@@ -1,0 +1,543 @@
+// Package cluster は Kubernetes クラスタの払い出しをまとめる。
+//
+// クラスタ N には 172.30.N.0/24 を割り当てる (N は 1〜254)。
+//
+//	.10       API の VIP (HA 用に予約。いまは未使用)
+//	.11〜     コントロールプレーン
+//	.21〜     ワーカー
+package cluster
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/netip"
+	"regexp"
+	"sort"
+	"sync"
+	"time"
+
+	"github.com/sat0ken/niwakube/internal/backend"
+	"github.com/sat0ken/niwakube/internal/distro"
+	"github.com/sat0ken/niwakube/internal/machine"
+	"github.com/sat0ken/niwakube/internal/pki"
+	"github.com/sat0ken/niwakube/internal/store"
+)
+
+const (
+	maxIndex   = 254
+	maxWorkers = 50
+	cpHostBase = 10 // CP i は .10+i
+	wHostBase  = 20 // ワーカー i は .20+i
+)
+
+type Config struct {
+	Subnet netip.Prefix // VM のサブネット。/16 であること (例: 172.30.0.0/16)
+}
+
+type Service struct {
+	cfg      Config
+	store    *store.Store
+	machines *machine.Service
+	distros  map[string]distro.Distro
+	defDist  string
+	prober   Prober
+	log      *slog.Logger
+
+	mu        sync.Mutex // クラスタの作成・削除・起動・停止を直列化する
+	adminMu   sync.Mutex
+	adminCert map[string]pki.KeyPair // 状態確認用の admin 証明書のキャッシュ
+}
+
+func NewService(cfg Config, st *store.Store, ms *machine.Service, prober Prober, log *slog.Logger, distros ...distro.Distro) (*Service, error) {
+	if cfg.Subnet.Bits() != 16 || !cfg.Subnet.Addr().Is4() {
+		return nil, fmt.Errorf("cluster subnet must be an IPv4 /16: %s", cfg.Subnet)
+	}
+	if len(distros) == 0 {
+		return nil, errors.New("at least one distro is required")
+	}
+	if prober == nil {
+		prober = HTTPProber{}
+	}
+	if log == nil {
+		log = slog.Default()
+	}
+	m := map[string]distro.Distro{}
+	for _, d := range distros {
+		m[d.Name()] = d
+	}
+	return &Service{
+		cfg: cfg, store: st, machines: ms, distros: m, defDist: distros[0].Name(),
+		prober: prober, log: log, adminCert: map[string]pki.KeyPair{},
+	}, nil
+}
+
+// DistroInfo は利用できるディストリビューションの一覧に使う。
+type DistroInfo struct {
+	Name           string `json:"name"`
+	Default        bool   `json:"default"`
+	DefaultVersion string `json:"defaultVersion"`
+	Image          string `json:"image"`
+}
+
+func (s *Service) Distros() []DistroInfo {
+	out := []DistroInfo{}
+	for name, d := range s.distros {
+		out = append(out, DistroInfo{Name: name, Default: name == s.defDist, DefaultVersion: d.DefaultVersion(), Image: d.Image()})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// CreateRequest はクラスタ作成のリクエスト。ゼロ値の項目には既定値が入る。
+type CreateRequest struct {
+	Name              string         `json:"name"`
+	Distro            string         `json:"distro,omitempty"`
+	Version           string         `json:"version,omitempty"`
+	Backend           string         `json:"backend,omitempty"`
+	ControlPlanes     int            `json:"controlPlanes,omitempty"`
+	Workers           *int           `json:"workers,omitempty"` // 0 台もあり得るのでポインタ
+	ControlPlane      store.NodeSize `json:"controlPlane,omitempty"`
+	Worker            store.NodeSize `json:"worker,omitempty"`
+	SSHAuthorizedKeys []string       `json:"sshAuthorizedKeys,omitempty"`
+}
+
+// Status はクラスタの現在の状態。
+type Status struct {
+	// Phase は provisioning | ready | degraded | stopped | stopping
+	Phase      string `json:"phase"`
+	ReadyNodes int    `json:"readyNodes"`
+	Nodes      int    `json:"nodes"`
+	Message    string `json:"message,omitempty"`
+}
+
+// Cluster は API で返すクラスタの情報。
+type Cluster struct {
+	Name          string             `json:"name"`
+	Distro        string             `json:"distro"`
+	Version       string             `json:"version"`
+	Backend       string             `json:"backend"`
+	ControlPlanes int                `json:"controlPlanes"`
+	Workers       int                `json:"workers"`
+	ControlPlane  store.NodeSize     `json:"controlPlane"`
+	Worker        store.NodeSize     `json:"worker"`
+	Subnet        string             `json:"subnet"`
+	Endpoint      string             `json:"endpoint"`
+	DesiredState  string             `json:"desiredState"`
+	Status        Status             `json:"status"`
+	Machines      []*machine.Machine `json:"machines"`
+	CreatedAt     time.Time          `json:"createdAt"`
+}
+
+var nameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,18}[a-z0-9])?$`)
+
+func invalid(format string, a ...any) error {
+	return fmt.Errorf("%w: %s", machine.ErrInvalid, fmt.Sprintf(format, a...))
+}
+
+func defaultSize(sz *store.NodeSize) {
+	if sz.CPUs == 0 {
+		sz.CPUs = 2
+	}
+	if sz.MemoryMiB == 0 {
+		sz.MemoryMiB = 4096
+	}
+	if sz.DiskGiB == 0 {
+		sz.DiskGiB = 20
+	}
+}
+
+func (s *Service) normalize(req *CreateRequest) (distro.Distro, error) {
+	if !nameRe.MatchString(req.Name) {
+		return nil, invalid("cluster name must match %s", nameRe)
+	}
+	if req.Distro == "" {
+		req.Distro = s.defDist
+	}
+	d, ok := s.distros[req.Distro]
+	if !ok {
+		return nil, invalid("unknown distro %q", req.Distro)
+	}
+	if err := d.ValidateVersion(req.Version); err != nil {
+		return nil, invalid("%v", err)
+	}
+	if req.Version == "" {
+		req.Version = d.DefaultVersion()
+	}
+	name, caps, err := s.machines.ResolveBackend(req.Backend)
+	if err != nil {
+		return nil, err
+	}
+	req.Backend = name
+	if d.Requirements().NeedsOwnKernel && !caps.OwnKernel {
+		return nil, invalid("distro %s needs its own kernel, but backend %s shares the host kernel", d.Name(), name)
+	}
+	if req.ControlPlanes == 0 {
+		req.ControlPlanes = 1
+	}
+	if req.ControlPlanes != 1 {
+		return nil, invalid("only 1 control plane is supported for now")
+	}
+	if req.Workers == nil {
+		two := 2
+		req.Workers = &two
+	}
+	if *req.Workers < 0 || *req.Workers > maxWorkers {
+		return nil, invalid("workers must be between 0 and %d", maxWorkers)
+	}
+	defaultSize(&req.ControlPlane)
+	defaultSize(&req.Worker)
+	return d, nil
+}
+
+// hostIP はクラスタ index のサブネット内の host 番目のアドレスを返す。
+func (s *Service) hostIP(index, host int) netip.Addr {
+	b := s.cfg.Subnet.Addr().As4()
+	return netip.AddrFrom4([4]byte{b[0], b[1], byte(index), byte(host)})
+}
+
+func (s *Service) subnetOf(index int) netip.Prefix {
+	return netip.PrefixFrom(s.hostIP(index, 0), 24)
+}
+
+func cpName(cluster string, i int) string     { return fmt.Sprintf("%s-cp-%d", cluster, i) }
+func workerName(cluster string, i int) string { return fmt.Sprintf("%s-worker-%d", cluster, i) }
+
+// Create はクラスタを登録し、ノードを作って起動する。
+// Kubernetes の構築はノードの中で非同期に進むので、完了は Get の Status.Phase で確認する。
+func (s *Service) Create(ctx context.Context, req CreateRequest) (*Cluster, error) {
+	d, err := s.normalize(&req)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	existing, err := s.store.ListClusters(ctx)
+	if err != nil {
+		return nil, err
+	}
+	used := map[int]bool{}
+	for _, c := range existing {
+		if c.Name == req.Name {
+			return nil, fmt.Errorf("cluster %q: %w", req.Name, store.ErrExists)
+		}
+		used[c.Index] = true
+	}
+	index := 0
+	for i := 1; i <= maxIndex; i++ {
+		if !used[i] {
+			index = i
+			break
+		}
+	}
+	if index == 0 {
+		return nil, fmt.Errorf("no free cluster subnet: %w", store.ErrExists)
+	}
+
+	secrets, err := d.GenerateSecrets(req.Name)
+	if err != nil {
+		return nil, err
+	}
+	rawSecrets, err := json.Marshal(secrets)
+	if err != nil {
+		return nil, err
+	}
+	rec := &store.Cluster{
+		Name: req.Name, Distro: d.Name(), Index: index,
+		Spec: store.ClusterSpec{
+			Version: req.Version, Backend: req.Backend, Image: d.Image(),
+			ControlPlanes: req.ControlPlanes, Workers: *req.Workers,
+			ControlPlane: req.ControlPlane, Worker: req.Worker, SSHKeys: req.SSHAuthorizedKeys,
+		},
+		Secrets: rawSecrets, DesiredState: machine.DesiredRunning, CreatedAt: time.Now(),
+	}
+	if err := s.store.InsertCluster(ctx, rec); err != nil {
+		return nil, err
+	}
+	s.log.Info("cluster registered", "cluster", rec.Name, "distro", rec.Distro, "subnet", s.subnetOf(index))
+
+	if err := s.createNodes(ctx, d, rec, secrets); err != nil {
+		s.rollback(context.WithoutCancel(ctx), rec.Name)
+		return nil, err
+	}
+	return s.view(ctx, rec)
+}
+
+func (s *Service) createNodes(ctx context.Context, d distro.Distro, rec *store.Cluster, secrets *distro.Secrets) error {
+	dc := &distro.Cluster{
+		Name: rec.Name, Version: rec.Spec.Version, Secrets: secrets,
+		APIAddr: s.hostIP(rec.Index, cpHostBase+1),
+	}
+	type node struct {
+		n    distro.Node
+		size store.NodeSize
+	}
+	var nodes []node
+	for i := 1; i <= rec.Spec.ControlPlanes; i++ {
+		nodes = append(nodes, node{distro.Node{Name: cpName(rec.Name, i), Role: distro.RoleControlPlane, Index: i, IP: s.hostIP(rec.Index, cpHostBase+i)}, rec.Spec.ControlPlane})
+	}
+	for i := 1; i <= rec.Spec.Workers; i++ {
+		nodes = append(nodes, node{distro.Node{Name: workerName(rec.Name, i), Role: distro.RoleWorker, Index: i, IP: s.hostIP(rec.Index, wHostBase+i)}, rec.Spec.Worker})
+	}
+	for _, nd := range nodes {
+		ud, err := d.UserData(dc, &nd.n)
+		if err != nil {
+			return err
+		}
+		_, err = s.machines.Create(ctx, machine.CreateRequest{
+			Name: nd.n.Name, Backend: rec.Spec.Backend, Image: rec.Spec.Image,
+			CPUs: nd.size.CPUs, MemoryMiB: nd.size.MemoryMiB, DiskGiB: nd.size.DiskGiB,
+			SSHAuthorizedKeys: rec.Spec.SSHKeys,
+			IP:                nd.n.IP, Cluster: rec.Name, Role: string(nd.n.Role), UserData: ud,
+		})
+		if err != nil {
+			return fmt.Errorf("create node %s: %w", nd.n.Name, err)
+		}
+	}
+	return nil
+}
+
+func (s *Service) rollback(ctx context.Context, name string) {
+	if err := s.deleteLocked(ctx, name); err != nil {
+		s.log.Error("cluster rollback failed", "cluster", name, "err", err)
+	}
+}
+
+func (s *Service) List(ctx context.Context) ([]*Cluster, error) {
+	recs, err := s.store.ListClusters(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*Cluster, 0, len(recs))
+	for _, r := range recs {
+		v, err := s.view(ctx, r)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, nil
+}
+
+func (s *Service) Get(ctx context.Context, name string) (*Cluster, error) {
+	rec, err := s.store.GetCluster(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	return s.view(ctx, rec)
+}
+
+func (s *Service) endpoint(rec *store.Cluster) string {
+	d := s.distros[rec.Distro]
+	port := 6443
+	if d != nil {
+		port = d.APIPort()
+	}
+	return fmt.Sprintf("https://%s:%d", s.hostIP(rec.Index, cpHostBase+1), port)
+}
+
+func (s *Service) view(ctx context.Context, rec *store.Cluster) (*Cluster, error) {
+	ms, err := s.machines.ListCluster(ctx, rec.Name)
+	if err != nil {
+		return nil, err
+	}
+	v := &Cluster{
+		Name: rec.Name, Distro: rec.Distro, Version: rec.Spec.Version, Backend: rec.Spec.Backend,
+		ControlPlanes: rec.Spec.ControlPlanes, Workers: rec.Spec.Workers,
+		ControlPlane: rec.Spec.ControlPlane, Worker: rec.Spec.Worker,
+		Subnet: s.subnetOf(rec.Index).String(), Endpoint: s.endpoint(rec),
+		DesiredState: rec.DesiredState, Machines: ms, CreatedAt: rec.CreatedAt,
+	}
+	v.Status = s.status(ctx, rec, ms)
+	return v, nil
+}
+
+func (s *Service) status(ctx context.Context, rec *store.Cluster, ms []*machine.Machine) Status {
+	expected := rec.Spec.ControlPlanes + rec.Spec.Workers
+	st := Status{Nodes: expected}
+	running := 0
+	for _, m := range ms {
+		if m.Status.State == backend.StateRunning {
+			running++
+		}
+	}
+	if rec.DesiredState == machine.DesiredStopped {
+		if running == 0 {
+			st.Phase = "stopped"
+		} else {
+			st.Phase, st.Message = "stopping", fmt.Sprintf("%d/%d machines still running", running, len(ms))
+		}
+		return st
+	}
+	if running < expected {
+		st.Phase, st.Message = "degraded", fmt.Sprintf("%d/%d machines running", running, expected)
+		return st
+	}
+	serverCA, admin, err := s.adminCredentials(rec)
+	if err != nil {
+		st.Phase, st.Message = "degraded", err.Error()
+		return st
+	}
+	pctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	ready, _, err := s.prober.Probe(pctx, s.endpoint(rec), serverCA, admin)
+	st.ReadyNodes = ready
+	switch {
+	case err != nil:
+		st.Phase, st.Message = "provisioning", "Kubernetes API is not reachable yet"
+	case ready < expected:
+		st.Phase, st.Message = "provisioning", fmt.Sprintf("%d/%d nodes ready", ready, expected)
+	default:
+		st.Phase = "ready"
+	}
+	return st
+}
+
+func (s *Service) secrets(rec *store.Cluster) (*distro.Secrets, distro.Distro, error) {
+	d, ok := s.distros[rec.Distro]
+	if !ok {
+		return nil, nil, fmt.Errorf("distro %q is not available: %w", rec.Distro, backend.ErrNotSupported)
+	}
+	var sec distro.Secrets
+	if err := json.Unmarshal(rec.Secrets, &sec); err != nil {
+		return nil, nil, fmt.Errorf("parse secrets of %s: %w", rec.Name, err)
+	}
+	return &sec, d, nil
+}
+
+// adminCredentials は API サーバーの CA と、admin のクライアント証明書を返す。
+func (s *Service) adminCredentials(rec *store.Cluster) (string, pki.KeyPair, error) {
+	sec, d, err := s.secrets(rec)
+	if err != nil {
+		return "", pki.KeyPair{}, err
+	}
+	serverName, clientName := d.AdminCAs()
+	serverCA, ok1 := sec.CAs[serverName]
+	clientCA, ok2 := sec.CAs[clientName]
+	if !ok1 || !ok2 {
+		return "", pki.KeyPair{}, fmt.Errorf("cluster %s: admin CAs are missing", rec.Name)
+	}
+	s.adminMu.Lock()
+	defer s.adminMu.Unlock()
+	key := rec.Name + "/" + rec.CreatedAt.String()
+	if kp, ok := s.adminCert[key]; ok {
+		return serverCA.CertPEM, kp, nil
+	}
+	kp, err := clientCA.SignClient("niwakube-admin", []string{"system:masters"}, 365*24*time.Hour)
+	if err != nil {
+		return "", pki.KeyPair{}, err
+	}
+	s.adminCert[key] = kp
+	return serverCA.CertPEM, kp, nil
+}
+
+// Kubeconfig は admin の kubeconfig を発行する。
+func (s *Service) Kubeconfig(ctx context.Context, name string) ([]byte, error) {
+	rec, err := s.store.GetCluster(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	sec, d, err := s.secrets(rec)
+	if err != nil {
+		return nil, err
+	}
+	serverName, clientName := d.AdminCAs()
+	clientCA := sec.CAs[clientName]
+	admin, err := clientCA.SignClient("niwakube-admin", []string{"system:masters"}, 365*24*time.Hour)
+	if err != nil {
+		return nil, err
+	}
+	return buildKubeconfig(rec.Name, s.endpoint(rec), sec.CAs[serverName].CertPEM, admin)
+}
+
+// Delete はクラスタのノードをすべて削除し、登録を消す。
+func (s *Service) Delete(ctx context.Context, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.store.GetCluster(ctx, name); err != nil {
+		return err
+	}
+	return s.deleteLocked(ctx, name)
+}
+
+func (s *Service) deleteLocked(ctx context.Context, name string) error {
+	ms, err := s.machines.ListCluster(ctx, name)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, m := range ms {
+		if err := s.machines.DeleteClusterMachine(ctx, m.Name); err != nil {
+			errs = append(errs, fmt.Errorf("delete %s: %w", m.Name, err))
+		}
+	}
+	if len(errs) > 0 {
+		// ノードが残っているうちは登録を消さない (やり直せるように)
+		return errors.Join(errs...)
+	}
+	if err := s.store.DeleteCluster(ctx, name); err != nil && !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	s.log.Info("cluster deleted", "cluster", name)
+	return nil
+}
+
+// Start はクラスタのノードをすべて起動する。
+func (s *Service) Start(ctx context.Context, name string) (*Cluster, error) {
+	return s.setState(ctx, name, machine.DesiredRunning)
+}
+
+// Stop はクラスタのノードをすべて正常停止する (ワーカーから先に止める)。
+func (s *Service) Stop(ctx context.Context, name string) (*Cluster, error) {
+	return s.setState(ctx, name, machine.DesiredStopped)
+}
+
+func (s *Service) setState(ctx context.Context, name, state string) (*Cluster, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, err := s.store.GetCluster(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.store.SetClusterDesiredState(ctx, name, state); err != nil {
+		return nil, err
+	}
+	rec.DesiredState = state
+	ms, err := s.machines.ListCluster(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	// 起動は CP から、停止はワーカーから
+	rank := func(m *machine.Machine) int {
+		isCP := m.Role == string(distro.RoleControlPlane)
+		if isCP == (state == machine.DesiredRunning) {
+			return 0
+		}
+		return 1
+	}
+	sort.SliceStable(ms, func(i, j int) bool {
+		if rank(ms[i]) != rank(ms[j]) {
+			return rank(ms[i]) < rank(ms[j])
+		}
+		return ms[i].Name < ms[j].Name
+	})
+	var errs []error
+	for _, m := range ms {
+		var err error
+		if state == machine.DesiredRunning {
+			_, err = s.machines.Start(ctx, m.Name)
+		} else {
+			_, err = s.machines.Stop(ctx, m.Name, false)
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", m.Name, err))
+		}
+	}
+	if len(errs) > 0 {
+		return nil, errors.Join(errs...)
+	}
+	return s.view(ctx, rec)
+}
