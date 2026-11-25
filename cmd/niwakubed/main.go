@@ -50,6 +50,9 @@ func run() error {
 		dns      = flag.String("dns", "1.1.1.1,8.8.8.8", "VM に設定する DNS サーバー (カンマ区切り)")
 		chBinary = flag.String("ch-binary", "/usr/local/bin/cloud-hypervisor", "cloud-hypervisor のパス")
 		sshKey   = flag.String("ssh-key", "", "全 VM に入れる公開鍵 (既定: <data-dir>/ssh/id_ed25519.pub)")
+		defCNI   = flag.String("default-cni", "cilium", "クラスタの既定の CNI (cilium | flannel)")
+		defRT    = flag.String("default-runtime", "runc", "クラスタの既定のコンテナランタイム (runc | crun | youki)")
+		defRTs   = flag.String("default-runtimes", "", "クラスタに既定で追加するランタイム (カンマ区切り。例: crun,youki)")
 	)
 	flag.Parse()
 	if *showVer {
@@ -104,7 +107,8 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	clusters, err := cluster.NewService(cluster.Config{Subnet: cfg.Subnet}, st, svc, nil, log, k3s.New(), kubeadm.New())
+	defaults := cluster.Defaults{CNI: *defCNI, Runtime: store.Runtime{Default: *defRT, Install: splitList(*defRTs)}}
+	clusters, err := cluster.NewService(cluster.Config{Subnet: cfg.Subnet, Defaults: defaults}, st, svc, nil, log, k3s.New(), kubeadm.New())
 	if err != nil {
 		return err
 	}
@@ -138,4 +142,14 @@ func run() error {
 		return srv.Shutdown(shutdownCtx)
 	}
 	return nil
+}
+
+func splitList(s string) []string {
+	out := []string{}
+	for _, v := range strings.Split(s, ",") {
+		if v = strings.TrimSpace(v); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }

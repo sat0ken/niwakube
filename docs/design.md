@@ -132,8 +132,10 @@ GET    /api/host                     CPU / メモリ / ディスクの使用状�
 1. niwakubed: VM 単体の作成・削除 (CH クライアント、systemd、IPAM、SQLite) (完了)
 2. niwakubed: k3s クラスタの払い出し (一番単純なので最初に)。次に kubeadm、最後に Talos
    - 2a: クラスタの仕組み + k3s (CP 1 台 + ワーカー N 台) (完了)
-   - 2b: kubeadm ← いまここ
-   - 2c: Talos、その後 CP の HA (VIP)、ワーカー数の変更
+   - 2b: kubeadm (完了)
+   - 2b+: CNI の選択 (Cilium を既定、kube-proxy の置き換え、Hubble) とコンテナランタイムの選択 (runc / crun / youki) ← いまここ
+   - 2c: Talos、その後 LoadBalancer (Cilium LB IPAM + L2 アナウンス、ホストでの DNAT)、PV (local-path + ホストの NFS)、
+     CP の HA (VIP)、ワーカー数の変更
 3. systemd-nspawn バックエンド (Backend インターフェースが正しく切れているかの検証を兼ねる)
 4. Web UI
 5. 発展: Firecracker / libkrun バックエンド、シリアルコンソール、スケール、事前ビルドしたイメージ、LAN 公開 (DNAT)、スナップショット

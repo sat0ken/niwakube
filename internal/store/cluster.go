@@ -27,6 +27,15 @@ type ClusterSpec struct {
 	ControlPlane  NodeSize `json:"controlPlane"`
 	Worker        NodeSize `json:"worker"`
 	SSHKeys       []string `json:"sshAuthorizedKeys,omitempty"`
+	CNI           string   `json:"cni,omitempty"` // 空はフェーズ2b までに作ったクラスタ (flannel)
+	Hubble        bool     `json:"hubble,omitempty"`
+	Runtime       Runtime  `json:"runtime"`
+}
+
+// Runtime はコンテナランタイムの設定。
+type Runtime struct {
+	Default string   `json:"default"`           // runc | crun | youki
+	Install []string `json:"install,omitempty"` // runc 以外に入れるもの (RuntimeClass も作る)
 }
 
 // Cluster は保存されているクラスタ。
