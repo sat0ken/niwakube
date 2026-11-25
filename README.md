@@ -7,8 +7,8 @@ Cloud Hypervisor などの仮想化／コンテナ基盤の上に Kubernetes ク
 
 ## フェーズ0: ホストのセットアップ
 
-1. BIOS で Intel VT-x を有効にし、Ubuntu Server 24.04 をインストールする
-   (できれば `/var/lib/niwakube` を XFS のパーティションか LV にする)
+1. Ubuntu Server 26.04 LTS をインストールする。BIOS の設定や `/var/lib/niwakube` を XFS にする方法も含めて、
+   手順は [docs/install.md](docs/install.md) を参照
 2. このリポジトリを clone して、以下を実行する
 
 ```bash

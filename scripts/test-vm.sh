@@ -8,7 +8,8 @@
 #   sudo ./scripts/test-vm.sh info test            # CH API (vm.info) を叩く
 #   sudo ./scripts/test-vm.sh down test            # 停止して後片付け
 #
-# 環境変数: IP (既定 172.30.0.10), CPUS (2), MEM (4G), DISK_SIZE (20G)
+# 環境変数: IP (既定 172.30.0.10), CPUS (2), MEM (4G), DISK_SIZE (20G),
+#           BASE_IMAGE (既定 /var/lib/niwakube/images/ubuntu-26.04.raw)
 set -euo pipefail
 
 NIWAKUBE_DIR=${NIWAKUBE_DIR:-/var/lib/niwakube}
@@ -19,7 +20,7 @@ IP=${IP:-172.30.0.10}
 CPUS=${CPUS:-2}
 MEM=${MEM:-4G}
 DISK_SIZE=${DISK_SIZE:-20G}
-BASE_IMAGE=${BASE_IMAGE:-$NIWAKUBE_DIR/images/ubuntu-24.04.raw}
+BASE_IMAGE=${BASE_IMAGE:-$NIWAKUBE_DIR/images/ubuntu-26.04.raw}
 FIRMWARE=$NIWAKUBE_DIR/firmware/CLOUDHV.fd
 SSH_KEY=$NIWAKUBE_DIR/ssh/id_ed25519
 RUN_DIR=/run/niwakube
