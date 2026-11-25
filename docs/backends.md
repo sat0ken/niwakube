@@ -110,7 +110,9 @@ Node    ──(Backend: ch/fc/krun/incus/nspawn)──▶ Machine (起動・停�
   - (Talos は nocloud の user-data として machine config を入れる)
 - 先に決めたように、秘密情報はすべて niwakubed が生成するので、ノードの中に入る手段 (SSH / exec) は必須ではない。これがバックエンド間の差を小さくしてくれる
 
-### Go のインターフェース (案)
+### Go のインターフェース
+
+実装は `internal/backend/backend.go`。コンソールは対応状況がバックエンドごとに違うので任意のインターフェースにした。
 
 ```go
 type Backend interface {
@@ -121,12 +123,13 @@ type Backend interface {
     Stop(ctx context.Context, name string, force bool) error
     Delete(ctx context.Context, name string) error
     Status(ctx context.Context, name string) (MachineStatus, error)
-    Console(ctx context.Context, name string) (io.ReadWriteCloser, error)
 }
 
 // 任意の機能は小さなインターフェースに分け、型アサーションで有無を判定する
 type Snapshotter interface{ Snapshot(ctx context.Context, name, tag string) error }
 type Resizer    interface{ Resize(ctx context.Context, name string, cpus, memMiB int) error }
+type Consoler   interface{ Console(ctx context.Context, name string) (io.ReadWriteCloser, error) }
+type SerialLogReader interface{ SerialLog(ctx context.Context, name string, maxBytes int64) ([]byte, error) }
 
 type Capabilities struct {
     Isolation   Isolation    // VM / Container

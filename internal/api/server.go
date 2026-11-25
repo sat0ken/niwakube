@@ -1,0 +1,195 @@
+// Package api は niwakubed の REST API。
+package api
+
+import (
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"net/http"
+	"strconv"
+	"time"
+
+	"github.com/sat0ken/niwakube/internal/backend"
+	"github.com/sat0ken/niwakube/internal/ipam"
+	"github.com/sat0ken/niwakube/internal/machine"
+	"github.com/sat0ken/niwakube/internal/store"
+)
+
+type Server struct {
+	svc *machine.Service
+	log *slog.Logger
+}
+
+func New(svc *machine.Service, log *slog.Logger) *Server {
+	if log == nil {
+		log = slog.Default()
+	}
+	return &Server{svc: svc, log: log}
+}
+
+// Handler は API のルーティングを返す。
+//
+//	GET    /healthz
+//	GET    /api/backends
+//	GET    /api/vms
+//	POST   /api/vms
+//	GET    /api/vms/{name}
+//	DELETE /api/vms/{name}
+//	POST   /api/vms/{name}/start
+//	POST   /api/vms/{name}/stop      ?force=true で強制停止
+//	GET    /api/vms/{name}/serial    ?bytes=N でシリアルログの末尾 N バイト (既定 64KiB)
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+	mux.HandleFunc("GET /api/backends", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, s.svc.Backends())
+	})
+	mux.HandleFunc("GET /api/vms", s.listVMs)
+	mux.HandleFunc("POST /api/vms", s.createVM)
+	mux.HandleFunc("GET /api/vms/{name}", s.getVM)
+	mux.HandleFunc("DELETE /api/vms/{name}", s.deleteVM)
+	mux.HandleFunc("POST /api/vms/{name}/start", s.startVM)
+	mux.HandleFunc("POST /api/vms/{name}/stop", s.stopVM)
+	mux.HandleFunc("GET /api/vms/{name}/serial", s.serialLog)
+	return s.logging(mux)
+}
+
+func (s *Server) listVMs(w http.ResponseWriter, r *http.Request) {
+	vms, err := s.svc.List(r.Context())
+	if err != nil {
+		s.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, vms)
+}
+
+func (s *Server) createVM(w http.ResponseWriter, r *http.Request) {
+	var req machine.CreateRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody{Error: "invalid JSON: " + err.Error()})
+		return
+	}
+	vm, err := s.svc.Create(r.Context(), req)
+	if err != nil {
+		if vm != nil {
+			// 作成はできたが起動に失敗した
+			writeJSON(w, http.StatusInternalServerError, errorBody{Error: err.Error(), VM: vm})
+			return
+		}
+		s.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, vm)
+}
+
+func (s *Server) getVM(w http.ResponseWriter, r *http.Request) {
+	vm, err := s.svc.Get(r.Context(), r.PathValue("name"))
+	if err != nil {
+		s.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, vm)
+}
+
+func (s *Server) deleteVM(w http.ResponseWriter, r *http.Request) {
+	if err := s.svc.Delete(r.Context(), r.PathValue("name")); err != nil {
+		s.writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) startVM(w http.ResponseWriter, r *http.Request) {
+	vm, err := s.svc.Start(r.Context(), r.PathValue("name"))
+	if err != nil {
+		s.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, vm)
+}
+
+func (s *Server) stopVM(w http.ResponseWriter, r *http.Request) {
+	force, _ := strconv.ParseBool(r.URL.Query().Get("force"))
+	vm, err := s.svc.Stop(r.Context(), r.PathValue("name"), force)
+	if err != nil {
+		s.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, vm)
+}
+
+func (s *Server) serialLog(w http.ResponseWriter, r *http.Request) {
+	n := int64(64 << 10)
+	if q := r.URL.Query().Get("bytes"); q != "" {
+		v, err := strconv.ParseInt(q, 10, 64)
+		if err != nil || v <= 0 || v > 16<<20 {
+			writeJSON(w, http.StatusBadRequest, errorBody{Error: "bytes must be between 1 and 16777216"})
+			return
+		}
+		n = v
+	}
+	b, err := s.svc.SerialLog(r.Context(), r.PathValue("name"), n)
+	if err != nil {
+		s.writeError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write(b)
+}
+
+type errorBody struct {
+	Error string           `json:"error"`
+	VM    *machine.Machine `json:"vm,omitempty"`
+}
+
+func statusFor(err error) int {
+	switch {
+	case errors.Is(err, machine.ErrInvalid), errors.Is(err, backend.ErrImageNotFound):
+		return http.StatusBadRequest
+	case errors.Is(err, store.ErrNotFound), errors.Is(err, backend.ErrNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, store.ErrExists), errors.Is(err, backend.ErrAlreadyExists), errors.Is(err, ipam.ErrExhausted):
+		return http.StatusConflict
+	case errors.Is(err, backend.ErrNotSupported):
+		return http.StatusNotImplemented
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+func (s *Server) writeError(w http.ResponseWriter, err error) {
+	code := statusFor(err)
+	if code >= 500 {
+		s.log.Error("request failed", "err", err)
+	}
+	writeJSON(w, code, errorBody{Error: err.Error()})
+}
+
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	code int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.code = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func (s *Server) logging(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, code: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		s.log.Info("http", "method", r.Method, "path", r.URL.Path, "status", rec.code, "duration", time.Since(start).Round(time.Millisecond))
+	})
+}

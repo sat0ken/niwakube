@@ -24,3 +24,67 @@ sudo ./scripts/test-vm.sh down test
 ```
 
 `up` が「OK!」で終われば、Cloud Hypervisor・UEFI ファームウェア・cloud-init・ブリッジ・NAT がすべて動いている。
+
+## フェーズ1: niwakubed (VM の REST API)
+
+ビルドには Go 1.26 以上が必要。`CGO_ENABLED=0` の静的バイナリなので、別のマシンでビルドしてコピーしてもよい。
+
+```bash
+make build
+```
+
+```bash
+sudo make install
+```
+
+```bash
+sudo systemctl enable --now niwakubed
+```
+
+既定では `127.0.0.1:8080` で待ち受ける (認証がまだ無いため)。LAN から使う場合は
+`deploy/niwakubed.service` の `--listen` を変える。
+
+### API
+
+| メソッド | パス | 説明 |
+|---|---|---|
+| GET | `/api/backends` | 使えるバックエンドの一覧 |
+| GET | `/api/vms` | VM 一覧 (望ましい状態と現在の状態) |
+| POST | `/api/vms` | VM を作成して起動する |
+| GET | `/api/vms/{name}` | VM の詳細 |
+| DELETE | `/api/vms/{name}` | VM を停止して削除する |
+| POST | `/api/vms/{name}/start` | 起動 |
+| POST | `/api/vms/{name}/stop` | 停止 (`?force=true` で強制停止) |
+| GET | `/api/vms/{name}/serial` | シリアルコンソールのログ (`?bytes=N` で末尾 N バイト) |
+
+```bash
+curl -s -X POST localhost:8080/api/vms -d '{"name":"vm1","cpus":2,"memoryMiB":4096,"diskGiB":20}'
+```
+
+```bash
+curl -s localhost:8080/api/vms/vm1
+```
+
+```bash
+curl -s localhost:8080/api/vms/vm1/serial
+```
+
+```bash
+sudo ssh -i /var/lib/niwakube/ssh/id_ed25519 ubuntu@172.30.0.10
+```
+
+```bash
+curl -s -X DELETE localhost:8080/api/vms/vm1
+```
+
+`POST /api/vms` の項目 (省略時の既定値): `name` (必須)、`backend` (cloud-hypervisor)、`image` (ubuntu-24.04)、
+`cpus` (2)、`memoryMiB` (4096)、`diskGiB` (20)、`sshAuthorizedKeys` (なし。`/var/lib/niwakube/ssh/id_ed25519.pub` は常に入る)。
+
+### 仕組み
+
+- VM ごとに `cloud-hypervisor --api-socket` を systemd の transient unit `niwakube-vm-<name>` として起動し、
+  API socket (`/run/niwakube/<name>.sock`) に `vm.create` → `vm.boot` を送る
+- niwakubed を止めたり再起動したりしても VM は動き続ける。ホストの再起動後は、niwakubed が起動時に
+  「起動しているはずの VM」を起動し直す
+- 状態は `/var/lib/niwakube/niwakube.db` (SQLite)、VM のファイルは `/var/lib/niwakube/vms/<name>/` にある
+- 動きを見るには `journalctl -u niwakubed -f`、VM のプロセスは `systemctl status niwakube-vm-<name>`
