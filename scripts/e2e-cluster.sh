@@ -64,6 +64,11 @@ cleanup() {
       echo "----- errors in $f"
       grep -n -i -E 'error|fail|not found|exit [1-9]' "$f" | grep -v -E 'level=info' | tail -n 40 || true
     done
+    if [[ -s $KUBECONFIG_FILE ]]; then
+      echo "----- pods / events"
+      kubectl --kubeconfig "$KUBECONFIG_FILE" get pods -A -o wide 2>&1 | tail -n 40 || true
+      kubectl --kubeconfig "$KUBECONFIG_FILE" get events -A --sort-by=.lastTimestamp 2>&1 | tail -n 40 || true
+    fi
     echo "----- machine status (niwakubed)"
     jq -c '.machines[]? | {name, ip, status}' "$LOG_DIR/cluster.json" 2>/dev/null || true
     echo "----- vm.info (直接)"

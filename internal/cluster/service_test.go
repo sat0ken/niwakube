@@ -98,8 +98,12 @@ func TestCreateCluster(t *testing.T) {
 	if c.Status.Phase != "provisioning" {
 		t.Errorf("phase = %s", c.Status.Phase)
 	}
-	if len(pr.calls) == 0 || pr.calls[0] != "https://172.30.1.11:6443" {
-		t.Errorf("probe calls = %v", pr.calls)
+	// 裏でアドオンの適用のために Probe が呼ばれるので、ロックを取って読む
+	pr.mu.Lock()
+	calls := append([]string(nil), pr.calls...)
+	pr.mu.Unlock()
+	if len(calls) == 0 || calls[0] != "https://172.30.1.11:6443" {
+		t.Errorf("probe calls = %v", calls)
 	}
 
 	// CP の user-data には CA が入り、ワーカーには入らない
