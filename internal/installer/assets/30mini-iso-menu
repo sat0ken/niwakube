@@ -102,6 +102,15 @@ step1() {
 #   - ファイルが STALL 秒増えなければ wget を止めて、そこから取り直す。取り直すたびに次の URL を使う
 #     (ミラーと releases.ubuntu.com を交互に試す。中身は最後に SHA256 で確かめる)
 #   - CHUNK 分取れたら TARGET の同じ位置に dd で書き、ファイルを消す (メモリを ISO 2 つ分使わない)
+show_network() {
+    echo "niwakube: ----- network -----"
+    ip -o link 2>&1 | cut -c1-120
+    ip -o -f inet addr 2>&1
+    ip route 2>&1
+    cat /etc/resolv.conf 2>&1
+    echo "niwakube: -------------------"
+}
+
 download() {
     urls=$1 target=$2 size=$3
     nurls=$(echo "$urls" | tr ',' '\n' | wc -l)
@@ -111,6 +120,7 @@ download() {
     tmp=/niwakube-download
     [ -n "$size" ] || { echo "niwakube: ISO size is unknown"; return 1; }
     total_mib=$(( (size + mib - 1) / mib ))
+    shown_net=""
 
     off_mib=0
     while [ "$off_mib" -lt "$total_mib" ]; do
@@ -130,7 +140,8 @@ download() {
             fi
             url=$(echo "$urls" | tr ',' '\n' | sed -n "$(( (tries - 1) % nurls + 1 ))p")
             [ "$tries" -gt 1 ] && echo "niwakube: retrying from $((have / mib)) MiB (attempt $tries, $url)"
-            wget -q -c -O "$tmp" "$url" &
+            # -q を付けない: "Connecting to host (address:443)" と wget のエラーが出るので、どこで止まったか分かる
+            wget -c -O "$tmp" "$url" &
             pid=$!
             last=$have
             idle=0
@@ -146,6 +157,10 @@ download() {
                     idle=$((idle + 1))
                     if [ "$idle" -ge "$stall" ]; then
                         echo "niwakube: download stalled for ${stall}s at $((now / mib)) MiB (check the LAN cable / link)"
+                        if [ -z "$shown_net" ]; then
+                            shown_net=1
+                            show_network
+                        fi
                         break
                     fi
                 fi
@@ -170,6 +185,13 @@ step2() {
     target="/dev/pmem0"
     [ -e "$target" ] || debug_shell "failed to find $target"
 
+    # IPv4 だけで取る。ルーターが IPv6 を配っていると、IPv6 の経路が使えないときに接続が止まってしまうため
+    # (DHCP で IPv4 のアドレスはもらっている。インストーラー本体の起動時には元に戻る)
+    v6=$(ip -o -f inet6 addr 2>/dev/null | grep -c 'scope global')
+    echo "niwakube: global IPv6 addresses: $v6 (IPv6 is disabled while downloading)"
+    for f in /proc/sys/net/ipv6/conf/*/disable_ipv6; do
+        [ -w "$f" ] && echo 1 > "$f"
+    done
     echo "Downloading $(echo "$URL" | tr ',' ' ') ..."
     download "$URL" "$target" "$MEDIA_SIZE" || debug_shell "download failed"
 
