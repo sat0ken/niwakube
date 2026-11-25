@@ -9,7 +9,8 @@ kubeadm / k3s / Talos の Kubernetes クラスタを払い出す仕組み。用�
 
 | 項目 | 決定 |
 |---|---|
-| ホスト OS | Ubuntu Server 24.04 |
+| ホスト OS | Ubuntu Server 26.04 LTS (インストール手順は [install.md](install.md)) |
+| VM の OS | Ubuntu 26.04 のクラウドイメージ (kubeadm / k3s 用) |
 | Backend | インターフェースで差し替え可能。実装順は **Cloud Hypervisor → systemd-nspawn** (詳細は [backends.md](backends.md)) |
 | ファームウェア | CLOUDHV.fd (EDK2 / UEFI) |
 | ネットワーク | ホスト内の NAT ブリッジ `nkbr0` (172.30.0.0/16) |
@@ -72,7 +73,7 @@ kubeadm は起動のたびに apt でパッケージを入れるので遅い。�
 ```
 /var/lib/niwakube/
   firmware/CLOUDHV.fd
-  images/ubuntu-24.04.raw, talos-<ver>.raw
+  images/ubuntu-26.04.raw, talos-<ver>.raw
   vms/<vm>/disk.raw, seed.iso, serial.log
   ssh/id_ed25519            # VM にログインするための鍵
   niwakube.db                 # SQLite

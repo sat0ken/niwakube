@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# niwakube ホストセットアップ (Ubuntu Server 24.04 想定)
+# niwakube ホストセットアップ (Ubuntu Server 26.04 LTS 想定。24.04 でも動く)
 #
 #   sudo ./scripts/host-setup.sh
 #
@@ -10,7 +10,8 @@ NIWAKUBE_DIR=${NIWAKUBE_DIR:-/var/lib/niwakube}
 BRIDGE=${BRIDGE:-nkbr0}
 BRIDGE_ADDR=${BRIDGE_ADDR:-172.30.0.1/16}
 VM_SUBNET=${VM_SUBNET:-172.30.0.0/16}
-UBUNTU_IMAGE_URL=${UBUNTU_IMAGE_URL:-https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img}
+# VM 用に取得する Ubuntu クラウドイメージのバージョン (スペース区切りで複数可。例: "26.04 24.04")
+UBUNTU_IMAGES=${UBUNTU_IMAGES:-26.04}
 
 CH_RELEASES=https://github.com/cloud-hypervisor/cloud-hypervisor/releases/latest/download
 EDK2_RELEASES=https://github.com/cloud-hypervisor/edk2/releases/latest/download
@@ -20,6 +21,18 @@ warn() { printf '\e[1;33m!!\e[0m %s\n' "$*" >&2; }
 die()  { printf '\e[1;31mxx\e[0m %s\n' "$*" >&2; exit 1; }
 
 [[ $EUID -eq 0 ]] || die "root で実行してください (sudo $0)"
+
+check_os() {
+  log "ホスト OS の確認"
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  echo "    $PRETTY_NAME"
+  if [[ ${ID:-} != ubuntu ]]; then
+    warn "Ubuntu 以外では試していません"
+  elif [[ ${VERSION_ID:-} != 26.04 && ${VERSION_ID:-} != 24.04 ]]; then
+    warn "Ubuntu 26.04 / 24.04 以外では試していません"
+  fi
+}
 
 check_kvm() {
   log "KVM の確認"
@@ -143,27 +156,42 @@ EOF
   fi
 }
 
-fetch_ubuntu_image() {
-  local raw=$NIWAKUBE_DIR/images/ubuntu-24.04.raw
-  if [[ -f $raw ]]; then
-    log "Ubuntu クラウドイメージは取得済み: $raw"
-    return
-  fi
-  log "Ubuntu 24.04 クラウドイメージの取得と raw 変換"
-  local tmp
-  tmp=$(mktemp -d)
-  curl -fL --progress-bar -o "$tmp/ubuntu.img" "$UBUNTU_IMAGE_URL"
-  qemu-img convert -p -O raw "$tmp/ubuntu.img" "$raw.tmp"
-  mv "$raw.tmp" "$raw"
-  rm -rf "$tmp"
+# バージョン → コードネーム
+ubuntu_codename() {
+  case $1 in
+    24.04) echo noble ;;
+    26.04) echo resolute ;;
+    *) die "未対応の Ubuntu バージョンです: $1" ;;
+  esac
 }
 
+fetch_ubuntu_images() {
+  local ver codename raw url tmp
+  for ver in $UBUNTU_IMAGES; do
+    codename=$(ubuntu_codename "$ver")
+    raw=$NIWAKUBE_DIR/images/ubuntu-$ver.raw
+    if [[ -f $raw ]]; then
+      log "Ubuntu $ver クラウドイメージは取得済み: $raw"
+      continue
+    fi
+    url=https://cloud-images.ubuntu.com/releases/$codename/release/ubuntu-$ver-server-cloudimg-amd64.img
+    log "Ubuntu $ver ($codename) クラウドイメージの取得と raw 変換"
+    tmp=$(mktemp -d)
+    curl -fL --progress-bar -o "$tmp/ubuntu.img" "$url"
+    qemu-img convert -p -O raw "$tmp/ubuntu.img" "$raw.tmp"
+    mv "$raw.tmp" "$raw"
+    rm -f "$tmp/ubuntu.img"
+    rmdir "$tmp"
+  done
+}
+
+check_os
 check_kvm
 install_packages
 install_cloud_hypervisor
 setup_dirs
 setup_bridge
 setup_nat
-fetch_ubuntu_image
+fetch_ubuntu_images
 
 log "完了。次は: sudo ./scripts/test-vm.sh up test"
