@@ -135,15 +135,21 @@ log "SSH でログインできました ($((SECONDS - start))s)"
 
 # インストーラーは初回起動で cloud-init を無効にする目印 (cloud-init.disabled) を置くので、
 # cloud-init status --wait はすぐ "disabled" を返してしまう。runcmd を実行する cloud-final.service の終了を待つ。
+# まだ始まっていない cloud-final.service も inactive なので、起動の処理がすべて終わっている
+# (is-system-running が starting / initializing でない) ことも確かめる。
 log "初回起動の処理 (cloud-final.service) の完了待ち"
 start=$SECONDS
 while :; do
   state=$(ssh_vm 'systemctl show -p ActiveState --value cloud-final.service' 2>/dev/null || echo unknown)
-  [[ $state == active || $state == failed || $state == inactive ]] && break
-  (( SECONDS - start < 1200 )) || die "1200s 待っても初回起動の処理が終わりません (cloud-final.service: $state)"
+  system=$(ssh_vm 'systemctl is-system-running' 2>/dev/null || true)
+  if [[ $system != starting && $system != initializing && -n $system ]] &&
+    [[ $state == active || $state == failed || $state == inactive ]]; then
+    break
+  fi
+  (( SECONDS - start < 1200 )) || die "1200s 待っても初回起動の処理が終わりません (cloud-final.service: $state、system: $system)"
   sleep 10
 done
-log "初回起動の処理が終わりました ($((SECONDS - start))s、cloud-final.service: $state)"
+log "初回起動の処理が終わりました ($((SECONDS - start))s、cloud-final.service: $state、system: $system)"
 [[ $state != failed ]] || { ssh_vm 'sudo tail -n 60 /var/log/cloud-init-output.log' || true; die "cloud-final.service が失敗しました"; }
 
 log "設定どおりか確かめる"
