@@ -10,6 +10,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
@@ -164,4 +165,67 @@ func RandomToken(bytes int) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// PublicKeyPEM は秘密鍵 (PEM) から公開鍵を PKIX の PEM ("PUBLIC KEY") で返す。
+func PublicKeyPEM(privPEM string) (string, error) {
+	b, _ := pem.Decode([]byte(privPEM))
+	if b == nil {
+		return "", errors.New("invalid private key PEM")
+	}
+	var key any
+	var err error
+	switch b.Type {
+	case "RSA PRIVATE KEY":
+		key, err = x509.ParsePKCS1PrivateKey(b.Bytes)
+	case "EC PRIVATE KEY":
+		key, err = x509.ParseECPrivateKey(b.Bytes)
+	case "PRIVATE KEY":
+		key, err = x509.ParsePKCS8PrivateKey(b.Bytes)
+	default:
+		return "", fmt.Errorf("unsupported key type %q", b.Type)
+	}
+	if err != nil {
+		return "", err
+	}
+	signer, ok := key.(crypto.Signer)
+	if !ok {
+		return "", errors.New("key is not a signer")
+	}
+	der, err := x509.MarshalPKIXPublicKey(signer.Public())
+	if err != nil {
+		return "", err
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})), nil
+}
+
+// CACertHash は kubeadm join の --discovery-token-ca-cert-hash に使う値 ("sha256:<公開鍵の SHA-256>") を返す。
+func CACertHash(certPEM string) (string, error) {
+	b, _ := pem.Decode([]byte(certPEM))
+	if b == nil || b.Type != "CERTIFICATE" {
+		return "", errors.New("invalid certificate PEM")
+	}
+	cert, err := x509.ParseCertificate(b.Bytes)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
+	return "sha256:" + hex.EncodeToString(sum[:]), nil
+}
+
+// BootstrapToken は kubeadm のブートストラップトークン ([a-z0-9]{6}.[a-z0-9]{16}) を返す。
+func BootstrapToken() (string, error) {
+	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, 22)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	out := make([]byte, 0, 23)
+	for i, c := range b {
+		if i == 6 {
+			out = append(out, '.')
+		}
+		out = append(out, alphabet[int(c)%len(alphabet)])
+	}
+	return string(out), nil
 }

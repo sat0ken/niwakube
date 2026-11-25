@@ -94,7 +94,7 @@ curl -s -X DELETE localhost:8080/api/vms/vm1
 
 ## フェーズ2: クラスタの払い出し
 
-いまは **k3s** に対応 (コントロールプレーン 1 台 + ワーカー N 台)。kubeadm と Talos はこれから。
+いまは **k3s** と **kubeadm** に対応 (コントロールプレーン 1 台 + ワーカー N 台)。Talos はこれから。
 
 ```bash
 curl -s -X POST localhost:8080/api/clusters -d '{"name":"demo","distro":"k3s","workers":2}'
@@ -118,6 +118,11 @@ kubectl --kubeconfig demo.kubeconfig get nodes
 curl -s -X DELETE localhost:8080/api/clusters/demo
 ```
 
+| ディストリ | ノードの OS | 構築のしかた | CNI |
+|---|---|---|---|
+| k3s | Ubuntu 26.04 | `get.k3s.io` で server / agent をインストール | flannel (k3s 組み込み) |
+| kubeadm | Ubuntu 26.04 | containerd と `pkgs.k8s.io` の kubeadm を入れて `kubeadm init` / `join` | flannel |
+
 | メソッド | パス | 説明 |
 |---|---|---|
 | GET | `/api/distros` | 使えるディストリビューションの一覧 |
@@ -130,13 +135,13 @@ curl -s -X DELETE localhost:8080/api/clusters/demo
 | GET | `/api/clusters/{name}/kubeconfig` | admin の kubeconfig |
 
 `POST /api/clusters` の項目 (省略時の既定値): `name` (必須、20 文字以内)、`distro` (k3s)、
-`version` (k3s なら `stable`。`latest` や `v1.34.2+k3s1` も可)、`controlPlanes` (1。いまは 1 のみ)、`workers` (2)、
+`version` (既定は `stable`。k3s は `latest` や `v1.37.2+k3s1`、kubeadm は `v1.37` (その minor の最新) や `v1.37.2` も可)、`controlPlanes` (1。いまは 1 のみ)、`workers` (2)、
 `controlPlane` / `worker` (`{"cpus":2,"memoryMiB":4096,"diskGiB":20}`)、`sshAuthorizedKeys`。
 
 ### 仕組み
 
 - クラスタ N には `172.30.N.0/24` を割り当てる。CP は `.11`、ワーカーは `.21` から順に使う (`.10` は将来の VIP 用)
-- CA などの秘密情報は niwakubed が作り、cloud-init で CP に渡す (k3s の「カスタム CA」の仕組み)。
+- CA などの秘密情報は niwakubed が作り、cloud-init で CP に渡す (k3s は「カスタム CA」、kubeadm は `/etc/kubernetes/pki` に事前に置く)。
   そのため niwakubed が admin の kubeconfig を自分で発行でき、VM に SSH して取りに行く必要がない
 - `status` は取得のたびに API サーバー (`/api/v1/nodes`) に問い合わせて、Ready なノードを数える
 - クラスタに属する VM は `/api/vms` に `cluster` / `role` 付きで表示される。単体では削除できない

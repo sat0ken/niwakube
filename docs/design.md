@@ -119,19 +119,21 @@ GET    /api/host                     CPU / メモリ / ディスクの使用状�
 
 | プラン | vCPU | メモリ | ディスク |
 |---|---|---|---|
-| small | 2 | 4GB | 20GB |
-| medium | 2 | 8GB | 40GB |
-| large | 4 | 16GB | 80GB |
+| small | 2 | 2GB | 30GB |
+| medium | 2 | 4GB | 30GB |
+| large | 4 | 8GB | 30GB |
 
-例: 「CP 1台 small + ワーカー 2台 medium」のクラスタ (20GB) なら 3 つ同時に動かせる。
+例: 「CP 1台 small + ワーカー 2台 medium」のクラスタ (メモリ 10GB) なら 6 つ同時に動かせる。
+ディスクは見かけ上 1 クラスタ 90GB になるが、raw イメージは疎ファイル (XFS なら reflink) なので、実際に使うのは書き込んだ分だけ。
 
 ## フェーズ
 
 0. ホストのセットアップと、VM を手で1台起動 (`scripts/host-setup.sh`、`scripts/test-vm.sh`)
 1. niwakubed: VM 単体の作成・削除 (CH クライアント、systemd、IPAM、SQLite) (完了)
 2. niwakubed: k3s クラスタの払い出し (一番単純なので最初に)。次に kubeadm、最後に Talos
-   - 2a: クラスタの仕組み + k3s (CP 1 台 + ワーカー N 台) ← いまここ
-   - 2b: kubeadm、2c: Talos、その後 CP の HA (VIP)、ワーカー数の変更
+   - 2a: クラスタの仕組み + k3s (CP 1 台 + ワーカー N 台) (完了)
+   - 2b: kubeadm ← いまここ
+   - 2c: Talos、その後 CP の HA (VIP)、ワーカー数の変更
 3. systemd-nspawn バックエンド (Backend インターフェースが正しく切れているかの検証を兼ねる)
 4. Web UI
 5. 発展: Firecracker / libkrun バックエンド、シリアルコンソール、スケール、事前ビルドしたイメージ、LAN 公開 (DNAT)、スナップショット
@@ -151,3 +153,5 @@ GET    /api/host                     CPU / メモリ / ディスクの使用状�
   CP 1 + ワーカー 1 が約 40 秒で Ready になり、Service・クラスタ内 DNS・ノードをまたぐ Pod 間通信 (flannel VXLAN) も動く
 - Cloud Hypervisor の API サーバーは同時接続数に上限がある。keep-alive で接続を残すと約 40 秒で新しい接続が拒否されるため、
   クライアントはリクエストごとに接続を閉じる
+- kubeadm (v1.37.2、containerd 2.2) が niwakubed の作った CA・SA 鍵で init でき、ワーカーは事前に計算した CA hash で join できる。
+  CP 1 + ワーカー 1 が約 70 秒で Ready になり、Service・クラスタ内 DNS・ノードをまたぐ Pod 間通信 (flannel VXLAN) も動く

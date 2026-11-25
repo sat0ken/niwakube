@@ -45,7 +45,7 @@ cleanup() {
     for m in $(jq -r '.machines[]? | "\(.name)=\(.ip)"' "$LOG_DIR/cluster.json" 2>/dev/null); do
       local name=${m%=*} ip=${m#*=}
       curl -s "$API/vms/$name/serial?bytes=2097152" >"$LOG_DIR/$name-serial.log" || true
-      ssh_to "$ip" 'sudo cat /var/log/cloud-init-output.log; sudo journalctl --no-pager -u "k3s*" | tail -300' \
+      ssh_to "$ip" 'sudo cat /var/log/cloud-init-output.log; sudo journalctl --no-pager -u "k3s*" -u kubelet -u containerd | tail -300' \
         >"$LOG_DIR/$name-guest.log" 2>&1 || true
     done
     # Artifacts を取れない環境でも原因が分かるように、要点をジョブのログにも出す
@@ -133,7 +133,7 @@ curl -fs "$API/clusters/$NAME/kubeconfig" >"$KUBECONFIG_FILE"
 k get nodes -o wide
 [[ $(k get nodes --no-headers | wc -l) == 2 ]] || die "ノード数が違います"
 
-log "Deployment を作って両方のノードに Pod を置く"
+log "Deployment を作る (kubeadm は CP に taint があるので Pod はワーカーに載る)"
 k create deployment hello --image="$TEST_IMAGE" --replicas=2 --port=8080 -- /agnhost netexec --http-port=8080
 k rollout status deployment/hello --timeout=300s
 k get pods -o wide
