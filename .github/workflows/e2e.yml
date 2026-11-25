@@ -46,7 +46,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        distro: [k3s]
+        distro: [k3s, kubeadm]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6

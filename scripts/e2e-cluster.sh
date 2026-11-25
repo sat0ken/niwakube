@@ -45,7 +45,7 @@ cleanup() {
     for m in $(jq -r '.machines[]? | "\(.name)=\(.ip)"' "$LOG_DIR/cluster.json" 2>/dev/null); do
       local name=${m%=*} ip=${m#*=}
       curl -s "$API/vms/$name/serial?bytes=2097152" >"$LOG_DIR/$name-serial.log" || true
-      ssh_to "$ip" 'sudo cat /var/log/cloud-init-output.log; sudo journalctl --no-pager -u "k3s*" | tail -300' \
+      ssh_to "$ip" 'sudo cat /var/log/cloud-init-output.log; sudo journalctl --no-pager -u "k3s*" -u kubelet -u containerd | tail -300' \
         >"$LOG_DIR/$name-guest.log" 2>&1 || true
     done
     # Artifacts を取れない環境でも原因が分かるように、要点をジョブのログにも出す
