@@ -178,3 +178,6 @@ func (k K3s) UserData(c *distro.Cluster, n *distro.Node) (map[string]any, error)
 		"runcmd":      runcmd,
 	}, nil
 }
+
+// LocalStorage: k3s には local-path-provisioner が組み込まれている (StorageClass local-path が既定)。
+func (K3s) LocalStorage() distro.LocalStorage { return distro.LocalStorage{Builtin: true} }

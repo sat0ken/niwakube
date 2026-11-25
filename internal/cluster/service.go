@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
@@ -47,6 +49,14 @@ type Config struct {
 	Forwarder ForwardApplier
 	// NewApplier はクラスタにマニフェストを適用するクライアントを作る。nil なら kube.New
 	NewApplier func(kubeconfig []byte) (Applier, error)
+	// NFS はホストの NFS サーバー。Root が空なら NFS の StorageClass は作らない
+	NFS NFSConfig
+}
+
+// NFSConfig はホストの NFS サーバーの設定。クラスタごとに Root/<クラスタ名> を共有する。
+type NFSConfig struct {
+	Server netip.Addr // VM から見たホストのアドレス (ブリッジのアドレス)
+	Root   string     // ホスト上で export しているディレクトリ (例: /var/lib/niwakube/nfs)
 }
 
 // ForwardApplier はホストのポートの転送をまとめて反映する。
@@ -200,11 +210,13 @@ type Cluster struct {
 	// LoadBalancerPool は Service type: LoadBalancer に割り当てる IP の範囲 (Cilium のときだけ)
 	LoadBalancerPool string `json:"loadBalancerPool,omitempty"`
 	// Addons は niwakubed がクラスタに入れるもの (LB の IP プールなど) の適用状況
-	Addons       string             `json:"addons,omitempty"`
-	DesiredState string             `json:"desiredState"`
-	Status       Status             `json:"status"`
-	Machines     []*machine.Machine `json:"machines"`
-	CreatedAt    time.Time          `json:"createdAt"`
+	Addons string `json:"addons,omitempty"`
+	// StorageClasses は使える StorageClass (既定のものが先頭)
+	StorageClasses []string           `json:"storageClasses"`
+	DesiredState   string             `json:"desiredState"`
+	Status         Status             `json:"status"`
+	Machines       []*machine.Machine `json:"machines"`
+	CreatedAt      time.Time          `json:"createdAt"`
 }
 
 var nameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,18}[a-z0-9])?$`)
@@ -373,6 +385,12 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (*Cluster, erro
 	}
 	s.log.Info("cluster registered", "cluster", rec.Name, "distro", rec.Distro, "subnet", s.subnetOf(index))
 
+	if s.nfsEnabled() {
+		if err := os.MkdirAll(s.nfsDir(rec.Name), 0o755); err != nil {
+			s.rollback(context.WithoutCancel(ctx), rec.Name)
+			return nil, fmt.Errorf("create nfs dir: %w", err)
+		}
+	}
 	if err := s.createNodes(ctx, d, rec, secrets); err != nil {
 		s.rollback(context.WithoutCancel(ctx), rec.Name)
 		return nil, err
@@ -472,7 +490,7 @@ func (s *Service) view(ctx context.Context, rec *store.Cluster) (*Cluster, error
 		ControlPlane: rec.Spec.ControlPlane, Worker: rec.Spec.Worker,
 		CNI: cniOf(rec), Hubble: rec.Spec.Hubble, Runtime: runtimeOf(rec),
 		Subnet: s.subnetOf(rec.Index).String(), Endpoint: s.endpoint(rec), LoadBalancerPool: s.lbPoolString(rec),
-		Addons:       s.addonStatus(rec.Name),
+		Addons: s.addonStatus(rec.Name), StorageClasses: s.storageClasses(rec),
 		DesiredState: rec.DesiredState, Machines: ms, CreatedAt: rec.CreatedAt,
 	}
 	v.Status = s.status(ctx, rec, ms)
@@ -601,6 +619,12 @@ func (s *Service) deleteLocked(ctx context.Context, name string) error {
 	if len(errs) > 0 {
 		// ノードが残っているうちは登録を消さない (やり直せるように)
 		return errors.Join(errs...)
+	}
+	if s.nfsEnabled() {
+		// NFS のデータもクラスタと一緒に消す (同じ名前で作り直したときに古いデータが見えないように)
+		if err := os.RemoveAll(s.nfsDir(name)); err != nil {
+			s.log.Error("remove nfs dir", "cluster", name, "err", err)
+		}
 	}
 	if err := s.store.DeleteClusterForwards(ctx, name); err != nil {
 		return err
@@ -775,6 +799,37 @@ func (s *Service) addonManifests(rec *store.Cluster) []addons.Manifest {
 	if cniOf(rec) == distro.CNICilium {
 		start, stop := s.lbPool(rec)
 		out = append(out, addons.LoadBalancer(start, stop)...)
+	}
+	ls := s.localStorage(rec)
+	opts := addons.StorageOptions{LocalPath: !ls.Builtin, LocalPathDir: ls.Dir, PrivilegedNamespace: ls.PrivilegedNamespace}
+	if s.nfsEnabled() {
+		opts.NFSServer, opts.NFSShare = s.cfg.NFS.Server.String(), s.nfsDir(rec.Name)
+	}
+	st, err := addons.Storage(opts)
+	if err != nil {
+		s.log.Error("storage addons", "cluster", rec.Name, "err", err)
+		return out
+	}
+	return append(out, st...)
+}
+
+func (s *Service) localStorage(rec *store.Cluster) distro.LocalStorage {
+	ls := distro.LocalStorage{Dir: "/opt/local-path-provisioner"}
+	if p, ok := s.distros[rec.Distro].(distro.LocalStorageProvider); ok {
+		ls = p.LocalStorage()
+	}
+	return ls
+}
+
+func (s *Service) nfsEnabled() bool { return s.cfg.NFS.Root != "" && s.cfg.NFS.Server.IsValid() }
+
+// nfsDir はクラスタの NFS のディレクトリ (ホスト上のパス。NFS の share も同じパス)。
+func (s *Service) nfsDir(cluster string) string { return filepath.Join(s.cfg.NFS.Root, cluster) }
+
+func (s *Service) storageClasses(*store.Cluster) []string {
+	out := []string{"local-path"}
+	if s.nfsEnabled() {
+		out = append(out, "niwakube-nfs")
 	}
 	return out
 }

@@ -23,6 +23,7 @@ API=http://$LISTEN/api
 SSH_KEY=$NIWAKUBE_DIR/ssh/id_ed25519
 KUBECONFIG_FILE=$LOG_DIR/$NAME.kubeconfig
 TEST_IMAGE=registry.k8s.io/e2e-test-images/agnhost:2.39
+BUSYBOX_IMAGE=registry.k8s.io/e2e-test-images/busybox:1.36.1-1
 
 log() { printf '\e[1;34m==>\e[0m %s\n' "$*"; }
 die() { printf '\e[1;31mxx\e[0m %s\n' "$*" >&2; exit 1; }
@@ -63,6 +64,11 @@ cleanup() {
       echo "----- errors in $f"
       grep -n -i -E 'error|fail|not found|exit [1-9]' "$f" | grep -v -E 'level=info' | tail -n 40 || true
     done
+    if [[ -s $KUBECONFIG_FILE ]]; then
+      echo "----- pods / events"
+      kubectl --kubeconfig "$KUBECONFIG_FILE" get pods -A -o wide 2>&1 | tail -n 40 || true
+      kubectl --kubeconfig "$KUBECONFIG_FILE" get events -A --sort-by=.lastTimestamp 2>&1 | tail -n 40 || true
+    fi
     echo "----- machine status (niwakubed)"
     jq -c '.machines[]? | {name, ip, status}' "$LOG_DIR/cluster.json" 2>/dev/null || true
     echo "----- vm.info (直接)"
@@ -205,14 +211,17 @@ for node in $NODES; do
   done
 done
 
+log "niwakubed が入れるアドオン (LoadBalancer の IP プール、ストレージ) の適用を待つ"
+for _ in $(seq 1 90); do
+  addons=$(curl -s "$API/clusters/$NAME" | jq -r '.addons // ""')
+  [[ $addons == applied ]] && break
+  sleep 5
+done
+[[ $addons == applied ]] || die "アドオンが適用されません: $addons"
+curl -s "$API/clusters/$NAME" | jq -c '{storageClasses, loadBalancerPool}'
+
 if [[ $CNI == cilium ]]; then
   log "LoadBalancer (Cilium の LB IPAM + L2 アナウンス)"
-  for _ in $(seq 1 60); do
-    addons=$(curl -s "$API/clusters/$NAME" | jq -r '.addons // ""')
-    [[ $addons == applied ]] && break
-    sleep 5
-  done
-  [[ $addons == applied ]] || die "LoadBalancer の設定 (アドオン) が適用されません: $addons"
   pool=$(curl -s "$API/clusters/$NAME" | jq -r .loadBalancerPool)
   echo "    pool: $pool"
   k expose deployment hello --name hello-lb --type LoadBalancer --port 8080 >/dev/null
@@ -249,6 +258,75 @@ if [[ $CNI == cilium ]]; then
   echo "    転送を削除すると届かなくなる: OK"
 fi
 
+# pv_pod NAME PVC: PVC をマウントして /data/hello に書き込む Pod を作る
+pv_pod() {
+  k apply -f - >/dev/null <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: $1
+spec:
+  containers:
+    - name: writer
+      image: $BUSYBOX_IMAGE
+      command: ["sh", "-c", "echo hello-from-$1 > /data/hello && sleep 3600"]
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: $2
+EOF
+}
+
+log "PV: local-path (ノードのディスク、既定の StorageClass)"
+k get storageclass
+k apply -f - >/dev/null <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-local
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 64Mi
+EOF
+pv_pod pv-local pvc-local
+if ! k wait --for=condition=Ready pod/pv-local --timeout=300s; then
+  k describe pvc pvc-local | tail -n 15 || true
+  k describe pod pv-local | tail -n 15 || true
+  die "local-path の PV を使う Pod が起動しません"
+fi
+[[ $(k exec pv-local -- cat /data/hello) == hello-from-pv-local ]] || die "local-path の PV に書き込めません"
+echo "    local-path: OK ($(k get pvc pvc-local -o jsonpath='{.spec.storageClassName}'))"
+
+log "PV: NFS (ホストの NFS サーバー、StorageClass niwakube-nfs、ReadWriteMany)"
+k apply -f - >/dev/null <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-nfs
+spec:
+  storageClassName: niwakube-nfs
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 64Mi
+EOF
+pv_pod pv-nfs pvc-nfs
+if ! k wait --for=condition=Ready pod/pv-nfs --timeout=300s; then
+  k describe pvc pvc-nfs | tail -n 15 || true
+  k describe pod pv-nfs | tail -n 15 || true
+  k -n kube-system logs deploy/csi-nfs-controller -c nfs --tail=30 || true
+  die "NFS の PV を使う Pod が起動しません"
+fi
+# ホスト側の NFS のディレクトリにファイルができている
+host_file=$(find "$NIWAKUBE_DIR/nfs/$NAME" -name hello -type f 2>/dev/null | head -n1)
+[[ -n $host_file && $(cat "$host_file") == hello-from-pv-nfs ]] || die "ホストの NFS のディレクトリにファイルがありません"
+echo "    NFS: OK (ホストの $host_file)"
+
 if [[ -n $RUNTIMES || $RUNTIME != runc ]]; then
   log "RuntimeClass ごとに Pod を動かす"
   k get runtimeclass
@@ -273,5 +351,6 @@ code=$(curl -s -o /dev/null -w '%{http_code}' "$API/clusters/$NAME")
 for d in "$NIWAKUBE_DIR/vms/$NAME"-*; do
   [[ -e $d ]] && die "VM のディレクトリが残っています: $d"
 done
+[[ ! -e $NIWAKUBE_DIR/nfs/$NAME ]] || die "NFS のディレクトリが残っています"
 
 log "すべて成功しました"

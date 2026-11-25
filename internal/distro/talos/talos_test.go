@@ -73,6 +73,12 @@ func TestMachineConfigCilium(t *testing.T) {
 	if _, ok := d["KubeFlannelCNIConfig"]; ok {
 		t.Error("flannel must be removed with cilium")
 	}
+	if uv := d["UserVolumeConfig"]; uv["name"] != localPathVolume || uv["volumeType"] != "directory" {
+		t.Errorf("local-path user volume: %v", uv)
+	}
+	if New().LocalStorage().Dir != "/var/mnt/local-path-provisioner" {
+		t.Errorf("local-path dir: %s", New().LocalStorage().Dir)
+	}
 	if _, ok := d["UnattendedInstallConfig"]; ok {
 		t.Error("the nocloud image is already installed; no unattended install config")
 	}
