@@ -133,7 +133,7 @@ curl -fs "$API/clusters/$NAME/kubeconfig" >"$KUBECONFIG_FILE"
 k get nodes -o wide
 [[ $(k get nodes --no-headers | wc -l) == 2 ]] || die "ノード数が違います"
 
-log "Deployment を作って両方のノードに Pod を置く"
+log "Deployment を作る (kubeadm は CP に taint があるので Pod はワーカーに載る)"
 k create deployment hello --image="$TEST_IMAGE" --replicas=2 --port=8080 -- /agnhost netexec --http-port=8080
 k rollout status deployment/hello --timeout=300s
 k get pods -o wide

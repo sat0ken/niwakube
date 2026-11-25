@@ -153,3 +153,5 @@ GET    /api/host                     CPU / メモリ / ディスクの使用状�
   CP 1 + ワーカー 1 が約 40 秒で Ready になり、Service・クラスタ内 DNS・ノードをまたぐ Pod 間通信 (flannel VXLAN) も動く
 - Cloud Hypervisor の API サーバーは同時接続数に上限がある。keep-alive で接続を残すと約 40 秒で新しい接続が拒否されるため、
   クライアントはリクエストごとに接続を閉じる
+- kubeadm (v1.37.2、containerd 2.2) が niwakubed の作った CA・SA 鍵で init でき、ワーカーは事前に計算した CA hash で join できる。
+  CP 1 + ワーカー 1 が約 70 秒で Ready になり、Service・クラスタ内 DNS・ノードをまたぐ Pod 間通信 (flannel VXLAN) も動く
