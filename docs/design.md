@@ -147,3 +147,7 @@ GET    /api/host                     CPU / メモリ / ディスクの使用状�
 - nkbr0 + nftables の NAT で VM から外部に出られる
 - ACPI の電源ボタンで正常停止し、その後 vm.create からやり直して再起動できる
 - v55 からディスクに `image_type` の指定が必須 (指定しないと `Image type required for disk`)
+- k3s (v1.37.2+k3s1) が niwakubed の作ったカスタム CA で起動し、niwakubed が発行した admin 証明書で API を操作できる。
+  CP 1 + ワーカー 1 が約 40 秒で Ready になり、Service・クラスタ内 DNS・ノードをまたぐ Pod 間通信 (flannel VXLAN) も動く
+- Cloud Hypervisor の API サーバーは同時接続数に上限がある。keep-alive で接続を残すと約 40 秒で新しい接続が拒否されるため、
+  クライアントはリクエストごとに接続を閉じる
