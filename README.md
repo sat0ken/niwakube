@@ -132,6 +132,19 @@ curl -s -X DELETE localhost:8080/api/clusters/demo
 curl -s -X POST localhost:8080/api/clusters -d '{"name":"demo","runtime":{"default":"crun","install":["youki"]}}'
 ```
 
+クラスタを作るときに省略した場合の既定値は、niwakubed の起動オプションで変えられる
+(`deploy/niwakubed.service` の `ExecStart` に足す)。今の既定値は `GET /api/cluster-defaults` で確認できる。
+
+| オプション | 既定値 | 説明 |
+|---|---|---|
+| `--default-cni` | `cilium` | `cilium` / `flannel` |
+| `--default-runtime` | `runc` | `runc` / `crun` / `youki` |
+| `--default-runtimes` | (なし) | 既定で追加するランタイム (カンマ区切り。例: `crun,youki`) |
+
+```bash
+niwakubed --listen 127.0.0.1:8080 --default-runtime crun --default-runtimes youki
+```
+
 Hubble UI はクラスタの中にあるので、ホストで port-forward して見る (LAN の PC からは SSH のポート転送を使う):
 
 ```bash
@@ -141,6 +154,7 @@ kubectl --kubeconfig demo.kubeconfig -n kube-system port-forward svc/hubble-ui 1
 | メソッド | パス | 説明 |
 |---|---|---|
 | GET | `/api/distros` | 使えるディストリビューションの一覧 |
+| GET | `/api/cluster-defaults` | 省略したときの CNI とランタイム |
 | GET | `/api/clusters` | クラスタ一覧 |
 | POST | `/api/clusters` | クラスタを作成する (ノードを作って起動し、構築は VM の中で非同期に進む) |
 | GET | `/api/clusters/{name}` | 詳細 (`status.phase`: provisioning / ready / degraded / stopping / stopped) |

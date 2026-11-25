@@ -310,3 +310,55 @@ func TestLegacyClusterIsFlannel(t *testing.T) {
 		t.Errorf("legacy: %s %+v", cniOf(rec), runtimeOf(rec))
 	}
 }
+
+func TestNiwakubeDefaults(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ms, err := machine.NewService(machine.Config{
+		Bridge: "nkbr0", Subnet: netip.MustParsePrefix("172.30.0.0/16"), Gateway: netip.MustParseAddr("172.30.0.1"),
+		Pool: ipam.Pool{Start: netip.MustParseAddr("172.30.0.10"), End: netip.MustParseAddr("172.30.0.254")},
+	}, st, nil, fake.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+	newCS := func(d Defaults) (*Service, error) {
+		return NewService(Config{Subnet: netip.MustParsePrefix("172.30.0.0/16"), Defaults: d}, st, ms, &fakeProber{err: errors.New("x")}, nil, k3s.New())
+	}
+
+	// niwakubed の既定を「flannel + crun (youki も入れる)」にする
+	cs, err := newCS(Defaults{CNI: "flannel", Runtime: store.Runtime{Default: "crun", Install: []string{"youki"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := cs.Defaults(); d.CNI != "flannel" || d.Hubble || d.Runtime.Default != "crun" || strings.Join(d.Runtime.Install, ",") != "crun,youki" {
+		t.Errorf("defaults: %+v", d)
+	}
+	zero := 0
+	c, err := cs.Create(ctx, CreateRequest{Name: "a", Workers: &zero})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.CNI != "flannel" || c.Runtime.Default != "crun" || strings.Join(c.Runtime.Install, ",") != "crun,youki" {
+		t.Errorf("cluster with niwakube defaults: cni=%s runtime=%+v", c.CNI, c.Runtime)
+	}
+	// リクエストで指定すればそちらが優先 (default だけ指定したら追加のランタイムは入れない)
+	c, err = cs.Create(ctx, CreateRequest{Name: "b", Workers: &zero, CNI: "cilium", Runtime: store.Runtime{Default: "runc"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.CNI != "cilium" || !c.Hubble || c.Runtime.Default != "runc" || len(c.Runtime.Install) != 0 {
+		t.Errorf("request overrides: cni=%s hubble=%v runtime=%+v", c.CNI, c.Hubble, c.Runtime)
+	}
+
+	// 不正な既定値では起動しない
+	if _, err := newCS(Defaults{CNI: "calico"}); err == nil {
+		t.Error("invalid default CNI must be rejected")
+	}
+	if _, err := newCS(Defaults{Runtime: store.Runtime{Default: "kata"}}); err == nil {
+		t.Error("invalid default runtime must be rejected")
+	}
+}

@@ -35,7 +35,34 @@ const (
 )
 
 type Config struct {
-	Subnet netip.Prefix // VM のサブネット。/16 であること (例: 172.30.0.0/16)
+	Subnet   netip.Prefix // VM のサブネット。/16 であること (例: 172.30.0.0/16)
+	Defaults Defaults     // リクエストで省略したときの CNI とランタイム
+}
+
+// Defaults はクラスタを作るときの既定値 (niwakubed の起動オプションで変えられる)。
+type Defaults struct {
+	CNI     string        `json:"cni"`    // 空なら cilium
+	Hubble  bool          `json:"hubble"` // 参考情報 (CNI が cilium なら true)
+	Runtime store.Runtime `json:"runtime"`
+}
+
+func (d Defaults) withFallback() Defaults {
+	if d.CNI == "" {
+		d.CNI = distro.CNICilium
+	}
+	d.Hubble = d.CNI == distro.CNICilium
+	if d.Runtime.Default == "" {
+		d.Runtime.Default = distro.RuntimeRunc
+	}
+	if d.Runtime.Default != distro.RuntimeRunc && !slices.Contains(d.Runtime.Install, d.Runtime.Default) {
+		d.Runtime.Install = append(d.Runtime.Install, d.Runtime.Default)
+	}
+	if d.Runtime.Install == nil {
+		d.Runtime.Install = []string{}
+	}
+	slices.Sort(d.Runtime.Install)
+	d.Runtime.Install = slices.Compact(d.Runtime.Install)
+	return d
 }
 
 type Service struct {
@@ -55,6 +82,10 @@ type Service struct {
 func NewService(cfg Config, st *store.Store, ms *machine.Service, prober Prober, log *slog.Logger, distros ...distro.Distro) (*Service, error) {
 	if cfg.Subnet.Bits() != 16 || !cfg.Subnet.Addr().Is4() {
 		return nil, fmt.Errorf("cluster subnet must be an IPv4 /16: %s", cfg.Subnet)
+	}
+	cfg.Defaults = cfg.Defaults.withFallback()
+	if err := addonsOf(cfg.Defaults.CNI, cfg.Defaults.Hubble, cfg.Defaults.Runtime).Validate(); err != nil {
+		return nil, fmt.Errorf("invalid cluster defaults: %w", err)
 	}
 	if len(distros) == 0 {
 		return nil, errors.New("at least one distro is required")
@@ -197,15 +228,20 @@ func (s *Service) normalize(req *CreateRequest) (distro.Distro, error) {
 	defaultSize(&req.ControlPlane)
 	defaultSize(&req.Worker)
 
+	def := s.cfg.Defaults
 	if req.CNI == "" {
-		req.CNI = distro.CNICilium
+		req.CNI = def.CNI
 	}
 	if req.Hubble == nil {
 		h := req.CNI == distro.CNICilium
 		req.Hubble = &h
 	}
+	// ランタイムを何も指定しなければ niwakubed の既定を使う。default だけ指定した場合は追加のランタイムは入れない
+	if req.Runtime.Default == "" && req.Runtime.Install == nil {
+		req.Runtime = store.Runtime{Default: def.Runtime.Default, Install: slices.Clone(def.Runtime.Install)}
+	}
 	if req.Runtime.Default == "" {
-		req.Runtime.Default = distro.RuntimeRunc
+		req.Runtime.Default = def.Runtime.Default
 	}
 	// 既定にしたランタイムは自動で入れる
 	if req.Runtime.Default != distro.RuntimeRunc && !slices.Contains(req.Runtime.Install, req.Runtime.Default) {
@@ -600,3 +636,6 @@ func runtimeOf(rec *store.Cluster) store.Runtime {
 	}
 	return rt
 }
+
+// Defaults は、リクエストで省略したときに使う CNI とランタイムを返す。
+func (s *Service) Defaults() Defaults { return s.cfg.Defaults }

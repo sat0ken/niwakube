@@ -41,6 +41,7 @@ func New(svc *machine.Service, clusters *cluster.Service, log *slog.Logger) *Ser
 //	POST   /api/vms/{name}/stop      ?force=true で強制停止
 //	GET    /api/vms/{name}/serial    ?bytes=N でシリアルログの末尾 N バイト (既定 64KiB)
 //	GET    /api/distros
+//	GET    /api/cluster-defaults        省略したときの CNI とランタイム
 //	GET    /api/clusters
 //	POST   /api/clusters
 //	GET    /api/clusters/{name}
@@ -66,6 +67,9 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/distros", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, s.clusters.Distros())
+	})
+	mux.HandleFunc("GET /api/cluster-defaults", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, s.clusters.Defaults())
 	})
 	mux.HandleFunc("GET /api/clusters", s.listClusters)
 	mux.HandleFunc("POST /api/clusters", s.createCluster)
