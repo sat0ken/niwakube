@@ -1,0 +1,67 @@
+# installer/config.yaml から、ホストを自動インストールする ISO を作る。
+# QEMU の VM で実際に無人インストールして確かめてから、Artifacts (niwakube-installer) に置く。
+# 手順は docs/installer.md を参照。
+name: Installer ISO
+
+on:
+  pull_request:
+    paths:
+      - installer/**
+      # ISO を作るコードを変えたときも確かめる
+      - internal/installer/**
+      - cmd/niwakube-iso/**
+      - scripts/e2e-installer.sh
+      - .github/workflows/installer.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  iso:
+    name: Build and test the installer ISO
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xorriso dosfstools mtools qemu-system-x86 qemu-utils ovmf
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Check config
+        run: go run ./cmd/niwakube-iso check -config installer/config.yaml
+
+      - name: Fetch and verify Ubuntu images
+        run: ./installer/fetch-ubuntu.sh "$(go run ./cmd/niwakube-iso get -config installer/config.yaml ubuntu.release)" work
+
+      - name: Build the ISO
+        run: |
+          mkdir -p dist
+          go run ./cmd/niwakube-iso build -config installer/config.yaml -mini work/mini.iso -server work/server.env \
+            -out dist/niwakube-installer.iso
+          sha256sum dist/niwakube-installer.iso | tee dist/niwakube-installer.iso.sha256
+
+      - name: Install it on a VM (E2E)
+        run: ./scripts/e2e-installer.sh work
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: niwakube-installer
+          path: dist/
+          retention-days: 14
+          compression-level: 0
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: installer-e2e-logs
+          path: e2e-logs/

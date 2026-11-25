@@ -11,7 +11,8 @@ Cloud Hypervisor などの仮想化／コンテナ基盤の上に Kubernetes ク
 ## フェーズ0: ホストのセットアップ
 
 1. Ubuntu Server 26.04 LTS をインストールする。BIOS の設定や `/var/lib/niwakube` を XFS にする方法も含めて、
-   手順は [docs/install.md](docs/install.md) を参照
+   手順は [docs/install.md](docs/install.md) を参照。
+   `installer/config.yaml` を書いて PR を出すと、**全自動でインストールする ISO** を CI が作る ([docs/installer.md](docs/installer.md))
 2. このリポジトリを clone して、以下を実行する
 
 ```bash
