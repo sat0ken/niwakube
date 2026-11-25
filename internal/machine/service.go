@@ -129,7 +129,7 @@ func (s *Service) normalize(req *CreateRequest) error {
 		return fmt.Errorf("%w: unknown backend %q", ErrInvalid, req.Backend)
 	}
 	if req.Image == "" {
-		req.Image = "ubuntu-24.04"
+		req.Image = "ubuntu-26.04"
 	}
 	if !imageRe.MatchString(req.Image) {
 		return fmt.Errorf("%w: invalid image name %q", ErrInvalid, req.Image)

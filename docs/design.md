@@ -72,7 +72,7 @@ kubeadm は起動のたびに apt でパッケージを入れるので遅い。�
 ```
 /var/lib/niwakube/
   firmware/CLOUDHV.fd
-  images/ubuntu-24.04.raw, talos-<ver>.raw
+  images/ubuntu-26.04.raw, talos-<ver>.raw
   vms/<vm>/disk.raw, seed.iso, serial.log
   ssh/id_ed25519            # VM にログインするための鍵
   niwakube.db                 # SQLite

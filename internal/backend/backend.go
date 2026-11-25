@@ -58,7 +58,7 @@ type MachineSpec struct {
 	CPUs      int
 	MemoryMiB int
 	DiskGiB   int
-	Image     string // 論理名 (例: ubuntu-24.04)。実体はバックエンドが解決する
+	Image     string // 論理名 (例: ubuntu-26.04)。実体はバックエンドが解決する
 	NIC       NIC
 	Seed      seed.Data
 }

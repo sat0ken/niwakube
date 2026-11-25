@@ -45,7 +45,7 @@ func TestCreateAllocatesAndStarts(t *testing.T) {
 		t.Fatal(err)
 	}
 	if vm.IP != "172.30.0.10" || vm.CPUs != 2 || vm.MemoryMiB != 4096 || vm.DiskGiB != 20 ||
-		vm.Image != "ubuntu-24.04" || vm.Backend != fake.Name || vm.Status.State != backend.StateRunning {
+		vm.Image != "ubuntu-26.04" || vm.Backend != fake.Name || vm.Status.State != backend.StateRunning {
 		t.Errorf("unexpected vm: %+v", vm)
 	}
 

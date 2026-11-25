@@ -23,7 +23,7 @@ func TestMachineCRUD(t *testing.T) {
 	ctx := context.Background()
 	s := openTest(t)
 	m := &Machine{
-		Name: "vm1", Backend: "cloud-hypervisor", Image: "ubuntu-24.04",
+		Name: "vm1", Backend: "cloud-hypervisor", Image: "ubuntu-26.04",
 		CPUs: 2, MemoryMiB: 4096, DiskGiB: 20,
 		IP: netip.MustParseAddr("172.30.0.10"), MAC: "52:54:00:00:00:01",
 		SSHKeys: []string{"ssh-ed25519 AAAA"}, DesiredState: "running",

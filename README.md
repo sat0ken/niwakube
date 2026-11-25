@@ -77,7 +77,7 @@ sudo ssh -i /var/lib/niwakube/ssh/id_ed25519 ubuntu@172.30.0.10
 curl -s -X DELETE localhost:8080/api/vms/vm1
 ```
 
-`POST /api/vms` の項目 (省略時の既定値): `name` (必須)、`backend` (cloud-hypervisor)、`image` (ubuntu-24.04)、
+`POST /api/vms` の項目 (省略時の既定値): `name` (必須)、`backend` (cloud-hypervisor)、`image` (ubuntu-26.04)、
 `cpus` (2)、`memoryMiB` (4096)、`diskGiB` (20)、`sshAuthorizedKeys` (なし。`/var/lib/niwakube/ssh/id_ed25519.pub` は常に入る)。
 
 ### 仕組み

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/sat0ken/niwakube/internal/backend"
+	diskutil "github.com/sat0ken/niwakube/internal/disk"
 	"github.com/sat0ken/niwakube/internal/netx"
 	"github.com/sat0ken/niwakube/internal/seed"
 	"github.com/sat0ken/niwakube/internal/sys"
@@ -119,10 +120,10 @@ func (b *Backend) Create(ctx context.Context, spec *backend.MachineSpec) (err er
 
 	// ディスク: ベースイメージを複製して指定サイズまで広げる (パーティションはゲストの cloud-init が広げる)
 	disk := filepath.Join(dir, "disk.raw")
-	if _, err := b.run.Run(ctx, "cp", "--reflink=auto", "--sparse=always", base, disk); err != nil {
+	if _, err := diskutil.CloneOrCopy(base, disk); err != nil {
 		return fmt.Errorf("copy base image: %w", err)
 	}
-	if err := growFile(disk, int64(spec.DiskGiB)<<30); err != nil {
+	if err := diskutil.Grow(disk, int64(spec.DiskGiB)<<30); err != nil {
 		return err
 	}
 
@@ -152,17 +153,6 @@ func (b *Backend) Create(ctx context.Context, spec *backend.MachineSpec) (err er
 		return err
 	}
 	return os.WriteFile(b.statePath(spec.Name), raw, 0o600)
-}
-
-func growFile(path string, size int64) error {
-	fi, err := os.Stat(path)
-	if err != nil {
-		return err
-	}
-	if fi.Size() > size {
-		return fmt.Errorf("disk size %d GiB is smaller than the base image (%d bytes)", size>>30, fi.Size())
-	}
-	return os.Truncate(path, size)
 }
 
 func (b *Backend) unitActive(ctx context.Context, name string) bool {

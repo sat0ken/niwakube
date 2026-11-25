@@ -112,7 +112,7 @@ func TestLifecycle(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	mustWrite(t, filepath.Join(dataDir, "images", "ubuntu-24.04.raw"), "base-image")
+	mustWrite(t, filepath.Join(dataDir, "images", "ubuntu-26.04.raw"), "base-image")
 	mustWrite(t, filepath.Join(dataDir, "firmware", "CLOUDHV.fd"), "fw")
 
 	var (
@@ -124,12 +124,6 @@ func TestLifecycle(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		switch {
-		case name == "cp":
-			b, err := os.ReadFile(args[len(args)-2])
-			if err != nil {
-				return nil, err
-			}
-			return nil, os.WriteFile(args[len(args)-1], b, 0o644)
 		case name == "cloud-localds":
 			return nil, os.WriteFile(args[2], []byte("iso"), 0o644)
 		case name == "systemctl" && args[0] == "is-active":
@@ -162,7 +156,7 @@ func TestLifecycle(t *testing.T) {
 
 	b := New(Config{DataDir: dataDir, RunDir: runDir, StopTimeout: 2 * time.Second}, r)
 	spec := &backend.MachineSpec{
-		Name: "vm1", CPUs: 2, MemoryMiB: 1024, DiskGiB: 5, Image: "ubuntu-24.04",
+		Name: "vm1", CPUs: 2, MemoryMiB: 1024, DiskGiB: 5, Image: "ubuntu-26.04",
 		NIC: backend.NIC{
 			Bridge: "nkbr0", MAC: "52:54:00:12:34:56",
 			Address: netip.MustParsePrefix("172.30.0.10/16"), Gateway: netip.MustParseAddr("172.30.0.1"),
