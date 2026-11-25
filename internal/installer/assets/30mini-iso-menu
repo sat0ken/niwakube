@@ -93,16 +93,18 @@ step1() {
     kexec --exec
 }
 
-# download URL TARGET SIZE: URL を TARGET (/dev/pmem0) にダウンロードする。
+# download URLS TARGET SIZE: URLS ("," 区切り) の ISO を TARGET (/dev/pmem0) にダウンロードする。
 #
 # 元のスクリプトは wget を 1 回実行するだけなので、途中で LAN のリンクが切れるとそのまま止まってしまう。
 # initrd の busybox の wget にはタイムアウトもヘッダーの指定も無いので、次のようにする:
 #   - CHUNK ごとにダウンロードする。大きさ OFFSET の疎なファイルに wget -c すると
 #     "Range: bytes=OFFSET-" を送るので、途中から取れる
-#   - ファイルが STALL 秒増えなければ wget を止めて、そこから取り直す
+#   - ファイルが STALL 秒増えなければ wget を止めて、そこから取り直す。取り直すたびに次の URL を使う
+#     (ミラーと releases.ubuntu.com を交互に試す。中身は最後に SHA256 で確かめる)
 #   - CHUNK 分取れたら TARGET の同じ位置に dd で書き、ファイルを消す (メモリを ISO 2 つ分使わない)
 download() {
-    url=$1 target=$2 size=$3
+    urls=$1 target=$2 size=$3
+    nurls=$(echo "$urls" | tr ',' '\n' | wc -l)
     mib=1048576
     chunk_mib=256
     stall=30
@@ -126,7 +128,8 @@ download() {
                 echo "niwakube: giving up after $tries attempts at $((have / mib)) MiB"
                 return 1
             fi
-            [ "$tries" -gt 1 ] && echo "niwakube: retrying from $((have / mib)) MiB (attempt $tries)"
+            url=$(echo "$urls" | tr ',' '\n' | sed -n "$(( (tries - 1) % nurls + 1 ))p")
+            [ "$tries" -gt 1 ] && echo "niwakube: retrying from $((have / mib)) MiB (attempt $tries, $url)"
             wget -q -c -O "$tmp" "$url" &
             pid=$!
             last=$have
@@ -167,7 +170,7 @@ step2() {
     target="/dev/pmem0"
     [ -e "$target" ] || debug_shell "failed to find $target"
 
-    echo "Downloading $URL ..."
+    echo "Downloading $(echo "$URL" | tr ',' ' ') ..."
     download "$URL" "$target" "$MEDIA_SIZE" || debug_shell "download failed"
 
     if [ -n "$MEDIA_256SUM" ]; then

@@ -68,6 +68,7 @@ niwakube:
 | `install.after` | `poweroff` | インストール後に電源を切るか再起動するか |
 | `install.timeout` | `10` | GRUB のメニューの待ち時間 (秒) |
 | `install.kernel_args` | なし | インストーラーのカーネルに足す引数 |
+| `install.iso_mirror` | なし (`releases.ubuntu.com`) | Server ISO を取るミラー (例: `https://ftp.jaist.ac.jp/pub/Linux/ubuntu-releases`)。下記 |
 | `niwakube.setup` / `repo` / `ref` | `true` / `sat0ken/niwakube` / `main` | 初回起動時のセットアップ |
 | `autoinstall` | なし | 生成した autoinstall の設定に深くマージして上書きする (上級者向け) |
 
@@ -141,6 +142,10 @@ ISO のファイルは公式のまま (GRUB の設定の差し替えと initrd �
 ## 注意
 
 - **インストール時はインターネットが必要** (Server ISO の約 3GB をダウンロードする)。有線 LAN と DHCP を用意すること
+- `install.iso_mirror` を書くと、Server ISO を日本のミラー (JAIST、理研、山形大学など) から取る。
+  ISO を作るときにミラーに同じ大きさのファイルがあるかを確かめ、無ければ (同期の遅れなど) 警告を出して
+  `releases.ubuntu.com` から取る。インストール中に止まったときは、ミラーと `releases.ubuntu.com` を交互に試す。
+  どちらから取っても、最後にビルド時の SHA256 (Ubuntu の署名を検証した SHA256SUMS) で中身を確かめる
 - ダウンロード中に `NIC Link is Down` が出たり、リンクが 100 Mbps になったりする場合は、LAN ケーブル
   (Cat5e 以上) やルーターのポートを替えてみる。リンクが戻れば `retrying from ... MiB` と出て続きから取り直す
 - ISO にはビルド時点の最新のポイントリリース (例: 26.04.1) の URL が入る。次のポイントリリースが出ると古い ISO は

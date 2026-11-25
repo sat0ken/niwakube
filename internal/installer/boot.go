@@ -2,9 +2,11 @@ package installer
 
 import (
 	"bytes"
+	"context"
 	_ "embed"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"text/template"
 )
@@ -15,14 +17,58 @@ var premountScript []byte
 // ServerISO はインストーラーがダウンロードする Ubuntu Server の ISO。
 type ServerISO struct {
 	Version string // 例: 26.04.1
-	URL     string
+	URL     string // releases.ubuntu.com の URL
 	Size    int64
 	SHA256  string
+	Mirrors []string // URL より先に試す URL (install.iso_mirror)
 }
 
 func (s ServerISO) validate() error {
 	if !strings.HasPrefix(s.URL, "https://") || !strings.HasSuffix(s.URL, ".iso") || s.Size <= 0 || len(s.SHA256) != 64 {
 		return fmt.Errorf("invalid server ISO info: %+v", s)
+	}
+	for _, m := range s.Mirrors {
+		if !mirrorRe.MatchString(m) || !strings.HasSuffix(m, ".iso") {
+			return fmt.Errorf("invalid mirror URL: %q", m)
+		}
+	}
+	return nil
+}
+
+// URLs はダウンロードを試す順の URL。インストーラーには "," でつないで渡す。
+func (s ServerISO) URLs() []string {
+	return append(append([]string{}, s.Mirrors...), s.URL)
+}
+
+// officialBase は ServerISO.URL の取得元。ミラーはこの下と同じ構成 (<release>/<file>) になっている。
+const officialBase = "https://releases.ubuntu.com"
+
+// MirrorURL は ServerISO.URL を install.iso_mirror の下の URL に置き換える。
+func MirrorURL(mirror, official string) (string, error) {
+	rest, ok := strings.CutPrefix(official, officialBase+"/")
+	if !ok {
+		return "", fmt.Errorf("server ISO URL is not under %s: %s", officialBase, official)
+	}
+	return strings.TrimRight(mirror, "/") + "/" + rest, nil
+}
+
+// CheckMirror はミラーに同じ大きさの ISO があることを確かめる (ミラーの同期が遅れていることがあるため)。
+// 中身は、インストール時に SHA256 で確かめる。
+func CheckMirror(ctx context.Context, client *http.Client, url string, size int64) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s: %s", url, resp.Status)
+	}
+	if resp.ContentLength != size {
+		return fmt.Errorf("%s: size %d, want %d (the mirror may not be in sync yet)", url, resp.ContentLength, size)
 	}
 	return nil
 }
@@ -58,7 +104,7 @@ func (c *Config) GrubConfig(iso ServerISO) ([]byte, error) {
 		return nil, err
 	}
 	base := fmt.Sprintf("iso-chooser-menu ip=dhcp niwakube-iso-url=%s niwakube-iso-size=%d niwakube-iso-256sum=%s nk.ds=nocloud",
-		iso.URL, iso.Size, iso.SHA256)
+		strings.Join(iso.URLs(), ","), iso.Size, iso.SHA256)
 	for _, a := range c.Install.KernelArgs {
 		base += " nk." + a
 	}

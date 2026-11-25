@@ -26,6 +26,9 @@ storage:
 install:
   mode: unattended              # confirm: 消去の前に確認する / unattended: 確認なし (GRUB の既定の項目)
   after: poweroff               # インストール後は電源を切る (USB を抜いてから起動する)
+  # Server ISO (約 3GB) を取るミラー。止まったら releases.ubuntu.com と交互に試す。中身は SHA256 で確かめる
+  # 他の例: https://ftp.riken.jp/Linux/ubuntu-releases、https://ftp.yz.yamagata-u.ac.jp/pub/linux/ubuntu-releases
+  iso_mirror: https://ftp.jaist.ac.jp/pub/Linux/ubuntu-releases
 
 niwakube:
   setup: true                   # 初回起動時に host-setup.sh を実行する

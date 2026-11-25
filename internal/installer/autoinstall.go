@@ -199,5 +199,10 @@ func (c *Config) Summary() string {
 	}
 	fmt.Fprintf(&b, "disk:     %s (root %s, 残りは /var/lib/niwakube)\n", c.Storage.Disk, c.Storage.RootSize)
 	fmt.Fprintf(&b, "install:  %s, %s after install\n", c.Install.Mode, c.Install.After)
+	if c.Install.ISOMirror != "" {
+		fmt.Fprintf(&b, "iso:      %s (止まったら releases.ubuntu.com と交互に試す)\n", c.Install.ISOMirror)
+	} else {
+		b.WriteString("iso:      https://releases.ubuntu.com\n")
+	}
 	return b.String()
 }

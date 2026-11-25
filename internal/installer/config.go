@@ -98,6 +98,9 @@ type InstallConfig struct {
 	After      string   `yaml:"after"`       // poweroff | reboot
 	Timeout    int      `yaml:"timeout"`     // GRUB のメニューの待ち時間 (秒)
 	KernelArgs []string `yaml:"kernel_args"` // インストーラーのカーネルに追加する引数
+	// ISOMirror は Server ISO を取るミラー (https://releases.ubuntu.com の代わり。
+	// 例: https://ftp.jaist.ac.jp/pub/Linux/ubuntu-releases)。止まったときは releases.ubuntu.com と交互に試す
+	ISOMirror string `yaml:"iso_mirror"`
 }
 
 type NiwakubeSetup struct {
@@ -117,6 +120,7 @@ var (
 	repoRe     = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 	refRe      = regexp.MustCompile(`^[A-Za-z0-9_./-]+$`)
 	safeArgRe  = regexp.MustCompile(`^[A-Za-z0-9_.,:=/+-]+$`)
+	mirrorRe   = regexp.MustCompile(`^https?://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9_.~/-]*)?$`)
 	simpleRe   = regexp.MustCompile(`^[A-Za-z0-9_./+-]+$`)
 	diskIDRe   = regexp.MustCompile(`^[A-Za-z0-9_.-]+( [A-Za-z0-9_.-]+)*$`)
 )
@@ -254,6 +258,10 @@ func (c *Config) Validate() error {
 		if !safeArgRe.MatchString(a) {
 			bad("install.kernel_args: invalid argument %q", a)
 		}
+	}
+	c.Install.ISOMirror = strings.TrimRight(c.Install.ISOMirror, "/")
+	if c.Install.ISOMirror != "" && !mirrorRe.MatchString(c.Install.ISOMirror) {
+		bad("install.iso_mirror must be an http(s) URL like https://ftp.jaist.ac.jp/pub/Linux/ubuntu-releases: %q", c.Install.ISOMirror)
 	}
 	if !repoRe.MatchString(c.Niwakube.Repo) {
 		bad("niwakube.repo must be owner/name: %q", c.Niwakube.Repo)
