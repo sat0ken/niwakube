@@ -21,23 +21,42 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sat0ken/niwakube/internal/addons"
 	"github.com/sat0ken/niwakube/internal/backend"
 	"github.com/sat0ken/niwakube/internal/distro"
+	"github.com/sat0ken/niwakube/internal/kube"
 	"github.com/sat0ken/niwakube/internal/machine"
+	"github.com/sat0ken/niwakube/internal/netx"
 	"github.com/sat0ken/niwakube/internal/pki"
 	"github.com/sat0ken/niwakube/internal/store"
 )
 
 const (
-	maxIndex   = 254
-	maxWorkers = 50
-	cpHostBase = 10 // CP i は .10+i
-	wHostBase  = 20 // ワーカー i は .20+i
+	maxIndex    = 254
+	maxWorkers  = 50
+	cpHostBase  = 10  // CP i は .10+i
+	wHostBase   = 20  // ワーカー i は .20+i
+	lbHostStart = 100 // LoadBalancer の IP は .100〜.199
+	lbHostEnd   = 199
 )
 
 type Config struct {
 	Subnet   netip.Prefix // VM のサブネット。/16 であること (例: 172.30.0.0/16)
 	Defaults Defaults     // リクエストで省略したときの CNI とランタイム
+	// Forwarder はホストのポートからクラスタへの転送 (DNAT) を反映する。nil なら反映しない (テスト用)
+	Forwarder ForwardApplier
+	// NewApplier はクラスタにマニフェストを適用するクライアントを作る。nil なら kube.New
+	NewApplier func(kubeconfig []byte) (Applier, error)
+}
+
+// ForwardApplier はホストのポートの転送をまとめて反映する。
+type ForwardApplier interface {
+	Apply(ctx context.Context, forwards []netx.PortForward) error
+}
+
+// Applier はクラスタにマニフェストを適用する (kube.Client)。
+type Applier interface {
+	Apply(ctx context.Context, manifest string) error
 }
 
 // Defaults はクラスタを作るときの既定値 (niwakubed の起動オプションで変えられる)。
@@ -78,6 +97,15 @@ type Service struct {
 	mu        sync.Mutex // クラスタの作成・削除・起動・停止を直列化する
 	adminMu   sync.Mutex
 	adminCert map[string]pki.KeyPair // 状態確認用の admin 証明書のキャッシュ
+
+	addonMu    sync.Mutex
+	addonState map[string]string // クラスタごとのアドオンの適用状況 (pending / applied / エラー)
+
+	// 裏で動く処理 (bootstrap、アドオンの適用) の設定と、止めるための context
+	postCreateTimeout  time.Duration
+	postCreateInterval time.Duration
+	bg                 context.Context
+	stop               context.CancelFunc
 }
 
 func NewService(cfg Config, st *store.Store, ms *machine.Service, prober Prober, log *slog.Logger, distros ...distro.Distro) (*Service, error) {
@@ -101,9 +129,14 @@ func NewService(cfg Config, st *store.Store, ms *machine.Service, prober Prober,
 	for _, d := range distros {
 		m[d.Name()] = d
 	}
+	if cfg.NewApplier == nil {
+		cfg.NewApplier = func(kc []byte) (Applier, error) { return kube.New(kc) }
+	}
+	bg, stop := context.WithCancel(context.Background())
 	return &Service{
 		cfg: cfg, store: st, machines: ms, distros: m, defDist: distros[0].Name(),
-		prober: prober, log: log, adminCert: map[string]pki.KeyPair{},
+		prober: prober, log: log, adminCert: map[string]pki.KeyPair{}, addonState: map[string]string{},
+		postCreateTimeout: 30 * time.Minute, postCreateInterval: 10 * time.Second, bg: bg, stop: stop,
 	}, nil
 }
 
@@ -151,23 +184,27 @@ type Status struct {
 
 // Cluster は API で返すクラスタの情報。
 type Cluster struct {
-	Name          string             `json:"name"`
-	Distro        string             `json:"distro"`
-	Version       string             `json:"version"`
-	Backend       string             `json:"backend"`
-	ControlPlanes int                `json:"controlPlanes"`
-	Workers       int                `json:"workers"`
-	ControlPlane  store.NodeSize     `json:"controlPlane"`
-	Worker        store.NodeSize     `json:"worker"`
-	CNI           string             `json:"cni"`
-	Hubble        bool               `json:"hubble"`
-	Runtime       store.Runtime      `json:"runtime"`
-	Subnet        string             `json:"subnet"`
-	Endpoint      string             `json:"endpoint"`
-	DesiredState  string             `json:"desiredState"`
-	Status        Status             `json:"status"`
-	Machines      []*machine.Machine `json:"machines"`
-	CreatedAt     time.Time          `json:"createdAt"`
+	Name          string         `json:"name"`
+	Distro        string         `json:"distro"`
+	Version       string         `json:"version"`
+	Backend       string         `json:"backend"`
+	ControlPlanes int            `json:"controlPlanes"`
+	Workers       int            `json:"workers"`
+	ControlPlane  store.NodeSize `json:"controlPlane"`
+	Worker        store.NodeSize `json:"worker"`
+	CNI           string         `json:"cni"`
+	Hubble        bool           `json:"hubble"`
+	Runtime       store.Runtime  `json:"runtime"`
+	Subnet        string         `json:"subnet"`
+	Endpoint      string         `json:"endpoint"`
+	// LoadBalancerPool は Service type: LoadBalancer に割り当てる IP の範囲 (Cilium のときだけ)
+	LoadBalancerPool string `json:"loadBalancerPool,omitempty"`
+	// Addons は niwakubed がクラスタに入れるもの (LB の IP プールなど) の適用状況
+	Addons       string             `json:"addons,omitempty"`
+	DesiredState string             `json:"desiredState"`
+	Status       Status             `json:"status"`
+	Machines     []*machine.Machine `json:"machines"`
+	CreatedAt    time.Time          `json:"createdAt"`
 }
 
 var nameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,18}[a-z0-9])?$`)
@@ -340,7 +377,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (*Cluster, erro
 		s.rollback(context.WithoutCancel(ctx), rec.Name)
 		return nil, err
 	}
-	s.startBootstrap(rec)
+	s.startPostCreate(rec)
 	return s.view(ctx, rec)
 }
 
@@ -434,7 +471,8 @@ func (s *Service) view(ctx context.Context, rec *store.Cluster) (*Cluster, error
 		ControlPlanes: rec.Spec.ControlPlanes, Workers: rec.Spec.Workers,
 		ControlPlane: rec.Spec.ControlPlane, Worker: rec.Spec.Worker,
 		CNI: cniOf(rec), Hubble: rec.Spec.Hubble, Runtime: runtimeOf(rec),
-		Subnet: s.subnetOf(rec.Index).String(), Endpoint: s.endpoint(rec),
+		Subnet: s.subnetOf(rec.Index).String(), Endpoint: s.endpoint(rec), LoadBalancerPool: s.lbPoolString(rec),
+		Addons:       s.addonStatus(rec.Name),
 		DesiredState: rec.DesiredState, Machines: ms, CreatedAt: rec.CreatedAt,
 	}
 	v.Status = s.status(ctx, rec, ms)
@@ -564,9 +602,16 @@ func (s *Service) deleteLocked(ctx context.Context, name string) error {
 		// ノードが残っているうちは登録を消さない (やり直せるように)
 		return errors.Join(errs...)
 	}
+	if err := s.store.DeleteClusterForwards(ctx, name); err != nil {
+		return err
+	}
+	if err := s.applyForwards(ctx); err != nil {
+		s.log.Error("apply forwards", "err", err)
+	}
 	if err := s.store.DeleteCluster(ctx, name); err != nil && !errors.Is(err, store.ErrNotFound) {
 		return err
 	}
+	s.setAddonState(name, "")
 	s.log.Info("cluster deleted", "cluster", name)
 	return nil
 }
@@ -668,39 +713,130 @@ func (s *Service) distroCluster(rec *store.Cluster) (*distro.Cluster, distro.Dis
 	}, d, nil
 }
 
-// bootstrapTimeout は外からの初期化 (Talos の etcd の bootstrap) を試し続ける時間。
-var bootstrapTimeout = 30 * time.Minute
+// Close は裏で動いている処理を止める。
+func (s *Service) Close() { s.stop() }
 
-// startBootstrap は、Distro が Bootstrapper なら、成功するまで裏で初期化を試し続ける。
-func (s *Service) startBootstrap(rec *store.Cluster) {
+// startPostCreate は、クラスタを作ったあと (と niwakubed の起動時) に裏で次の処理を行う。
+//  1. Distro が Bootstrapper なら、成功するまで初期化を試す (Talos の etcd の bootstrap)
+//  2. クラスタの準備ができたら、アドオン (LoadBalancer の IP プールなど) を server-side apply する
+//
+// どちらも何度実行しても安全。
+func (s *Service) startPostCreate(rec *store.Cluster) {
 	dc, d, err := s.distroCluster(rec)
 	if err != nil {
 		return
 	}
-	b, ok := d.(distro.Bootstrapper)
-	if !ok {
-		return
+	manifests := s.addonManifests(rec)
+	if len(manifests) > 0 {
+		s.setAddonState(rec.Name, "pending")
 	}
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), bootstrapTimeout)
+		ctx, cancel := context.WithTimeout(s.bg, s.postCreateTimeout)
 		defer cancel()
-		for {
-			actx, acancel := context.WithTimeout(ctx, 30*time.Second)
-			err := b.Bootstrap(actx, dc)
-			acancel()
-			if err == nil {
-				s.log.Info("cluster bootstrapped", "cluster", rec.Name)
-				return
-			}
-			s.log.Debug("bootstrap not ready yet", "cluster", rec.Name, "err", err)
-			select {
-			case <-ctx.Done():
-				s.log.Error("bootstrap gave up", "cluster", rec.Name, "err", err)
-				return
-			case <-time.After(10 * time.Second):
+		retry := func(what string, fn func(context.Context) error) bool {
+			for {
+				actx, acancel := context.WithTimeout(ctx, 60*time.Second)
+				err := fn(actx)
+				acancel()
+				if err == nil {
+					return true
+				}
+				s.log.Debug(what+" not ready yet", "cluster", rec.Name, "err", err)
+				select {
+				case <-ctx.Done():
+					s.log.Error(what+" gave up", "cluster", rec.Name, "err", err)
+					if what == "addons" {
+						s.setAddonState(rec.Name, "failed: "+err.Error())
+					}
+					return false
+				case <-time.After(s.postCreateInterval):
+				}
 			}
 		}
+		if b, ok := d.(distro.Bootstrapper); ok {
+			if !retry("bootstrap", func(c context.Context) error { return b.Bootstrap(c, dc) }) {
+				return
+			}
+			s.log.Info("cluster bootstrapped", "cluster", rec.Name)
+		}
+		if len(manifests) == 0 {
+			return
+		}
+		if retry("addons", func(c context.Context) error { return s.applyAddons(c, rec, manifests) }) {
+			s.setAddonState(rec.Name, "applied")
+			s.log.Info("cluster addons applied", "cluster", rec.Name)
+		}
 	}()
+}
+
+// addonManifests はクラスタに入れるアドオン。
+func (s *Service) addonManifests(rec *store.Cluster) []addons.Manifest {
+	var out []addons.Manifest
+	if cniOf(rec) == distro.CNICilium {
+		start, stop := s.lbPool(rec)
+		out = append(out, addons.LoadBalancer(start, stop)...)
+	}
+	return out
+}
+
+// applyAddons はクラスタの準備ができていればアドオンを適用する。
+func (s *Service) applyAddons(ctx context.Context, rec *store.Cluster, manifests []addons.Manifest) error {
+	ms, err := s.machines.ListCluster(ctx, rec.Name)
+	if err != nil {
+		return err
+	}
+	if st := s.status(ctx, rec, ms); st.Phase != "ready" {
+		return fmt.Errorf("cluster is %s", st.Phase)
+	}
+	kc, err := s.Kubeconfig(ctx, rec.Name)
+	if err != nil {
+		return err
+	}
+	a, err := s.cfg.NewApplier(kc)
+	if err != nil {
+		return err
+	}
+	for _, m := range manifests {
+		var lastErr error
+		for _, v := range m.Variants {
+			if lastErr = a.Apply(ctx, v); lastErr == nil || !errors.Is(lastErr, kube.ErrNotReady) {
+				break
+			}
+		}
+		if lastErr != nil {
+			return fmt.Errorf("%s: %w", m.Name, lastErr)
+		}
+	}
+	return nil
+}
+
+func (s *Service) setAddonState(name, state string) {
+	s.addonMu.Lock()
+	defer s.addonMu.Unlock()
+	if state == "" {
+		delete(s.addonState, name)
+	} else {
+		s.addonState[name] = state
+	}
+}
+
+func (s *Service) addonStatus(name string) string {
+	s.addonMu.Lock()
+	defer s.addonMu.Unlock()
+	return s.addonState[name]
+}
+
+// lbPool は Service type: LoadBalancer に割り当てる範囲 (172.30.N.100〜199)。
+func (s *Service) lbPool(rec *store.Cluster) (netip.Addr, netip.Addr) {
+	return s.hostIP(rec.Index, lbHostStart), s.hostIP(rec.Index, lbHostEnd)
+}
+
+func (s *Service) lbPoolString(rec *store.Cluster) string {
+	if cniOf(rec) != distro.CNICilium {
+		return ""
+	}
+	start, stop := s.lbPool(rec)
+	return start.String() + "-" + stop.String()
 }
 
 // Reconcile は niwakubed の起動時に呼ぶ。初期化が必要なディストリのクラスタは、念のため初期化を試し直す
@@ -713,8 +849,11 @@ func (s *Service) Reconcile(ctx context.Context) {
 	}
 	for _, rec := range recs {
 		if rec.DesiredState == machine.DesiredRunning {
-			s.startBootstrap(rec)
+			s.startPostCreate(rec)
 		}
+	}
+	if err := s.applyForwards(ctx); err != nil {
+		s.log.Error("apply forwards", "err", err)
 	}
 }
 

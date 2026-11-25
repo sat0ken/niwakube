@@ -181,12 +181,37 @@ kubectl --kubeconfig demo.kubeconfig -n kube-system port-forward svc/hubble-ui 1
 | POST | `/api/clusters/{name}/stop` | すべてのノードを正常停止 (ワーカーから) |
 | GET | `/api/clusters/{name}/kubeconfig` | admin の kubeconfig |
 | GET | `/api/clusters/{name}/talosconfig` | Talos の talosconfig (Talos のみ) |
+| GET / POST / DELETE | `/api/clusters/{name}/forwards` | ホストのポートからクラスタへの転送 (下記) |
 
 `POST /api/clusters` の項目 (省略時の既定値): `name` (必須、20 文字以内)、`distro` (k3s)、
 `version` (既定は `stable`。k3s は `latest` や `v1.37.2+k3s1`、kubeadm は `v1.37` (その minor の最新) や `v1.37.2` も可)、`controlPlanes` (1。いまは 1 のみ)、`workers` (2)、
 `controlPlane` / `worker` (`{"cpus":2,"memoryMiB":4096,"diskGiB":20}`)、`sshAuthorizedKeys`、
 `cni` (`cilium` / `flannel`)、`hubble` (Cilium なら `true`)、`runtime.default` (`runc` / `crun` / `youki`)、
 `runtime.install` (追加で入れるランタイム。既定にしたものは自動で入る)。
+
+### LoadBalancer と LAN からの接続
+
+Cilium のクラスタでは、`type: LoadBalancer` の Service に `172.30.N.100〜199` の IP が割り当てられる
+(Cilium の LB IPAM と L2 アナウンス。niwakubed がクラスタの準備ができたあとに IP プールとポリシーを入れる。
+範囲は `GET /api/clusters/{name}` の `loadBalancerPool`、適用状況は `addons` で確認できる)。
+ミニPC (ホスト) からはその IP にそのまま届く。
+
+自宅の LAN の PC からは NAT の内側にあるので、ホストのポートを転送する:
+
+```bash
+curl -s -X POST localhost:8080/api/clusters/demo/forwards -d '{"hostPort":8443,"ip":"172.30.1.100","port":443}'
+```
+
+これで `http(s)://<ミニPC の IP>:8443` が `172.30.1.100:443` に届く (nftables の専用テーブル `niwakube_fwd` の DNAT)。
+
+| メソッド | パス | 説明 |
+|---|---|---|
+| GET | `/api/clusters/{name}/forwards` | 転送の一覧 |
+| POST | `/api/clusters/{name}/forwards` | 追加 (`proto`: tcp / udp、`hostPort`、`ip` はクラスタのサブネット内、`port`) |
+| DELETE | `/api/clusters/{name}/forwards/{proto}/{port}` | 削除 |
+
+転送はクラスタを消すと一緒に消え、niwakubed の起動時に設定し直される。ホストに Docker が入っていると
+FORWARD が DROP になるので、`DOCKER-USER` チェーンで `nkbr0` 向けの転送を許可すること。
 
 ### 仕組み
 

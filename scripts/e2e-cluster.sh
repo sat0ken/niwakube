@@ -205,6 +205,50 @@ for node in $NODES; do
   done
 done
 
+if [[ $CNI == cilium ]]; then
+  log "LoadBalancer (Cilium の LB IPAM + L2 アナウンス)"
+  for _ in $(seq 1 60); do
+    addons=$(curl -s "$API/clusters/$NAME" | jq -r '.addons // ""')
+    [[ $addons == applied ]] && break
+    sleep 5
+  done
+  [[ $addons == applied ]] || die "LoadBalancer の設定 (アドオン) が適用されません: $addons"
+  pool=$(curl -s "$API/clusters/$NAME" | jq -r .loadBalancerPool)
+  echo "    pool: $pool"
+  k expose deployment hello --name hello-lb --type LoadBalancer --port 8080 >/dev/null
+  lbip=""
+  for _ in $(seq 1 60); do
+    lbip=$(k get svc hello-lb -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+    [[ -n $lbip ]] && break
+    sleep 3
+  done
+  [[ -n $lbip ]] || die "LoadBalancer に IP が割り当てられません"
+  [[ $lbip == "${pool%.*-*}".1[0-9][0-9] ]] || die "LoadBalancer の IP $lbip がプール $pool の外です"
+  echo "    hello-lb: $lbip"
+
+  # ホストは VM と同じ L2 (nkbr0) にいるので、L2 アナウンス (ARP) で直接届く
+  ok=""
+  for _ in $(seq 1 30); do
+    if name=$(curl -fsS --max-time 5 "http://$lbip:8080/hostname"); then ok=1; break; fi
+    sleep 2
+  done
+  [[ -n $ok ]] || die "ホストから LoadBalancer ($lbip) に届きません"
+  echo "    host -> $lbip:8080: OK ($name)"
+
+  log "ホストのポートを LoadBalancer に転送する (LAN からの入口)"
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API/clusters/$NAME/forwards" -d "{\"hostPort\":18480,\"ip\":\"$lbip\",\"port\":8080}")
+  [[ $code == 201 ]] || die "転送を追加できません: HTTP $code"
+  host_ip=$(hostname -I | awk '{print $1}')
+  name=$(curl -fsS --max-time 5 "http://$host_ip:18480/hostname") || die "ホストのポート ($host_ip:18480) から届きません"
+  echo "    $host_ip:18480 -> $lbip:8080: OK ($name)"
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$API/clusters/$NAME/forwards/tcp/18480")
+  [[ $code == 204 ]] || die "転送を削除できません: HTTP $code"
+  if curl -fsS --max-time 3 "http://$host_ip:18480/hostname" >/dev/null 2>&1; then
+    die "転送を削除しても届いてしまいます"
+  fi
+  echo "    転送を削除すると届かなくなる: OK"
+fi
+
 if [[ -n $RUNTIMES || $RUNTIME != runc ]]; then
   log "RuntimeClass ごとに Pod を動かす"
   k get runtimeclass
