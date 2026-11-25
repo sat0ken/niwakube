@@ -4,6 +4,7 @@
 package distro
 
 import (
+	"context"
 	"net/netip"
 
 	"github.com/sat0ken/niwakube/internal/pki"
@@ -23,6 +24,8 @@ type Secrets struct {
 	CAs   map[string]pki.KeyPair `json:"cas"`
 	// ServiceAccountKey は ServiceAccount トークンの署名鍵 (PEM)。
 	ServiceAccountKey string `json:"serviceAccountKey,omitempty"`
+	// Extra はディストリ固有の秘密情報 (例: Talos の secrets bundle)。
+	Extra map[string]string `json:"extra,omitempty"`
 }
 
 // Cluster は Distro がノードの設定を作るのに必要な、クラスタの情報。
@@ -44,7 +47,8 @@ type Node struct {
 
 // Requirements は Distro が Backend に求めること。
 type Requirements struct {
-	NeedsOwnKernel bool // Talos は true
+	NeedsOwnKernel bool     // Talos は true
+	OnlyRuntimes   []string // 使えるコンテナランタイムが限られる場合 (Talos は runc のみ)。nil なら制限なし
 }
 
 // Distro は Kubernetes ディストリビューション。
@@ -54,8 +58,8 @@ type Distro interface {
 	DefaultVersion() string
 	ValidateVersion(v string) error
 	Requirements() Requirements
-	// Image はノードに使うイメージの論理名 (例: ubuntu-26.04)。
-	Image() string
+	// Image はノードに使うイメージの論理名 (例: ubuntu-26.04、talos-v1.14.7)。version は正規化済みのバージョン。
+	Image(version string) string
 	// GenerateSecrets はクラスタの秘密情報を作る。
 	GenerateSecrets(clusterName string) (*Secrets, error)
 	// UserData はノードの cloud-init user-data に追加するキーを返す。
@@ -65,4 +69,21 @@ type Distro interface {
 	AdminCAs() (server, client string)
 	// APIPort は API サーバーのポート。
 	APIPort() int
+}
+
+// RawUserDataProvider は cloud-init ではなく、user-data をそのまま渡すディストリが実装する (Talos の machine config)。
+// 実装していれば UserData の代わりに使う。
+type RawUserDataProvider interface {
+	RawUserData(c *Cluster, n *Node) ([]byte, error)
+}
+
+// Bootstrapper はノードを作ったあとに外から初期化の操作が必要なディストリが実装する (Talos の etcd の bootstrap)。
+// 何度呼んでも安全であること (初期化済みなら nil を返す)。
+type Bootstrapper interface {
+	Bootstrap(ctx context.Context, c *Cluster) error
+}
+
+// ClientConfigProvider は Kubernetes 以外のクライアントの設定を発行できるディストリが実装する (Talos の talosconfig)。
+type ClientConfigProvider interface {
+	ClientConfig(c *Cluster) (filename string, data []byte, err error)
 }

@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -117,7 +118,7 @@ type DistroInfo struct {
 func (s *Service) Distros() []DistroInfo {
 	out := []DistroInfo{}
 	for name, d := range s.distros {
-		out = append(out, DistroInfo{Name: name, Default: name == s.defDist, DefaultVersion: d.DefaultVersion(), Image: d.Image()})
+		out = append(out, DistroInfo{Name: name, Default: name == s.defDist, DefaultVersion: d.DefaultVersion(), Image: d.Image(d.DefaultVersion())})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
@@ -253,6 +254,13 @@ func (s *Service) normalize(req *CreateRequest) (distro.Distro, error) {
 	if err := addons.Validate(); err != nil {
 		return nil, invalid("%v", err)
 	}
+	if only := d.Requirements().OnlyRuntimes; only != nil {
+		for _, rt := range append([]string{req.Runtime.Default}, req.Runtime.Install...) {
+			if !slices.Contains(only, rt) {
+				return nil, invalid("distro %s supports only these runtimes: %s", d.Name(), strings.Join(only, ", "))
+			}
+		}
+	}
 	// Cilium の eBPF はホストのカーネルを共有するコンテナ型では他のクラスタとぶつかるので、VM 型に限る
 	if req.CNI == distro.CNICilium && !caps.OwnKernel {
 		return nil, invalid("cni cilium needs a backend with its own kernel; use cni: flannel with backend %s", name)
@@ -316,7 +324,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (*Cluster, erro
 	rec := &store.Cluster{
 		Name: req.Name, Distro: d.Name(), Index: index,
 		Spec: store.ClusterSpec{
-			Version: req.Version, Backend: req.Backend, Image: d.Image(),
+			Version: req.Version, Backend: req.Backend, Image: d.Image(req.Version),
 			ControlPlanes: req.ControlPlanes, Workers: *req.Workers,
 			ControlPlane: req.ControlPlane, Worker: req.Worker, SSHKeys: req.SSHAuthorizedKeys,
 			CNI: req.CNI, Hubble: *req.Hubble, Runtime: req.Runtime,
@@ -332,6 +340,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (*Cluster, erro
 		s.rollback(context.WithoutCancel(ctx), rec.Name)
 		return nil, err
 	}
+	s.startBootstrap(rec)
 	return s.view(ctx, rec)
 }
 
@@ -353,16 +362,22 @@ func (s *Service) createNodes(ctx context.Context, d distro.Distro, rec *store.C
 		nodes = append(nodes, node{distro.Node{Name: workerName(rec.Name, i), Role: distro.RoleWorker, Index: i, IP: s.hostIP(rec.Index, wHostBase+i)}, rec.Spec.Worker})
 	}
 	for _, nd := range nodes {
-		ud, err := d.UserData(dc, &nd.n)
-		if err != nil {
-			return err
-		}
-		_, err = s.machines.Create(ctx, machine.CreateRequest{
+		req := machine.CreateRequest{
 			Name: nd.n.Name, Backend: rec.Spec.Backend, Image: rec.Spec.Image,
 			CPUs: nd.size.CPUs, MemoryMiB: nd.size.MemoryMiB, DiskGiB: nd.size.DiskGiB,
 			SSHAuthorizedKeys: rec.Spec.SSHKeys,
-			IP:                nd.n.IP, Cluster: rec.Name, Role: string(nd.n.Role), UserData: ud,
-		})
+			IP:                nd.n.IP, Cluster: rec.Name, Role: string(nd.n.Role),
+		}
+		var err error
+		if rp, ok := d.(distro.RawUserDataProvider); ok {
+			req.RawUserData, err = rp.RawUserData(dc, &nd.n)
+		} else {
+			req.UserData, err = d.UserData(dc, &nd.n)
+		}
+		if err != nil {
+			return err
+		}
+		_, err = s.machines.Create(ctx, req)
 		if err != nil {
 			return fmt.Errorf("create node %s: %w", nd.n.Name, err)
 		}
@@ -639,3 +654,83 @@ func runtimeOf(rec *store.Cluster) store.Runtime {
 
 // Defaults は、リクエストで省略したときに使う CNI とランタイムを返す。
 func (s *Service) Defaults() Defaults { return s.cfg.Defaults }
+
+// distroCluster は保存されているクラスタから Distro に渡す情報を作る。
+func (s *Service) distroCluster(rec *store.Cluster) (*distro.Cluster, distro.Distro, error) {
+	sec, d, err := s.secrets(rec)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &distro.Cluster{
+		Name: rec.Name, Version: rec.Spec.Version, Secrets: sec,
+		APIAddr: s.hostIP(rec.Index, cpHostBase+1),
+		Addons:  addonsOf(cniOf(rec), rec.Spec.Hubble, rec.Spec.Runtime),
+	}, d, nil
+}
+
+// bootstrapTimeout は外からの初期化 (Talos の etcd の bootstrap) を試し続ける時間。
+var bootstrapTimeout = 30 * time.Minute
+
+// startBootstrap は、Distro が Bootstrapper なら、成功するまで裏で初期化を試し続ける。
+func (s *Service) startBootstrap(rec *store.Cluster) {
+	dc, d, err := s.distroCluster(rec)
+	if err != nil {
+		return
+	}
+	b, ok := d.(distro.Bootstrapper)
+	if !ok {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), bootstrapTimeout)
+		defer cancel()
+		for {
+			actx, acancel := context.WithTimeout(ctx, 30*time.Second)
+			err := b.Bootstrap(actx, dc)
+			acancel()
+			if err == nil {
+				s.log.Info("cluster bootstrapped", "cluster", rec.Name)
+				return
+			}
+			s.log.Debug("bootstrap not ready yet", "cluster", rec.Name, "err", err)
+			select {
+			case <-ctx.Done():
+				s.log.Error("bootstrap gave up", "cluster", rec.Name, "err", err)
+				return
+			case <-time.After(10 * time.Second):
+			}
+		}
+	}()
+}
+
+// Reconcile は niwakubed の起動時に呼ぶ。初期化が必要なディストリのクラスタは、念のため初期化を試し直す
+// (初期化の途中で niwakubed が止まった場合に備える。初期化済みなら何もしない)。
+func (s *Service) Reconcile(ctx context.Context) {
+	recs, err := s.store.ListClusters(ctx)
+	if err != nil {
+		s.log.Error("cluster reconcile", "err", err)
+		return
+	}
+	for _, rec := range recs {
+		if rec.DesiredState == machine.DesiredRunning {
+			s.startBootstrap(rec)
+		}
+	}
+}
+
+// ClientConfig は Kubernetes 以外のクライアントの設定 (Talos の talosconfig) を返す。
+func (s *Service) ClientConfig(ctx context.Context, name string) (string, []byte, error) {
+	rec, err := s.store.GetCluster(ctx, name)
+	if err != nil {
+		return "", nil, err
+	}
+	dc, d, err := s.distroCluster(rec)
+	if err != nil {
+		return "", nil, err
+	}
+	p, ok := d.(distro.ClientConfigProvider)
+	if !ok {
+		return "", nil, fmt.Errorf("distro %s has no client config: %w", d.Name(), backend.ErrNotSupported)
+	}
+	return p.ClientConfig(dc)
+}

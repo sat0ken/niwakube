@@ -21,6 +21,7 @@ import (
 	"github.com/sat0ken/niwakube/internal/cluster"
 	"github.com/sat0ken/niwakube/internal/distro/k3s"
 	"github.com/sat0ken/niwakube/internal/distro/kubeadm"
+	"github.com/sat0ken/niwakube/internal/distro/talos"
 	"github.com/sat0ken/niwakube/internal/ipam"
 	"github.com/sat0ken/niwakube/internal/machine"
 	"github.com/sat0ken/niwakube/internal/store"
@@ -108,7 +109,7 @@ func run() error {
 		return err
 	}
 	defaults := cluster.Defaults{CNI: *defCNI, Runtime: store.Runtime{Default: *defRT, Install: splitList(*defRTs)}}
-	clusters, err := cluster.NewService(cluster.Config{Subnet: cfg.Subnet, Defaults: defaults}, st, svc, nil, log, k3s.New(), kubeadm.New())
+	clusters, err := cluster.NewService(cluster.Config{Subnet: cfg.Subnet, Defaults: defaults}, st, svc, nil, log, k3s.New(), kubeadm.New(), talos.New())
 	if err != nil {
 		return err
 	}
@@ -117,7 +118,10 @@ func run() error {
 	defer stop()
 
 	// ホスト再起動後などに、起動しているはずの VM を起動し直す
-	go svc.Reconcile(ctx)
+	go func() {
+		svc.Reconcile(ctx)
+		clusters.Reconcile(ctx)
+	}()
 
 	srv := &http.Server{
 		Addr:              *listen,

@@ -50,6 +50,7 @@ jobs:
           - { distro: k3s, cni: cilium, runtime: runc, runtimes: "crun youki" }
           - { distro: kubeadm, cni: cilium, runtime: crun, runtimes: "crun youki" }
           - { distro: k3s, cni: flannel, runtime: runc, runtimes: "" }
+          - { distro: talos, cni: cilium, runtime: runc, runtimes: "" }
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6

@@ -15,6 +15,7 @@ import (
 	"github.com/sat0ken/niwakube/internal/backend/fake"
 	"github.com/sat0ken/niwakube/internal/distro/k3s"
 	"github.com/sat0ken/niwakube/internal/distro/kubeadm"
+	"github.com/sat0ken/niwakube/internal/distro/talos"
 	"github.com/sat0ken/niwakube/internal/ipam"
 	"github.com/sat0ken/niwakube/internal/machine"
 	"github.com/sat0ken/niwakube/internal/pki"
@@ -53,7 +54,7 @@ func newTest(t *testing.T) (*Service, *machine.Service, *fake.Backend, *fakeProb
 		t.Fatal(err)
 	}
 	pr := &fakeProber{err: errors.New("connection refused")}
-	cs, err := NewService(Config{Subnet: netip.MustParsePrefix("172.30.0.0/16")}, st, ms, pr, nil, k3s.New(), kubeadm.New())
+	cs, err := NewService(Config{Subnet: netip.MustParsePrefix("172.30.0.0/16")}, st, ms, pr, nil, k3s.New(), kubeadm.New(), talos.New())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,5 +361,56 @@ func TestNiwakubeDefaults(t *testing.T) {
 	}
 	if _, err := newCS(Defaults{Runtime: store.Runtime{Default: "kata"}}); err == nil {
 		t.Error("invalid default runtime must be rejected")
+	}
+}
+
+func TestTalosCluster(t *testing.T) {
+	// テストでは Talos API への bootstrap を試さない
+	old := bootstrapTimeout
+	bootstrapTimeout = 0
+	t.Cleanup(func() { bootstrapTimeout = old })
+
+	ctx := context.Background()
+	cs, _, fb, _ := newTest(t)
+	one := 1
+	c, err := cs.Create(ctx, CreateRequest{Name: "tal", Distro: "talos", Workers: &one})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Distro != "talos" || c.CNI != "cilium" || len(c.Machines) != 2 {
+		t.Fatalf("unexpected cluster: %+v", c)
+	}
+	cp, _ := fb.Spec("tal-cp-1")
+	if cp.Image != "talos-"+talos.New().DefaultVersion() {
+		t.Errorf("image: %s", cp.Image)
+	}
+	ud := string(cp.Seed.UserData)
+	if strings.HasPrefix(ud, "#cloud-config") || !strings.Contains(ud, "type: controlplane") || !strings.Contains(ud, "niwakube-cilium-install") {
+		t.Errorf("CP must receive the Talos machine config as is:\n%.300s", ud)
+	}
+	// network-config (固定 IP) は Talos でも NoCloud で渡る
+	if !strings.Contains(string(cp.Seed.NetworkConfig), "172.30.1.11/16") {
+		t.Error("network-config must still carry the static IP")
+	}
+
+	name, tc, err := cs.ClientConfig(ctx, "tal")
+	if err != nil || name != "tal.talosconfig" || !strings.Contains(string(tc), "172.30.1.11") {
+		t.Errorf("talosconfig: %s %v", name, err)
+	}
+	if _, err := cs.Kubeconfig(ctx, "tal"); err != nil {
+		t.Errorf("kubeconfig: %v", err)
+	}
+
+	// Talos は runc のみ
+	if _, err := cs.Create(ctx, CreateRequest{Name: "tal2", Distro: "talos", Runtime: store.Runtime{Default: "crun"}}); !errors.Is(err, machine.ErrInvalid) {
+		t.Errorf("crun must be rejected for talos: %v", err)
+	}
+	// k3s には talosconfig は無い
+	zero := 0
+	if _, err := cs.Create(ctx, CreateRequest{Name: "k", Workers: &zero}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := cs.ClientConfig(ctx, "k"); !errors.Is(err, backend.ErrNotSupported) {
+		t.Errorf("k3s talosconfig: want ErrNotSupported, got %v", err)
 	}
 }

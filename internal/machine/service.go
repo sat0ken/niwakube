@@ -106,6 +106,8 @@ type CreateRequest struct {
 	Cluster  string         `json:"-"`
 	Role     string         `json:"-"`
 	UserData map[string]any `json:"-"` // cloud-init の user-data に追加するキー
+	// RawUserData を指定すると cloud-init の user-data を作らず、これをそのまま渡す (Talos の machine config)
+	RawUserData []byte `json:"-"`
 }
 
 // Machine は API で返す VM の情報 (望ましい状態 + 現在の状態)。
@@ -221,11 +223,14 @@ func (s *Service) allocate(ctx context.Context, req *CreateRequest) (*store.Mach
 	return m, nil
 }
 
-func (s *Service) spec(m *store.Machine, extra map[string]any) (*backend.MachineSpec, error) {
-	keys := append(append([]string{}, s.cfg.DefaultSSHKeys...), m.SSHKeys...)
-	user, err := seed.UserData(seed.User{SSHAuthorizedKeys: keys, Extra: extra})
-	if err != nil {
-		return nil, err
+func (s *Service) spec(m *store.Machine, extra map[string]any, raw []byte) (*backend.MachineSpec, error) {
+	user := raw
+	if user == nil {
+		keys := append(append([]string{}, s.cfg.DefaultSSHKeys...), m.SSHKeys...)
+		var err error
+		if user, err = seed.UserData(seed.User{SSHAuthorizedKeys: keys, Extra: extra}); err != nil {
+			return nil, err
+		}
 	}
 	meta, err := seed.MetaData(m.Name+"-"+strconv.FormatInt(m.CreatedAt.Unix(), 10), m.Name)
 	if err != nil {
@@ -256,7 +261,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (*Machine, erro
 		return nil, err
 	}
 	b := s.backends[m.Backend]
-	spec, err := s.spec(m, req.UserData)
+	spec, err := s.spec(m, req.UserData, req.RawUserData)
 	if err == nil {
 		err = b.Create(ctx, spec)
 	}

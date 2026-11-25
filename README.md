@@ -31,7 +31,7 @@ sudo ./scripts/test-vm.sh down test
 
 ## フェーズ1: niwakubed (VM の REST API)
 
-ビルドには Go 1.26 以上が必要。`CGO_ENABLED=0` の静的バイナリなので、別のマシンでビルドしてコピーしてもよい。
+ビルドには Go 1.26.5 以上が必要 (Talos の machinery ライブラリの要件)。`CGO_ENABLED=0` の静的バイナリなので、別のマシンでビルドしてコピーしてもよい。
 
 ```bash
 make build
@@ -95,7 +95,7 @@ curl -s -X DELETE localhost:8080/api/vms/vm1
 
 ## フェーズ2: クラスタの払い出し
 
-いまは **k3s** と **kubeadm** に対応 (コントロールプレーン 1 台 + ワーカー N 台)。Talos はこれから。
+**k3s**、**kubeadm**、**Talos** に対応 (コントロールプレーン 1 台 + ワーカー N 台)。
 
 ```bash
 curl -s -X POST localhost:8080/api/clusters -d '{"name":"demo","distro":"k3s","workers":2}'
@@ -123,6 +123,23 @@ curl -s -X DELETE localhost:8080/api/clusters/demo
 |---|---|---|
 | k3s | Ubuntu 26.04 | `get.k3s.io` で server / agent をインストール |
 | kubeadm | Ubuntu 26.04 | containerd と `pkgs.k8s.io` の kubeadm を入れて `kubeadm init` / `join` |
+| talos | Talos Linux (nocloud イメージ) | niwakubed が machine config を生成して渡し、Talos API で etcd を bootstrap する |
+
+Talos はシェルも SSH も無く、`talosctl` で操作する。talosconfig は `GET /api/clusters/{name}/talosconfig` で取得できる。
+コンテナランタイムは runc のみ。イメージは `host-setup.sh` が Image Factory から取得する
+(`TALOS_VERSIONS` で変更できる。niwakubed に組み込んだ Talos のバージョンと合わせること)。
+
+```bash
+curl -s -X POST localhost:8080/api/clusters -d '{"name":"tal","distro":"talos","workers":2}'
+```
+
+```bash
+curl -s localhost:8080/api/clusters/tal/talosconfig > tal.talosconfig
+```
+
+```bash
+talosctl --talosconfig tal.talosconfig dashboard
+```
 
 **CNI** は既定で **Cilium** (kube-proxy を eBPF で置き換え、Hubble の relay と UI も入れる)。`"cni":"flannel"` も選べる。
 
@@ -163,6 +180,7 @@ kubectl --kubeconfig demo.kubeconfig -n kube-system port-forward svc/hubble-ui 1
 | POST | `/api/clusters/{name}/start` | すべてのノードを起動 (CP から) |
 | POST | `/api/clusters/{name}/stop` | すべてのノードを正常停止 (ワーカーから) |
 | GET | `/api/clusters/{name}/kubeconfig` | admin の kubeconfig |
+| GET | `/api/clusters/{name}/talosconfig` | Talos の talosconfig (Talos のみ) |
 
 `POST /api/clusters` の項目 (省略時の既定値): `name` (必須、20 文字以内)、`distro` (k3s)、
 `version` (既定は `stable`。k3s は `latest` や `v1.37.2+k3s1`、kubeadm は `v1.37` (その minor の最新) や `v1.37.2` も可)、`controlPlanes` (1。いまは 1 のみ)、`workers` (2)、

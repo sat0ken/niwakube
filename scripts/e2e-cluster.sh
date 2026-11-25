@@ -58,6 +58,11 @@ cleanup() {
       echo "----- tail $f"
       tail -n 80 "$f"
     done
+    for f in "$LOG_DIR"/*-guest.log; do
+      [[ -s $f ]] || continue
+      echo "----- errors in $f"
+      grep -n -i -E 'error|fail|not found|exit [1-9]' "$f" | grep -v -E 'level=info' | tail -n 40 || true
+    done
     echo "----- machine status (niwakubed)"
     jq -c '.machines[]? | {name, ip, status}' "$LOG_DIR/cluster.json" 2>/dev/null || true
     echo "----- vm.info (直接)"
@@ -153,7 +158,7 @@ if [[ $CNI == cilium ]]; then
   k -n kube-system rollout status deployment/hubble-ui --timeout=300s
 fi
 
-log "Deployment を作る (kubeadm は CP に taint があるので Pod はワーカーに載る)"
+log "Deployment を作る (kubeadm と Talos は CP に taint があるので、Pod はワーカーに載る)"
 k create deployment hello --image="$TEST_IMAGE" --replicas=2 --port=8080 -- /agnhost netexec --http-port=8080
 k rollout status deployment/hello --timeout=300s
 k get pods -o wide
@@ -191,7 +196,7 @@ for node in $NODES; do
   probe "svc-$node" hello.default.svc.cluster.local:8080 "$node"
 done
 
-log "各ノードから全 Pod に直接接続する (ノードをまたぐ通信 = flannel の VXLAN)"
+log "各ノードから全 Pod に直接接続する (ノードをまたぐ Pod 間通信)"
 i=0
 for node in $NODES; do
   for ip in $POD_IPS; do

@@ -12,6 +12,10 @@ BRIDGE_ADDR=${BRIDGE_ADDR:-172.30.0.1/16}
 VM_SUBNET=${VM_SUBNET:-172.30.0.0/16}
 # VM 用に取得する Ubuntu クラウドイメージのバージョン (スペース区切りで複数可。例: "26.04 24.04")
 UBUNTU_IMAGES=${UBUNTU_IMAGES:-26.04}
+# Talos のイメージのバージョン (niwakubed に組み込んだ Talos の machinery と同じにする)。空にすると取得しない
+TALOS_VERSIONS=${TALOS_VERSIONS-v1.14.7}
+# Image Factory の schematic。既定は拡張機能なし
+TALOS_SCHEMATIC=${TALOS_SCHEMATIC:-376567988ad370138ad8b2698212367b8edcb69b5fd68c80be1f2ec7d603b4ba}
 
 # 動作確認したバージョンに固定する (CI の E2E で検証済み)。最新を試すなら CH_VERSION=latest
 CH_VERSION=${CH_VERSION:-v55.0}
@@ -191,6 +195,21 @@ fetch_ubuntu_images() {
   done
 }
 
+fetch_talos_images() {
+  local ver raw url
+  for ver in $TALOS_VERSIONS; do
+    raw=$NIWAKUBE_DIR/images/talos-$ver.raw
+    if [[ -f $raw ]]; then
+      log "Talos $ver のイメージは取得済み: $raw"
+      continue
+    fi
+    url=https://factory.talos.dev/image/$TALOS_SCHEMATIC/$ver/nocloud-amd64.raw.xz
+    log "Talos $ver の nocloud イメージを取得 ($url)"
+    curl -fsSL "$url" | xz -d >"$raw.tmp"
+    mv "$raw.tmp" "$raw"
+  done
+}
+
 check_os
 check_kvm
 install_packages
@@ -199,5 +218,6 @@ setup_dirs
 setup_bridge
 setup_nat
 fetch_ubuntu_images
+fetch_talos_images
 
 log "完了。次は: sudo ./scripts/test-vm.sh up test"
