@@ -138,14 +138,47 @@ k create deployment hello --image="$TEST_IMAGE" --replicas=2 --port=8080 -- /agn
 k rollout status deployment/hello --timeout=300s
 k get pods -o wide
 
-log "Service とクラスタ内 DNS 経由で Pod に接続する"
+# probe NAME TARGET NODE: NODE 上の Pod から TARGET (host:port) に TCP 接続できるかを確かめる。
+# restartPolicy=OnFailure なので、つながるまでコンテナが再起動して再試行する。
+probe() {
+  local name=$1 target=$2 node=$3
+  k run "$name" --image="$TEST_IMAGE" --restart=OnFailure \
+    --overrides="{\"spec\":{\"nodeName\":\"$node\"}}" \
+    --command -- /agnhost connect --timeout=10s "$target" >/dev/null
+  if ! k wait --for=jsonpath='{.status.phase}'=Succeeded "pod/$name" --timeout=180s; then
+    k describe "pod/$name" | tail -n 20 || true
+    k logs "pod/$name" || true
+    die "$node から $target に接続できませんでした"
+  fi
+  echo "    $node -> $target: OK"
+}
+
+log "Service を作り、エンドポイントが揃うのを待つ"
 k expose deployment hello --port=8080
-k run probe --image="$TEST_IMAGE" --restart=Never --command -- /agnhost connect --timeout=10s hello.default.svc.cluster.local:8080
-if ! k wait --for=jsonpath='{.status.phase}'=Succeeded pod/probe --timeout=180s; then
-  k describe pod probe || true
-  k logs probe || true
-  die "Service に接続できませんでした"
-fi
+for _ in $(seq 1 60); do
+  n=$(k get endpointslice -l kubernetes.io/service-name=hello \
+        -o jsonpath='{range .items[*].endpoints[?(@.conditions.ready==true)]}{.addresses[0]}{"\n"}{end}' | grep -c . || true)
+  [[ $n == 2 ]] && break
+  sleep 2
+done
+[[ $n == 2 ]] || die "Service のエンドポイントが揃いません ($n/2)"
+
+NODES=$(k get nodes -o jsonpath='{.items[*].metadata.name}')
+POD_IPS=$(k get pods -l app=hello -o jsonpath='{.items[*].status.podIP}')
+
+log "クラスタ内 DNS + Service 経由で接続する (両方のノードから)"
+for node in $NODES; do
+  probe "svc-$node" hello.default.svc.cluster.local:8080 "$node"
+done
+
+log "各ノードから全 Pod に直接接続する (ノードをまたぐ通信 = flannel の VXLAN)"
+i=0
+for node in $NODES; do
+  for ip in $POD_IPS; do
+    probe "pod-$i-$node" "$ip:8080" "$node"
+    i=$((i + 1))
+  done
+done
 
 log "クラスタを削除"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$API/clusters/$NAME")
