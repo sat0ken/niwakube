@@ -1,0 +1,17 @@
+[Unit]
+Description=niwakube daemon
+Documentation=https://github.com/sat0ken/niwakube
+After=network-online.target systemd-networkd.service niwakube-nat.service
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/niwakubed --listen 127.0.0.1:8080
+Restart=on-failure
+# /run/niwakube に VM ごとの API socket を置く。
+# niwakubed を止めても VM (別の unit) は動き続けるので、socket を消さないよう Preserve=yes にする。
+RuntimeDirectory=niwakube
+RuntimeDirectoryPreserve=yes
+StateDirectory=niwakube
+
+[Install]
+WantedBy=multi-user.target
