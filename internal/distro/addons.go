@@ -75,10 +75,29 @@ const youkiInstall = `if apt-cache show youki >/dev/null 2>&1; then
   ln -sf "$(command -v youki)" /usr/local/bin/youki 2>/dev/null || true
 else
   arch=$(uname -m)
-  url=$(curl -fsSL https://api.github.com/repos/youki-dev/youki/releases/latest \
-    | grep -o '"browser_download_url": *"[^"]*"' | cut -d'"' -f4 \
-    | grep -E "${arch}.*gnu.*\.tar\.gz$" | head -n1)
+  url=""
+  # GitHub API (認証なしは IP ごとにレート制限があり、CI では失敗することがある) を何度か試す
+  for i in 1 2 3 4 5; do
+    url=$(curl -fsSL https://api.github.com/repos/youki-dev/youki/releases/latest 2>/dev/null \
+      | grep -o '"browser_download_url": *"[^"]*"' | cut -d'"' -f4 \
+      | grep -E "${arch}.*gnu.*\.tar\.gz$" | head -n1 || true)
+    [ -n "$url" ] && break
+    sleep $((i * 5))
+  done
+  # API が使えなければ、latest のリダイレクト先からタグを調べて、よくあるファイル名を試す
+  if [ -z "$url" ]; then
+    tag=$(curl -fsSIL -o /dev/null -w '%{url_effective}' https://github.com/youki-dev/youki/releases/latest | sed 's#.*/tag/##')
+    v=${tag#v}
+    for name in "youki-${v}-${arch}-gnu.tar.gz" "youki-${v}-${arch}-unknown-linux-gnu.tar.gz" "youki_${v}_linux-${arch}.tar.gz"; do
+      candidate="https://github.com/youki-dev/youki/releases/download/${tag}/${name}"
+      if curl -fsIL -o /dev/null "$candidate"; then
+        url=$candidate
+        break
+      fi
+    done
+  fi
   [ -n "$url" ] || { echo "youki のリリースが見つかりません ($arch)"; exit 1; }
+  echo "youki: $url"
   tmp=$(mktemp -d)
   curl -fsSL "$url" | tar -xz -C "$tmp"
   install -m 0755 "$(find "$tmp" -type f -name youki | head -n1)" /usr/local/bin/youki

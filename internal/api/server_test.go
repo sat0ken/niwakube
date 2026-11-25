@@ -149,6 +149,7 @@ func TestClusterAPI(t *testing.T) {
 		{http.MethodPost, "/demo/stop", "", http.StatusOK},
 		{http.MethodPost, "/demo/start", "", http.StatusOK},
 		{http.MethodGet, "/nope/kubeconfig", "", http.StatusNotFound},
+		{http.MethodGet, "/demo/talosconfig", "", http.StatusNotImplemented},
 	}
 	for _, c := range cases {
 		resp, body := do(t, c.method, base+c.path, c.body)
