@@ -104,9 +104,9 @@ func (c *Config) storage() map[string]any {
 	match := map[string]any{}
 	switch d := c.Storage.Disk; {
 	case d.Serial != "":
-		match["serial"] = d.Serial
+		match["serial"] = diskGlob(d.Serial)
 	case d.Model != "":
-		match["model"] = d.Model
+		match["model"] = diskGlob(d.Model)
 	default:
 		match["size"] = "largest"
 	}
@@ -125,6 +125,14 @@ func (c *Config) storage() map[string]any {
 		{"type": "mount", "id": "m-esp", "device": "esp-fs", "path": "/boot/efi"},
 	}
 	return map[string]any{"swap": map[string]any{"size": 0}, "config": cfg}
+}
+
+// diskGlob は lsblk で見えるモデル名 / シリアル番号を、curtin の照合に使うパターンに変換する。
+// udev の値は lsblk の表示と違い、スペースが "_" になったり (ID_MODEL)、NVMe ではシリアルの前に
+// モデル名が付いたりする (ID_SERIAL = "モデル名_シリアル")。そのため前後を * で囲み、スペースは
+// 任意の 1 文字 (?) にする。例: "Samsung SSD 980 1TB" → "*Samsung?SSD?980?1TB*"
+func diskGlob(s string) string {
+	return "*" + strings.ReplaceAll(s, " ", "?") + "*"
 }
 
 // deepMerge は src を dst に再帰的にマージする (map 同士はマージ、それ以外は src で上書き)。

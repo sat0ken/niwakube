@@ -118,6 +118,7 @@ var (
 	refRe      = regexp.MustCompile(`^[A-Za-z0-9_./-]+$`)
 	safeArgRe  = regexp.MustCompile(`^[A-Za-z0-9_.,:=/+-]+$`)
 	simpleRe   = regexp.MustCompile(`^[A-Za-z0-9_./+-]+$`)
+	diskIDRe   = regexp.MustCompile(`^[A-Za-z0-9_.-]+( [A-Za-z0-9_.-]+)*$`)
 )
 
 // Load は config.yaml を読み、既定値を入れて検証する。
@@ -225,6 +226,11 @@ func (c *Config) Validate() error {
 	d := c.Storage.Disk
 	if (d.Model != "" && d.Serial != "") || (d.Largest && (d.Model != "" || d.Serial != "")) {
 		bad("storage.disk: choose one of largest, model or serial")
+	}
+	for field, v := range map[string]string{"model": d.Model, "serial": d.Serial} {
+		if v != "" && !diskIDRe.MatchString(v) {
+			bad("storage.disk.%s may contain only letters, digits, spaces, '_', '.' and '-': %q", field, v)
+		}
 	}
 	if !sizeRe.MatchString(c.Storage.RootSize) {
 		bad("storage.root_size must be like 100G: %q", c.Storage.RootSize)

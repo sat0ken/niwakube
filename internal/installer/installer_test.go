@@ -95,7 +95,7 @@ func TestUserData(t *testing.T) {
 	// ディスクはモデル名で選び、ルートは 80G、残りは late-commands で XFS
 	cfg := ai["storage"].(map[string]any)["config"].([]any)
 	disk := cfg[0].(map[string]any)
-	if disk["match"].(map[string]any)["model"] != "Samsung SSD 980 1TB" {
+	if disk["match"].(map[string]any)["model"] != "*Samsung?SSD?980?1TB*" {
 		t.Errorf("disk match: %v", disk)
 	}
 	foundRoot := false
@@ -181,6 +181,7 @@ func TestValidate(t *testing.T) {
 		"not a key":            "hostname: h\nuser: {name: u, ssh_authorized_keys: [hello]}\n",
 		"bad ref":              "hostname: h\nuser: {name: u, github_keys: u}\nniwakube: {ref: \"main; rm -rf /\"}\n",
 		"bad timezone":         "hostname: h\nuser: {name: u, github_keys: u}\ntimezone: \"Asia/Tokyo $(id)\"\n",
+		"glob in disk serial":  "hostname: h\nuser: {name: u, github_keys: u}\nstorage: {disk: {serial: \"*\"}}\n",
 	}
 	for name, s := range bad {
 		if _, err := Parse([]byte(s)); err == nil {

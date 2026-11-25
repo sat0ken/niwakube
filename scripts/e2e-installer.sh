@@ -89,6 +89,11 @@ while kill -0 "$QEMU_PID" 2>/dev/null; do
     sleep 5
     die "mini ISO のスクリプトが失敗しました"
   fi
+  # インストーラー (subiquity) がエラーになったら、待たずに失敗にする
+  if grep -a -q -E 'An error occurred\. Press enter to start a shell|matched no disk' <<<"$clean"; then
+    sleep 5
+    die "インストーラーがエラーで止まりました"
+  fi
   # シリアルの出力が長く止まったら失敗にする
   size=$(stat -c %s "$T/install-serial.log" 2>/dev/null || echo 0)
   if (( size != last_size )); then

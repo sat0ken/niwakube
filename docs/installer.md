@@ -100,6 +100,10 @@ GRUB のメニューには次の項目が出る。
 lsblk -d -o NAME,MODEL,SERIAL,SIZE
 ```
 
+`lsblk` に表示されたままの値を書けばよい。udev の値はスペースが `_` になったり、NVMe ではシリアルの前に
+モデル名が付いたりするので、niwakube は前後を `*`、スペースを `?` にしたパターンで照合する
+(例: `Samsung SSD 980 1TB` → `*Samsung?SSD?980?1TB*`)。
+
 ## USB への書き込みとインストール
 
 1. PR の Checks → 「Installer ISO」→ Summary の Artifacts から `niwakube-installer` をダウンロードして展開する
