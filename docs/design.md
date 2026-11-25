@@ -137,5 +137,11 @@ GET    /api/host                     CPU / メモリ / ディスクの使用状�
 ## 未検証 (実機で確認すること)
 
 - Talos の nocloud イメージが CLOUDHV.fd で起動するか (起動しなければ BIOS 用ファームウェアか、カーネルを直接起動する方法を試す)
-- ゲストからの ACPI シャットダウンで VMM プロセスがきちんと終了するか
 - kube-vip (ARP) が nkbr0 上で問題なく動くか
+
+## 検証済み (GitHub Actions の E2E、ubuntu-26.04 ランナー + nested KVM、Cloud Hypervisor v55.0)
+
+- Ubuntu 26.04 クラウドイメージが CLOUDHV.fd で起動し、cloud-init (NoCloud, seed ISO) で固定 IP・ホスト名・SSH 鍵が設定される
+- nkbr0 + nftables の NAT で VM から外部に出られる
+- ACPI の電源ボタンで正常停止し、その後 vm.create からやり直して再起動できる
+- v55 からディスクに `image_type` の指定が必須 (指定しないと `Image type required for disk`)
