@@ -262,3 +262,51 @@ func TestKubeadmCluster(t *testing.T) {
 		t.Errorf("k3s style version must be rejected for kubeadm: %v", err)
 	}
 }
+
+func TestCNIAndRuntimeDefaults(t *testing.T) {
+	ctx := context.Background()
+	cs, _, fb, _ := newTest(t)
+	zero := 0
+
+	// 既定: Cilium + Hubble、ランタイムは runc
+	c, err := cs.Create(ctx, CreateRequest{Name: "def", Workers: &zero})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.CNI != "cilium" || !c.Hubble || c.Runtime.Default != "runc" || len(c.Runtime.Install) != 0 {
+		t.Errorf("defaults: cni=%s hubble=%v runtime=%+v", c.CNI, c.Hubble, c.Runtime)
+	}
+	cp, _ := fb.Spec("def-cp-1")
+	if !strings.Contains(string(cp.Seed.UserData), "flannel-backend: none") || !strings.Contains(string(cp.Seed.UserData), "hubble.ui.enabled=true") {
+		t.Error("cilium + hubble must reach the node's user-data")
+	}
+
+	// 既定のランタイムは自動で入れる対象に加わる
+	f := false
+	c, err = cs.Create(ctx, CreateRequest{Name: "rt", Workers: &zero, CNI: "flannel", Hubble: &f, Runtime: store.Runtime{Default: "youki", Install: []string{"crun"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.CNI != "flannel" || c.Hubble || c.Runtime.Default != "youki" || strings.Join(c.Runtime.Install, ",") != "crun,youki" {
+		t.Errorf("runtime: cni=%s hubble=%v runtime=%+v", c.CNI, c.Hubble, c.Runtime)
+	}
+
+	tr := true
+	for _, req := range []CreateRequest{
+		{Name: "x", CNI: "calico"},
+		{Name: "x", CNI: "flannel", Hubble: &tr},
+		{Name: "x", Runtime: store.Runtime{Install: []string{"kata"}}},
+	} {
+		if _, err := cs.Create(ctx, req); !errors.Is(err, machine.ErrInvalid) {
+			t.Errorf("%+v: want ErrInvalid, got %v", req, err)
+		}
+	}
+}
+
+// CNI を選べるようになる前に作ったクラスタ (spec に cni が無い) は flannel として扱う。
+func TestLegacyClusterIsFlannel(t *testing.T) {
+	rec := &store.Cluster{Spec: store.ClusterSpec{}}
+	if cniOf(rec) != "flannel" || runtimeOf(rec).Default != "runc" {
+		t.Errorf("legacy: %s %+v", cniOf(rec), runtimeOf(rec))
+	}
+}

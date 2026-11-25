@@ -31,6 +31,7 @@ type Cluster struct {
 	Version string     // 例: k3s なら "v1.34.2+k3s1"。空ならディストリの既定 (stable)
 	APIAddr netip.Addr // API サーバーのアドレス (いまは CP 1 台目。HA にしたら VIP)
 	Secrets *Secrets
+	Addons  Addons // CNI とコンテナランタイム
 }
 
 // Node は Distro が設定を作る対象のノード。

@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net/netip"
 	"regexp"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -102,6 +103,9 @@ type CreateRequest struct {
 	ControlPlane      store.NodeSize `json:"controlPlane,omitempty"`
 	Worker            store.NodeSize `json:"worker,omitempty"`
 	SSHAuthorizedKeys []string       `json:"sshAuthorizedKeys,omitempty"`
+	CNI               string         `json:"cni,omitempty"`    // cilium (既定) | flannel
+	Hubble            *bool          `json:"hubble,omitempty"` // 既定は Cilium なら true
+	Runtime           store.Runtime  `json:"runtime,omitempty"`
 }
 
 // Status はクラスタの現在の状態。
@@ -123,6 +127,9 @@ type Cluster struct {
 	Workers       int                `json:"workers"`
 	ControlPlane  store.NodeSize     `json:"controlPlane"`
 	Worker        store.NodeSize     `json:"worker"`
+	CNI           string             `json:"cni"`
+	Hubble        bool               `json:"hubble"`
+	Runtime       store.Runtime      `json:"runtime"`
 	Subnet        string             `json:"subnet"`
 	Endpoint      string             `json:"endpoint"`
 	DesiredState  string             `json:"desiredState"`
@@ -189,6 +196,31 @@ func (s *Service) normalize(req *CreateRequest) (distro.Distro, error) {
 	}
 	defaultSize(&req.ControlPlane)
 	defaultSize(&req.Worker)
+
+	if req.CNI == "" {
+		req.CNI = distro.CNICilium
+	}
+	if req.Hubble == nil {
+		h := req.CNI == distro.CNICilium
+		req.Hubble = &h
+	}
+	if req.Runtime.Default == "" {
+		req.Runtime.Default = distro.RuntimeRunc
+	}
+	// 既定にしたランタイムは自動で入れる
+	if req.Runtime.Default != distro.RuntimeRunc && !slices.Contains(req.Runtime.Install, req.Runtime.Default) {
+		req.Runtime.Install = append(req.Runtime.Install, req.Runtime.Default)
+	}
+	slices.Sort(req.Runtime.Install)
+	req.Runtime.Install = slices.Compact(req.Runtime.Install)
+	addons := addonsOf(req.CNI, *req.Hubble, req.Runtime)
+	if err := addons.Validate(); err != nil {
+		return nil, invalid("%v", err)
+	}
+	// Cilium の eBPF はホストのカーネルを共有するコンテナ型では他のクラスタとぶつかるので、VM 型に限る
+	if req.CNI == distro.CNICilium && !caps.OwnKernel {
+		return nil, invalid("cni cilium needs a backend with its own kernel; use cni: flannel with backend %s", name)
+	}
 	return d, nil
 }
 
@@ -251,6 +283,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (*Cluster, erro
 			Version: req.Version, Backend: req.Backend, Image: d.Image(),
 			ControlPlanes: req.ControlPlanes, Workers: *req.Workers,
 			ControlPlane: req.ControlPlane, Worker: req.Worker, SSHKeys: req.SSHAuthorizedKeys,
+			CNI: req.CNI, Hubble: *req.Hubble, Runtime: req.Runtime,
 		},
 		Secrets: rawSecrets, DesiredState: machine.DesiredRunning, CreatedAt: time.Now(),
 	}
@@ -270,6 +303,7 @@ func (s *Service) createNodes(ctx context.Context, d distro.Distro, rec *store.C
 	dc := &distro.Cluster{
 		Name: rec.Name, Version: rec.Spec.Version, Secrets: secrets,
 		APIAddr: s.hostIP(rec.Index, cpHostBase+1),
+		Addons:  addonsOf(cniOf(rec), rec.Spec.Hubble, rec.Spec.Runtime),
 	}
 	type node struct {
 		n    distro.Node
@@ -348,6 +382,7 @@ func (s *Service) view(ctx context.Context, rec *store.Cluster) (*Cluster, error
 		Name: rec.Name, Distro: rec.Distro, Version: rec.Spec.Version, Backend: rec.Spec.Backend,
 		ControlPlanes: rec.Spec.ControlPlanes, Workers: rec.Spec.Workers,
 		ControlPlane: rec.Spec.ControlPlane, Worker: rec.Spec.Worker,
+		CNI: cniOf(rec), Hubble: rec.Spec.Hubble, Runtime: runtimeOf(rec),
 		Subnet: s.subnetOf(rec.Index).String(), Endpoint: s.endpoint(rec),
 		DesiredState: rec.DesiredState, Machines: ms, CreatedAt: rec.CreatedAt,
 	}
@@ -540,4 +575,28 @@ func (s *Service) setState(ctx context.Context, name, state string) (*Cluster, e
 		return nil, errors.Join(errs...)
 	}
 	return s.view(ctx, rec)
+}
+
+func addonsOf(cni string, hubble bool, rt store.Runtime) distro.Addons {
+	def := rt.Default
+	if def == "" {
+		def = distro.RuntimeRunc
+	}
+	return distro.Addons{CNI: cni, Hubble: hubble, DefaultRuntime: def, Runtimes: rt.Install}
+}
+
+// cniOf は CNI を返す。CNI を選べるようになる前に作ったクラスタは flannel。
+func cniOf(rec *store.Cluster) string {
+	if rec.Spec.CNI == "" {
+		return distro.CNIFlannel
+	}
+	return rec.Spec.CNI
+}
+
+func runtimeOf(rec *store.Cluster) store.Runtime {
+	rt := rec.Spec.Runtime
+	if rt.Default == "" {
+		rt.Default = distro.RuntimeRunc
+	}
+	return rt
 }

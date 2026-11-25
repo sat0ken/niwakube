@@ -5,11 +5,15 @@
 #   make build && sudo ./scripts/e2e-cluster.sh bin/niwakubed
 #
 # 前提: scripts/host-setup.sh を実行済みであること。
-# 環境変数: DISTRO (既定 k3s), NAME (e2ek), CLUSTER_TIMEOUT (900), LISTEN (127.0.0.1:18081)
+# 環境変数: DISTRO (既定 k3s), CNI (cilium), RUNTIME (既定のランタイム、runc), RUNTIMES (追加で入れるもの、空白区切り),
+#           NAME (e2ek), CLUSTER_TIMEOUT (900), LISTEN (127.0.0.1:18081)
 set -euo pipefail
 
 BIN=${1:?usage: $0 path/to/niwakubed}
 DISTRO=${DISTRO:-k3s}
+CNI=${CNI:-cilium}
+RUNTIME=${RUNTIME:-runc}
+RUNTIMES=${RUNTIMES:-}
 NAME=${NAME:-e2ek}
 CLUSTER_TIMEOUT=${CLUSTER_TIMEOUT:-900}
 LISTEN=${LISTEN:-127.0.0.1:18081}
@@ -45,7 +49,7 @@ cleanup() {
     for m in $(jq -r '.machines[]? | "\(.name)=\(.ip)"' "$LOG_DIR/cluster.json" 2>/dev/null); do
       local name=${m%=*} ip=${m#*=}
       curl -s "$API/vms/$name/serial?bytes=2097152" >"$LOG_DIR/$name-serial.log" || true
-      ssh_to "$ip" 'sudo cat /var/log/cloud-init-output.log; sudo journalctl --no-pager -u "k3s*" -u kubelet -u containerd | tail -300' \
+      ssh_to "$ip" 'sudo cat /var/log/cloud-init-output.log; sudo journalctl --no-pager -u "k3s*" -u kubelet -u containerd | tail -300; sudo kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get pods -A -o wide 2>/dev/null || sudo kubectl --kubeconfig /etc/kubernetes/admin.conf get pods -A -o wide 2>/dev/null' \
         >"$LOG_DIR/$name-guest.log" 2>&1 || true
     done
     # Artifacts を取れない環境でも原因が分かるように、要点をジョブのログにも出す
@@ -93,17 +97,20 @@ fi
 k() { kubectl --kubeconfig "$KUBECONFIG_FILE" "$@"; }
 
 # --- クラスタを作る ---
-log "$DISTRO クラスタを作成: $NAME (CP 1 + ワーカー 1)"
+log "$DISTRO クラスタを作成: $NAME (CP 1 + ワーカー 1、CNI $CNI、ランタイム $RUNTIME${RUNTIMES:+ + $RUNTIMES})"
+# shellcheck disable=SC2086  # 空白で分割したい
+install_json=$(printf '%s\n' $RUNTIMES | jq -R . | jq -s -c 'map(select(. != ""))')
 body=$(cat <<EOF
-{"name":"$NAME","distro":"$DISTRO","workers":1,
+{"name":"$NAME","distro":"$DISTRO","workers":1,"cni":"$CNI",
+ "runtime":{"default":"$RUNTIME","install":$install_json},
  "controlPlane":{"cpus":2,"memoryMiB":3072,"diskGiB":15},
- "worker":{"cpus":2,"memoryMiB":2048,"diskGiB":15}}
+ "worker":{"cpus":2,"memoryMiB":3072,"diskGiB":15}}
 EOF
 )
 out=$(curl -s -w '\n%{http_code}' -X POST "$API/clusters" -d "$body")
 code=${out##*$'\n'}
 [[ $code == 201 ]] || die "HTTP $code: ${out%$'\n'*}"
-jq -c '{name, distro, version, subnet, endpoint, machines: [.machines[] | {name, ip, role}]}' <<<"${out%$'\n'*}"
+jq -c '{name, distro, version, cni, hubble, runtime, subnet, endpoint, machines: [.machines[] | {name, ip, role}]}' <<<"${out%$'\n'*}"
 
 log "準備完了を待つ (最大 ${CLUSTER_TIMEOUT}s)"
 start=$SECONDS
@@ -132,6 +139,19 @@ log "クラスタの準備完了 ($((SECONDS - start))s)"
 curl -fs "$API/clusters/$NAME/kubeconfig" >"$KUBECONFIG_FILE"
 k get nodes -o wide
 [[ $(k get nodes --no-headers | wc -l) == 2 ]] || die "ノード数が違います"
+
+if [[ $CNI == cilium ]]; then
+  log "Cilium (kube-proxy の置き換え) と Hubble"
+  k -n kube-system rollout status daemonset/cilium --timeout=300s
+  kpr=$(k -n kube-system exec ds/cilium -c cilium-agent -- cilium-dbg status | grep -i '^KubeProxyReplacement' || true)
+  echo "    $kpr"
+  [[ $kpr == *True* ]] || die "Cilium が kube-proxy を置き換えていません"
+  if k -n kube-system get daemonset kube-proxy >/dev/null 2>&1; then
+    die "kube-proxy が動いています"
+  fi
+  k -n kube-system rollout status deployment/hubble-relay --timeout=300s
+  k -n kube-system rollout status deployment/hubble-ui --timeout=300s
+fi
 
 log "Deployment を作る (kubeadm は CP に taint があるので Pod はワーカーに載る)"
 k create deployment hello --image="$TEST_IMAGE" --replicas=2 --port=8080 -- /agnhost netexec --http-port=8080
@@ -179,6 +199,22 @@ for node in $NODES; do
     i=$((i + 1))
   done
 done
+
+if [[ -n $RUNTIMES || $RUNTIME != runc ]]; then
+  log "RuntimeClass ごとに Pod を動かす"
+  k get runtimeclass
+  for rt in runc $RUNTIMES; do
+    k run "rt-$rt" --image="$TEST_IMAGE" --restart=Never \
+      --overrides="{\"spec\":{\"runtimeClassName\":\"$rt\"}}" --command -- /agnhost pause >/dev/null
+  done
+  for rt in runc $RUNTIMES; do
+    if ! k wait --for=condition=Ready "pod/rt-$rt" --timeout=180s; then
+      k describe "pod/rt-$rt" | tail -n 20 || true
+      die "RuntimeClass $rt の Pod が起動しません"
+    fi
+    echo "    $rt: OK"
+  done
+fi
 
 log "クラスタを削除"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$API/clusters/$NAME")

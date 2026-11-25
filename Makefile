@@ -23,7 +23,10 @@ install: build
 e2e: build
 	sudo ./scripts/e2e.sh $(BIN)
 
-# クラスタを作る E2E。DISTRO=k3s (既定)
+# クラスタを作る E2E。例: make e2e-cluster DISTRO=kubeadm CNI=cilium RUNTIME=crun RUNTIMES="crun youki"
 DISTRO ?= k3s
+CNI ?= cilium
+RUNTIME ?= runc
+RUNTIMES ?=
 e2e-cluster: build
-	sudo DISTRO=$(DISTRO) ./scripts/e2e-cluster.sh $(BIN)
+	sudo DISTRO=$(DISTRO) CNI=$(CNI) RUNTIME=$(RUNTIME) RUNTIMES="$(RUNTIMES)" ./scripts/e2e-cluster.sh $(BIN)

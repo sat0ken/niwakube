@@ -118,10 +118,25 @@ kubectl --kubeconfig demo.kubeconfig get nodes
 curl -s -X DELETE localhost:8080/api/clusters/demo
 ```
 
-| ディストリ | ノードの OS | 構築のしかた | CNI |
-|---|---|---|---|
-| k3s | Ubuntu 26.04 | `get.k3s.io` で server / agent をインストール | flannel (k3s 組み込み) |
-| kubeadm | Ubuntu 26.04 | containerd と `pkgs.k8s.io` の kubeadm を入れて `kubeadm init` / `join` | flannel |
+| ディストリ | ノードの OS | 構築のしかた |
+|---|---|---|
+| k3s | Ubuntu 26.04 | `get.k3s.io` で server / agent をインストール |
+| kubeadm | Ubuntu 26.04 | containerd と `pkgs.k8s.io` の kubeadm を入れて `kubeadm init` / `join` |
+
+**CNI** は既定で **Cilium** (kube-proxy を eBPF で置き換え、Hubble の relay と UI も入れる)。`"cni":"flannel"` も選べる。
+
+**コンテナランタイム** は既定で **runc**。crun と youki を追加で入れて既定にしたり、Pod ごとに `runtimeClassName` で選んだりできる
+(入れたランタイムと同じ名前の RuntimeClass を作る)。
+
+```bash
+curl -s -X POST localhost:8080/api/clusters -d '{"name":"demo","runtime":{"default":"crun","install":["youki"]}}'
+```
+
+Hubble UI はクラスタの中にあるので、ホストで port-forward して見る (LAN の PC からは SSH のポート転送を使う):
+
+```bash
+kubectl --kubeconfig demo.kubeconfig -n kube-system port-forward svc/hubble-ui 12000:80
+```
 
 | メソッド | パス | 説明 |
 |---|---|---|
@@ -136,7 +151,9 @@ curl -s -X DELETE localhost:8080/api/clusters/demo
 
 `POST /api/clusters` の項目 (省略時の既定値): `name` (必須、20 文字以内)、`distro` (k3s)、
 `version` (既定は `stable`。k3s は `latest` や `v1.37.2+k3s1`、kubeadm は `v1.37` (その minor の最新) や `v1.37.2` も可)、`controlPlanes` (1。いまは 1 のみ)、`workers` (2)、
-`controlPlane` / `worker` (`{"cpus":2,"memoryMiB":4096,"diskGiB":20}`)、`sshAuthorizedKeys`。
+`controlPlane` / `worker` (`{"cpus":2,"memoryMiB":4096,"diskGiB":20}`)、`sshAuthorizedKeys`、
+`cni` (`cilium` / `flannel`)、`hubble` (Cilium なら `true`)、`runtime.default` (`runc` / `crun` / `youki`)、
+`runtime.install` (追加で入れるランタイム。既定にしたものは自動で入る)。
 
 ### 仕組み
 

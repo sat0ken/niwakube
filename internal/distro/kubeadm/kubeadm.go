@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"fmt"
 	"regexp"
+	"strings"
 	"text/template"
 
 	"gopkg.in/yaml.v3"
@@ -26,8 +27,12 @@ const (
 	pkiDir      = "/etc/kubernetes/pki"
 	flannelURL  = "https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml"
 	installPath = "/usr/local/sbin/niwakube-install-k8s.sh"
-	initPath    = "/usr/local/sbin/niwakube-kubeadm.sh"
-	configPath  = "/etc/kubernetes/niwakube-kubeadm.yaml"
+	runtimePath = "/usr/local/sbin/niwakube-install-runtimes.sh"
+	ciliumPath  = "/usr/local/sbin/niwakube-install-cilium.sh"
+
+	runtimeClassPath = "/etc/kubernetes/niwakube-runtimeclasses.yaml"
+	initPath         = "/usr/local/sbin/niwakube-kubeadm.sh"
+	configPath       = "/etc/kubernetes/niwakube-kubeadm.yaml"
 )
 
 // Secrets.CAs のキー → pkiDir からの相対パス
@@ -92,11 +97,21 @@ func (k Kubeadm) UserData(c *distro.Cluster, n *distro.Node) (map[string]any, er
 	if err := k.ValidateVersion(c.Version); err != nil {
 		return nil, err
 	}
-	install, err := render(installScript, map[string]string{"Version": c.Version})
+	if err := c.Addons.Validate(); err != nil {
+		return nil, err
+	}
+	install, err := render(installScript, map[string]string{"Version": c.Version, "Containerd": containerdRuntimes(c.Addons)})
 	if err != nil {
 		return nil, err
 	}
 	files := []writeFile{{Path: installPath, Permissions: "0755", Content: install}}
+	runcmd := []any{}
+	if len(c.Addons.Runtimes) > 0 {
+		// containerd に登録する前にランタイムを入れておく
+		files = append(files, writeFile{Path: runtimePath, Permissions: "0755", Content: c.Addons.RuntimeInstallScript()})
+		runcmd = append(runcmd, []string{"/bin/bash", runtimePath})
+	}
+	runcmd = append(runcmd, []string{"/bin/bash", installPath}, []string{"/bin/bash", initPath})
 	endpoint := fmt.Sprintf("%s:%d", c.APIAddr, apiPort)
 
 	var cfg string
@@ -138,8 +153,18 @@ func (k Kubeadm) UserData(c *distro.Cluster, n *distro.Node) (map[string]any, er
 		return nil, fmt.Errorf("unknown role %q", n.Role)
 	}
 
-	script, err := render(bootstrapScript, map[string]string{
+	if n.Role == distro.RoleControlPlane {
+		if len(c.Addons.Runtimes) > 0 {
+			files = append(files, writeFile{Path: runtimeClassPath, Permissions: "0644", Content: c.Addons.RuntimeClassManifest()})
+		}
+		if c.Addons.CNI == distro.CNICilium {
+			files = append(files, writeFile{Path: ciliumPath, Permissions: "0755",
+				Content: c.Addons.CiliumInstallScript("/etc/kubernetes/admin.conf", c.APIAddr.String(), apiPort)})
+		}
+	}
+	script, err := render(bootstrapScript, map[string]any{
 		"Role": string(n.Role), "Config": configPath, "Endpoint": endpoint, "Flannel": flannelURL,
+		"CNI": c.Addons.CNI, "Cilium": ciliumPath, "RuntimeClasses": len(c.Addons.Runtimes) > 0, "RuntimeClassPath": runtimeClassPath,
 	})
 	if err != nil {
 		return nil, err
@@ -150,10 +175,7 @@ func (k Kubeadm) UserData(c *distro.Cluster, n *distro.Node) (map[string]any, er
 	)
 	return map[string]any{
 		"write_files": files,
-		"runcmd": []any{
-			[]string{"/bin/bash", installPath},
-			[]string{"/bin/bash", initPath},
-		},
+		"runcmd":      runcmd,
 	}, nil
 }
 
@@ -196,6 +218,7 @@ func initConfig(c *distro.Cluster, n *distro.Node, endpoint string) (string, err
 			}},
 			"localAPIEndpoint": map[string]any{"advertiseAddress": n.IP.String(), "bindPort": apiPort},
 			"nodeRegistration": nodeRegistration(n),
+			"skipPhases":       skipPhases(c.Addons),
 		},
 		map[string]any{
 			"apiVersion":           "kubeadm.k8s.io/v1beta4",
@@ -263,7 +286,7 @@ apt-get install -y -q containerd apt-transport-https ca-certificates curl gpg
 mkdir -p /etc/containerd
 containerd config default >/etc/containerd/config.toml
 sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
-systemctl restart containerd
+{{.Containerd}}systemctl restart containerd
 systemctl enable containerd
 
 # バージョン: stable → dl.k8s.io の stable、v1.X → その minor の最新、v1.X.Y → 固定
@@ -282,7 +305,7 @@ apt-mark hold kubelet kubeadm kubectl
 systemctl enable kubelet
 `
 
-// bootstrapScript は CP なら kubeadm init + flannel、ワーカーなら API を待って kubeadm join する。
+// bootstrapScript は CP なら kubeadm init + CNI (Cilium か flannel)、ワーカーなら API を待って kubeadm join する。
 const bootstrapScript = `#!/bin/bash
 # niwakube: kubeadm init / join
 set -euxo pipefail
@@ -293,13 +316,55 @@ if [ "$ROLE" = "control-plane" ]; then
   sed -i "s/__KUBERNETES_VERSION__/$(kubeadm version -o short)/" "$CONFIG"
   kubeadm init --config "$CONFIG"
   export KUBECONFIG=/etc/kubernetes/admin.conf
+{{- if .RuntimeClasses}}
+  kubectl apply -f "{{.RuntimeClassPath}}"
+{{- end}}
+{{- if eq .CNI "cilium"}}
+  /bin/bash "{{.Cilium}}"
+{{- else}}
   for i in $(seq 1 30); do
     kubectl apply -f "{{.Flannel}}" && break
     sleep 10
   done
+{{- end}}
 else
   # CP の API が上がるまで待ってから join する (CP 側もパッケージのインストール中)
   until curl -ks --max-time 5 -o /dev/null "https://{{.Endpoint}}/livez"; do sleep 5; done
   kubeadm join --config "$CONFIG"
 fi
 `
+
+// skipPhases は kubeadm init で飛ばすフェーズ。Cilium は kube-proxy を置き換えるので入れない。
+func skipPhases(a distro.Addons) []string {
+	if a.CNI == distro.CNICilium {
+		return []string{"addon/kube-proxy"}
+	}
+	return []string{}
+}
+
+// containerdRuntimes は containerd の設定に crun / youki を登録し、既定のランタイムを変えるシェルの断片を返す。
+// containerd 2.x (設定のバージョン 3) が前提。
+func containerdRuntimes(a distro.Addons) string {
+	if len(a.Runtimes) == 0 && (a.DefaultRuntime == "" || a.DefaultRuntime == distro.RuntimeRunc) {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("grep -q '^version = 3' /etc/containerd/config.toml || { echo 'containerd の設定のバージョンが 3 ではありません'; exit 1; }\n")
+	for _, rt := range a.Runtimes {
+		fmt.Fprintf(&b, `cat >>/etc/containerd/config.toml <<'EOF'
+
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.%[1]s]
+  runtime_type = 'io.containerd.runc.v2'
+
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.%[1]s.options]
+  BinaryName = '%[2]s'
+  SystemdCgroup = true
+EOF
+`, rt, distro.RuntimeBinary(rt))
+	}
+	if rt := a.DefaultRuntime; rt != "" && rt != distro.RuntimeRunc {
+		fmt.Fprintf(&b, "sed -i -E \"s/^([[:space:]]*default_runtime_name = )['\\\"][^'\\\"]*['\\\"]/\\1'%[1]s'/\" /etc/containerd/config.toml\n", rt)
+		fmt.Fprintf(&b, "grep -q \"default_runtime_name = '%s'\" /etc/containerd/config.toml\n", rt)
+	}
+	return b.String()
+}

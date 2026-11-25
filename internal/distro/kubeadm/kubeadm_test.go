@@ -46,7 +46,8 @@ func TestUserData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := &distro.Cluster{Name: "demo", Version: "v1.37", APIAddr: netip.MustParseAddr("172.30.1.11"), Secrets: sec}
+	c := &distro.Cluster{Name: "demo", Version: "v1.37", APIAddr: netip.MustParseAddr("172.30.1.11"), Secrets: sec,
+		Addons: distro.Addons{CNI: distro.CNIFlannel, DefaultRuntime: distro.RuntimeRunc}}
 
 	// コントロールプレーン
 	cp, err := k.UserData(c, &distro.Node{Name: "demo-cp-1", Role: distro.RoleControlPlane, Index: 1, IP: netip.MustParseAddr("172.30.1.11")})
@@ -139,5 +140,51 @@ func TestValidateVersion(t *testing.T) {
 		if err := k.ValidateVersion(v); err == nil {
 			t.Errorf("%q should be invalid", v)
 		}
+	}
+}
+
+func TestUserDataCiliumAndRuntimes(t *testing.T) {
+	k := New()
+	sec, _ := k.GenerateSecrets("demo")
+	c := &distro.Cluster{Name: "demo", Version: "stable", APIAddr: netip.MustParseAddr("172.30.1.11"), Secrets: sec,
+		Addons: distro.Addons{CNI: distro.CNICilium, Hubble: true, DefaultRuntime: distro.RuntimeCrun, Runtimes: []string{distro.RuntimeCrun}}}
+	cp, err := k.UserData(c, &distro.Node{Name: "demo-cp-1", Role: distro.RoleControlPlane, Index: 1, IP: netip.MustParseAddr("172.30.1.11")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs := files(t, cp)
+	docs := decodeDocs(t, fs[configPath].Content)
+	if sp := docs[0]["skipPhases"].([]any); len(sp) != 1 || sp[0] != "addon/kube-proxy" {
+		t.Errorf("kube-proxy must be skipped with cilium: %v", docs[0]["skipPhases"])
+	}
+	inst := fs[installPath].Content
+	if !strings.Contains(inst, "containerd.runtimes.crun]") || !strings.Contains(inst, "BinaryName = '/usr/bin/crun'") ||
+		!strings.Contains(inst, "default_runtime_name = 'crun'") {
+		t.Errorf("containerd must register crun as the default:\n%s", inst)
+	}
+	boot := fs[initPath].Content
+	if !strings.Contains(boot, ciliumPath) || strings.Contains(boot, "kube-flannel") || !strings.Contains(boot, "kubectl apply -f \""+runtimeClassPath+"\"") {
+		t.Errorf("bootstrap must install cilium and RuntimeClasses:\n%s", boot)
+	}
+	if !strings.Contains(fs[ciliumPath].Content, "KUBECONFIG=/etc/kubernetes/admin.conf") {
+		t.Error("cilium script must use admin.conf")
+	}
+	var cmds []string
+	for _, c := range cp["runcmd"].([]any) {
+		cmds = append(cmds, strings.Join(c.([]string), " "))
+	}
+	if len(cmds) != 3 || !strings.Contains(cmds[0], runtimePath) {
+		t.Errorf("runtimes must be installed first: %v", cmds)
+	}
+
+	// flannel のときは kube-proxy を残し、containerd の設定も変えない
+	c.Addons = distro.Addons{CNI: distro.CNIFlannel, DefaultRuntime: distro.RuntimeRunc}
+	cp, _ = k.UserData(c, &distro.Node{Name: "demo-cp-1", Role: distro.RoleControlPlane, Index: 1, IP: netip.MustParseAddr("172.30.1.11")})
+	fs = files(t, cp)
+	if sp := decodeDocs(t, fs[configPath].Content)[0]["skipPhases"].([]any); len(sp) != 0 {
+		t.Errorf("flannel keeps kube-proxy: %v", sp)
+	}
+	if strings.Contains(fs[installPath].Content, "default_runtime_name") || !strings.Contains(fs[initPath].Content, "kube-flannel") {
+		t.Error("flannel path changed unexpectedly")
 	}
 }
