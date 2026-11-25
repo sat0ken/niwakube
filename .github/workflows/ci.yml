@@ -24,7 +24,7 @@ jobs:
       - name: shellcheck
         run: |
           command -v shellcheck >/dev/null || sudo apt-get install -y -qq shellcheck
-          shellcheck scripts/*.sh
+          shellcheck scripts/*.sh installer/*.sh
 
   build:
     needs: test

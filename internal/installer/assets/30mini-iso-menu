@@ -1,0 +1,133 @@
+#!/bin/sh
+# niwakube: Ubuntu mini ISO の casper-premount/30mini-iso-menu を置き換えるスクリプト。
+# initrd の末尾に追加した cpio でこのファイルを上書きする。
+#
+# mini ISO の流れ (元のスクリプトと同じ):
+#   step1: ダウンロードする ISO を決め、メモリを予約して自分自身に kexec する
+#   step2: ISO を予約したメモリ (/dev/pmem0) にダウンロードし、その ISO のカーネルに kexec する
+#
+# niwakube で追加したこと:
+#   - niwakube-iso-url= / niwakube-iso-size= / niwakube-iso-256sum= があれば、メニューを出さずにその ISO を使う
+#   - nk.<arg> を最後のカーネルに <arg> として渡す (nk.autoinstall → autoinstall、nk.ds=nocloud → ds=nocloud)
+#     元のスクリプトは最後のカーネルの引数を固定しているため、autoinstall を渡せない
+
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case $1 in
+prereqs) prereqs; exit 0 ;;
+esac
+
+. /scripts/casper-functions
+. /scripts/casper-helpers
+. /scripts/casper
+
+# mini ISO 上では casper の通常の判定に合わないので、常に成功させる (元のスクリプトと同じ)
+is_casper_path() { return 0; }
+
+mountpoint=/cdrom
+
+debug_shell() {
+    echo "niwakube: ERROR: $*"
+    echo "debug shell (exit で続行)"
+    /bin/sh
+}
+
+MENU_STEP=""
+NK_URL=""
+NK_SIZE=""
+NK_SUM=""
+NK_ARGS=""
+CONSOLE_ARGS=""
+for x in $(cat /proc/cmdline); do
+    case $x in
+        iso-chooser-*)         MENU_STEP=$x ;;
+        iso-url=*)             URL="${x#iso-url=}" ;;
+        iso-size=*)            MEDIA_SIZE="${x#iso-size=}" ;;
+        iso-256sum=*)          MEDIA_256SUM="${x#iso-256sum=}" ;;
+        memmap=*)              MEMMAP="$x" ;;
+        niwakube-iso-url=*)    NK_URL="${x#niwakube-iso-url=}" ;;
+        niwakube-iso-size=*)   NK_SIZE="${x#niwakube-iso-size=}" ;;
+        niwakube-iso-256sum=*) NK_SUM="${x#niwakube-iso-256sum=}" ;;
+        nk.*)                  NK_ARGS="$NK_ARGS $x" ;;
+        console=*)             CONSOLE_ARGS="$CONSOLE_ARGS $x" ;;
+    esac
+done
+
+step1() {
+    echo "niwakube: step1 (url=$NK_URL)"
+    if [ -n "$NK_URL" ]; then
+        MEDIA_URL="$NK_URL"
+        MEDIA_SIZE="$NK_SIZE"
+        MEDIA_256SUM="$NK_SUM"
+        MEDIA_LABEL="Ubuntu Server (niwakube)"
+    else
+        # 元のメニュー
+        chvt 2
+        /usr/sbin/agetty --skip-login \
+            --login-program /usr/lib/mini-iso-tools/iso-menu-session \
+            tty2 linux-c
+        chvt 1
+        [ -f /mini-iso-menu.vars ] || debug_shell "ISO menu failed"
+        . /mini-iso-menu.vars
+    fi
+
+    find_livefs 0
+    configure_networking
+
+    echo "Loading $MEDIA_LABEL ..."
+    memmap_size="$(/usr/lib/mini-iso-tools/get_memmap_directive "$MEDIA_SIZE")"
+    if [ -z "$memmap_size" ]; then
+        debug_shell "failed to determine size reservation for memmap"
+    fi
+
+    cmdline="iso-url=$MEDIA_URL iso-size=$MEDIA_SIZE"
+    if [ -n "$MEDIA_256SUM" ]; then
+        cmdline="$cmdline iso-256sum=$MEDIA_256SUM"
+    fi
+    # console= は 2 段目にも引き継ぐ (シリアルコンソールでの調査用)
+    cmdline="$cmdline iso-chooser-step2 memmap=$memmap_size nokaslr$CONSOLE_ARGS$NK_ARGS ---"
+
+    kexec --command-line="$cmdline" \
+        --load "$mountpoint/casper/vmlinuz" \
+        --initrd="$mountpoint/casper/initrd"
+    kexec --exec
+}
+
+step2() {
+    echo "niwakube: step2"
+    configure_networking
+
+    target="/dev/pmem0"
+    [ -e "$target" ] || debug_shell "failed to find $target"
+
+    echo "Downloading $URL ..."
+    wget "$URL" -O "$target" || debug_shell "download failed"
+
+    if [ -n "$MEDIA_256SUM" ]; then
+        echo "Checksum verification ..."
+        /usr/lib/mini-iso-tools/checksum-device "$target" "$MEDIA_SIZE" "$MEDIA_256SUM" \
+            || debug_shell "ISO checksum verification failure"
+        echo "ISO checksum pass"
+    fi
+
+    modprobe isofs
+    mount -o ro "$target" "$mountpoint"
+    [ -n "$MEMMAP" ] || panic "memmap directive not found"
+
+    final=""
+    for a in $NK_ARGS; do
+        final="$final ${a#nk.}"
+    done
+
+    cmdline="live-media=$target $MEMMAP nokaslr$final ---"
+    echo "Booting the installer: $cmdline"
+    kexec --command-line="$cmdline" \
+        --load "$mountpoint/casper/vmlinuz" \
+        --initrd="$mountpoint/casper/initrd"
+    kexec --exec
+}
+
+case "$MENU_STEP" in
+    iso-chooser-menu)  step1 ;;
+    iso-chooser-step2) step2 ;;
+esac

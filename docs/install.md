@@ -3,6 +3,8 @@
 ASRock DeskMini 310 (RAM 64GB) に Ubuntu Server 26.04 LTS を入れて、niwakube を動かせる状態にするまでの手順。
 他のマシンでも流れは同じ。
 
+> 画面を操作せずに全自動でインストールしたい場合は、[installer.md](installer.md) の ISO を使う。
+
 全体の流れ:
 
 1. [BIOS の設定](#1-bios-の設定)
