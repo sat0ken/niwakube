@@ -2,7 +2,7 @@
 # このファイルを変更して PR を出すと、GitHub Actions が ISO を作り、VM で実際にインストールを試してから
 # Artifacts (niwakube-installer) に置く。手順は docs/installer.md を参照。
 
-hostname: niwa
+hostname: niwak8s
 timezone: Asia/Tokyo
 keyboard: jp
 
@@ -13,14 +13,14 @@ user:
   #   - ssh-ed25519 AAAA...
 
 # network を書かなければ DHCP
-# network:
-#   address: 192.168.1.50/24
-#   gateway: 192.168.1.1
-#   dns: [192.168.1.1]
+network:
+  address: 192.168.1.50/24
+  gateway: 192.168.1.1
+  dns: [192.168.1.1]
 
 storage:
   disk: largest                 # 一番大きいディスク。無人インストールでは {model: "..."} か {serial: "..."} が必須
-  root_size: 100G               # 残りはすべて /var/lib/niwakube (XFS)
+  root_size: 50G                # 残りはすべて /var/lib/niwakube (XFS)
 
 install:
   mode: confirm                 # confirm: 消去の前に確認する / unattended: 確認なし (GRUB の既定の項目)
@@ -28,4 +28,4 @@ install:
 
 niwakube:
   setup: true                   # 初回起動時に host-setup.sh を実行する
-  ref: main                     # v* のタグにすると niwakubed もリリースから入れる
+  ref: v0.1.0                   # v* のタグにすると niwakubed もリリースから入れる
