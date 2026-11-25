@@ -129,6 +129,9 @@ niwakube はこれを次のように使う。
 - **`autoinstall` を最後のカーネルに渡す**: 元の mini ISO は最後のカーネルの引数を固定しているので、
   initrd の末尾に cpio を足して `scripts/casper-premount/30mini-iso-menu` を差し替え、
   `nk.<arg>` を `<arg>` として渡せるようにした (`internal/installer/assets/30mini-iso-menu`)
+- **ダウンロードが止まっても取り直す**: 元の mini ISO は wget を 1 回実行するだけなので、途中で LAN のリンクが切れると
+  止まったままになる。niwakube は 256MiB ごとに取り、30 秒増えなければ wget を止めて続きから取り直す
+  (busybox の wget にはタイムアウトが無いので、`wget -c` と疎なファイルで `Range` を送らせている)
 - **autoinstall の設定**: USB に `CIDATA` というラベルの FAT パーティションを足して `user-data` を置く。
   インストーラーの cloud-init (NoCloud) がこれを読む
 - **ストレージ**: GPT + ESP 1G + `/boot` 2G + LVM。ルートの LV は `root_size`、残りは late-commands で XFS にして `/var/lib/niwakube` にマウントする
@@ -138,6 +141,8 @@ ISO のファイルは公式のまま (GRUB の設定の差し替えと initrd �
 ## 注意
 
 - **インストール時はインターネットが必要** (Server ISO の約 3GB をダウンロードする)。有線 LAN と DHCP を用意すること
+- ダウンロード中に `NIC Link is Down` が出たり、リンクが 100 Mbps になったりする場合は、LAN ケーブル
+  (Cat5e 以上) やルーターのポートを替えてみる。リンクが戻れば `retrying from ... MiB` と出て続きから取り直す
 - ISO にはビルド時点の最新のポイントリリース (例: 26.04.1) の URL が入る。次のポイントリリースが出ると古い ISO は
   `releases.ubuntu.com` から消えるので、そのときは PR を出し直して (または Actions を手動実行して) ISO を作り直す
 - 公開リポジトリの Artifacts は GitHub にログインしている人なら誰でもダウンロードできる。

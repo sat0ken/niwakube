@@ -93,6 +93,73 @@ step1() {
     kexec --exec
 }
 
+# download URL TARGET SIZE: URL を TARGET (/dev/pmem0) にダウンロードする。
+#
+# 元のスクリプトは wget を 1 回実行するだけなので、途中で LAN のリンクが切れるとそのまま止まってしまう。
+# initrd の busybox の wget にはタイムアウトもヘッダーの指定も無いので、次のようにする:
+#   - CHUNK ごとにダウンロードする。大きさ OFFSET の疎なファイルに wget -c すると
+#     "Range: bytes=OFFSET-" を送るので、途中から取れる
+#   - ファイルが STALL 秒増えなければ wget を止めて、そこから取り直す
+#   - CHUNK 分取れたら TARGET の同じ位置に dd で書き、ファイルを消す (メモリを ISO 2 つ分使わない)
+download() {
+    url=$1 target=$2 size=$3
+    mib=1048576
+    chunk_mib=256
+    stall=30
+    tmp=/niwakube-download
+    [ -n "$size" ] || { echo "niwakube: ISO size is unknown"; return 1; }
+    total_mib=$(( (size + mib - 1) / mib ))
+
+    off_mib=0
+    while [ "$off_mib" -lt "$total_mib" ]; do
+        end=$(( (off_mib + chunk_mib) * mib ))
+        [ "$end" -gt "$size" ] && end=$size
+        rm -f "$tmp"
+        # 大きさ OFFSET の疎なファイル (メモリは使わない)
+        dd if=/dev/null of="$tmp" bs=$mib seek=$off_mib 2>/dev/null || return 1
+        tries=0
+        while :; do
+            have=$(stat -c %s "$tmp")
+            [ "$have" -ge "$end" ] && break
+            tries=$((tries + 1))
+            if [ "$tries" -gt 100 ]; then
+                echo "niwakube: giving up after $tries attempts at $((have / mib)) MiB"
+                return 1
+            fi
+            [ "$tries" -gt 1 ] && echo "niwakube: retrying from $((have / mib)) MiB (attempt $tries)"
+            wget -q -c -O "$tmp" "$url" &
+            pid=$!
+            last=$have
+            idle=0
+            while kill -0 "$pid" 2>/dev/null; do
+                sleep 1
+                now=$(stat -c %s "$tmp")
+                if [ "$now" -ge "$end" ]; then
+                    break
+                elif [ "$now" -gt "$last" ]; then
+                    last=$now
+                    idle=0
+                else
+                    idle=$((idle + 1))
+                    if [ "$idle" -ge "$stall" ]; then
+                        echo "niwakube: download stalled for ${stall}s at $((now / mib)) MiB (check the LAN cable / link)"
+                        break
+                    fi
+                fi
+            done
+            kill "$pid" 2>/dev/null
+            wait "$pid" 2>/dev/null
+            # wget が失敗してすぐ終わったとき (リンクが切れている間など) に、連続で叩かない
+            [ "$(stat -c %s "$tmp")" -ge "$end" ] || sleep 3
+        done
+        count=$(( (end - off_mib * mib + mib - 1) / mib ))
+        dd if="$tmp" of="$target" bs=$mib skip=$off_mib seek=$off_mib count=$count conv=notrunc 2>/dev/null || return 1
+        off_mib=$((off_mib + chunk_mib))
+        echo "niwakube: downloaded $(( (end + mib - 1) / mib )) / $total_mib MiB"
+    done
+    rm -f "$tmp"
+}
+
 step2() {
     echo "niwakube: step2"
     configure_networking
@@ -101,7 +168,7 @@ step2() {
     [ -e "$target" ] || debug_shell "failed to find $target"
 
     echo "Downloading $URL ..."
-    wget "$URL" -O "$target" || debug_shell "download failed"
+    download "$URL" "$target" "$MEDIA_SIZE" || debug_shell "download failed"
 
     if [ -n "$MEDIA_256SUM" ]; then
         echo "Checksum verification ..."
