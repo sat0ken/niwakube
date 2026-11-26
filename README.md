@@ -228,6 +228,14 @@ kubectl --kubeconfig k3s-1-ssh.kubeconfig get nodes
 1 つの kubeconfig にまとめてダウンロードできる (API では `GET /api/kubeconfig?cluster=a&cluster=b&proxy=socks5://localhost:1080`)。
 クラスタごとに context が入るので、`kubectl config use-context <名前>` で切り替える。
 
+Talos のクラスタは「SSH 経由用の talosconfig」(`GET /api/clusters/{name}/talosconfig?proxy=socks5://localhost:1080`) も使える。
+各 context に `proxy-url` が入り、talosctl も同じ SOCKS プロキシを通して Talos API につなぐ
+(talosctl は talosconfig の `proxy-url` に対応したバージョン (v1.14 以降) を使う)。
+
+```bash
+talosctl --talosconfig tal-ssh.talosconfig version
+```
+
 PC の `~/.ssh/config` に書いておくと `ssh -N niwak8s` だけでつながる:
 
 ```

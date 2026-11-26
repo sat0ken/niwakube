@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"gopkg.in/yaml.v3"
@@ -154,12 +155,32 @@ func TestSecretsAndKubeconfigCA(t *testing.T) {
 }
 
 func TestTalosconfig(t *testing.T) {
-	name, b, err := New().ClientConfig(newCluster(t, distro.CNICilium))
+	c := newCluster(t, distro.CNICilium)
+	name, b, err := New().ClientConfig(c, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if name != "demo.talosconfig" || !strings.Contains(string(b), "172.30.1.11") || !strings.Contains(string(b), "context: demo") {
+	if name != "demo.talosconfig" || !strings.Contains(string(b), "172.30.1.11") || !strings.Contains(string(b), "context: demo") ||
+		strings.Contains(string(b), "proxy-url") {
 		t.Errorf("talosconfig %s:\n%s", name, b)
+	}
+
+	// SSH の SOCKS プロキシ経由用: endpoints はそのまま、各 context に proxy-url
+	name, b, err = New().ClientConfig(c, "socks5://localhost:1080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tc, err := clientconfig.FromBytes(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "demo-ssh.talosconfig" || len(tc.Contexts) == 0 {
+		t.Fatalf("talosconfig %s:\n%s", name, b)
+	}
+	for n, ctx := range tc.Contexts {
+		if ctx.ProxyURL != "socks5://localhost:1080" || len(ctx.Endpoints) != 1 || ctx.Endpoints[0] != "172.30.1.11" {
+			t.Errorf("context %s: %+v", n, ctx)
+		}
 	}
 }
 

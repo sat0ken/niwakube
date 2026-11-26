@@ -425,6 +425,13 @@ func TestTalosCluster(t *testing.T) {
 	if err != nil || name != "tal.talosconfig" || !strings.Contains(string(tc), "172.30.1.11") {
 		t.Errorf("talosconfig: %s %v", name, err)
 	}
+	name, tc, err = cs.ClientConfig(ctx, "tal", KubeconfigOptions{ProxyURL: "socks5://localhost:1080"})
+	if err != nil || name != "tal-ssh.talosconfig" || !strings.Contains(string(tc), "proxy-url: socks5://localhost:1080") {
+		t.Errorf("talosconfig via SSH: %s %v\n%s", name, err, tc)
+	}
+	if _, _, err := cs.ClientConfig(ctx, "tal", KubeconfigOptions{ProxyURL: "ftp://x:1"}); !errors.Is(err, machine.ErrInvalid) {
+		t.Errorf("bad proxy: want ErrInvalid, got %v", err)
+	}
 	if _, err := cs.Kubeconfig(ctx, "tal"); err != nil {
 		t.Errorf("kubeconfig: %v", err)
 	}

@@ -974,7 +974,16 @@ func (s *Service) Reconcile(ctx context.Context) {
 }
 
 // ClientConfig は Kubernetes 以外のクライアントの設定 (Talos の talosconfig) を返す。
-func (s *Service) ClientConfig(ctx context.Context, name string) (string, []byte, error) {
+func (s *Service) ClientConfig(ctx context.Context, name string, opts ...KubeconfigOptions) (string, []byte, error) {
+	var o KubeconfigOptions
+	if len(opts) > 0 {
+		o = opts[0]
+	}
+	if o.ProxyURL != "" {
+		if err := ValidateProxyURL(o.ProxyURL); err != nil {
+			return "", nil, err
+		}
+	}
 	rec, err := s.store.GetCluster(ctx, name)
 	if err != nil {
 		return "", nil, err
@@ -987,5 +996,5 @@ func (s *Service) ClientConfig(ctx context.Context, name string) (string, []byte
 	if !ok {
 		return "", nil, fmt.Errorf("distro %s has no client config: %w", d.Name(), backend.ErrNotSupported)
 	}
-	return p.ClientConfig(dc)
+	return p.ClientConfig(dc, o.ProxyURL)
 }

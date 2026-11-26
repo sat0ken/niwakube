@@ -84,8 +84,9 @@ type Bootstrapper interface {
 }
 
 // ClientConfigProvider は Kubernetes 以外のクライアントの設定を発行できるディストリが実装する (Talos の talosconfig)。
+// proxyURL が空でなければ、クライアントがそのプロキシ (例: socks5://localhost:1080) を通して接続する設定にする。
 type ClientConfigProvider interface {
-	ClientConfig(c *Cluster) (filename string, data []byte, err error)
+	ClientConfig(c *Cluster, proxyURL string) (filename string, data []byte, err error)
 }
 
 // LocalStorage はノードのディスクを使う PV (local-path) の設定。

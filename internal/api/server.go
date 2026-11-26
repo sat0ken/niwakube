@@ -67,7 +67,7 @@ func New(svc *machine.Service, clusters *cluster.Service, log *slog.Logger, opts
 //	POST   /api/clusters/{name}/stop
 //	GET    /api/clusters/{name}/kubeconfig     ?proxy=socks5://localhost:1080 で proxy-url を入れる
 //	GET    /api/kubeconfig?cluster=a&cluster=b  複数のクラスタを 1 つにまとめた kubeconfig (?proxy= も使える)
-//	GET    /api/clusters/{name}/talosconfig  Talos のみ
+//	GET    /api/clusters/{name}/talosconfig  Talos のみ (?proxy= で proxy-url を入れる)
 //	GET    /api/clusters/{name}/forwards     ホストのポートからクラスタへの転送の一覧
 //	POST   /api/clusters/{name}/forwards     {"hostPort":8080,"ip":"172.30.1.100","port":80}
 //	DELETE /api/clusters/{name}/forwards/{proto}/{port}
@@ -299,7 +299,8 @@ func (s *Server) mergedKubeconfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) clientConfig(w http.ResponseWriter, r *http.Request) {
-	filename, b, err := s.clusters.ClientConfig(r.Context(), r.PathValue("name"))
+	filename, b, err := s.clusters.ClientConfig(r.Context(), r.PathValue("name"),
+		cluster.KubeconfigOptions{ProxyURL: r.URL.Query().Get("proxy")})
 	if err != nil {
 		s.writeError(w, err)
 		return
