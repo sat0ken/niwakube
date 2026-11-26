@@ -209,6 +209,17 @@ kubectl --kubeconfig demo.kubeconfig -n kube-system port-forward svc/hubble-ui 1
 `cni` (`cilium` / `flannel`)、`hubble` (Cilium なら `true`)、`runtime.default` (`runc` / `crun` / `youki`)、
 `runtime.install` (追加で入れるランタイム。既定にしたものは自動で入る)。
 
+### Web UI のターミナル
+
+クラスタの画面の「ターミナル」を押すと、ブラウザの中でそのクラスタの kubeconfig を設定したシェルが開く
+(Talos のクラスタは talosconfig も)。`kubectl` (`k`)、`talosctl` と Tab 補完が使え、`kubectl exec -it` や `edit` も動く。
+
+- シェルは root では動かさない。`systemd-run` の一時ユーザー (DynamicUser) とサンドボックスで動き、
+  OS は読み取り専用、`/var/lib/niwakube` (VM のディスクや秘密鍵) と `/run/niwakube`、`/home` は見えない
+- kubeconfig は systemd の credential として渡し、ホーム (`/run/niwakube-term-*`) はセッションごとで、閉じると消える
+- WebSocket は Origin が Web UI と同じでなければ拒否する。同時に開けるのは 8 つまで
+- kubectl / talosctl は `scripts/host-setup.sh` が入れる (`KUBECTL_VERSION`、`TALOS_VERSIONS` で固定し、SHA256 を確かめる)
+
 ### SSH でつないでいる PC から kubectl を使う
 
 クラスタはミニPC の中の NAT (`172.30.0.0/16`) にあるので、PC からは SSH の SOCKS プロキシを通して使う。
