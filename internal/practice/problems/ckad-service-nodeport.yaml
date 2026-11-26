@@ -1,0 +1,102 @@
+id: ckad-service-nodeport
+exam: CKAD
+domain: サービスとネットワーク
+title: Deployment を NodePort の Service で公開する
+weight: 5
+namespaces: [frontend]
+setup: |
+  apiVersion: v1
+  kind: Namespace
+  metadata:
+    name: frontend
+  ---
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: web
+    namespace: frontend
+  spec:
+    replicas: 2
+    selector:
+      matchLabels:
+        app: web
+    template:
+      metadata:
+        labels:
+          app: web
+          tier: frontend
+      spec:
+        containers:
+          - name: web
+            image: registry.k8s.io/e2e-test-images/agnhost:2.39
+            args: ["netexec", "--http-port=8080"]
+            ports:
+              - containerPort: 8080
+task: |
+  Namespace frontend の Deployment web を、Service web-svc で公開してください。
+
+  - 種類は NodePort。ノードのポート 30080 で受ける
+  - Service のポートは 80、転送先は Pod の 8080
+  - Deployment web の Pod 2 つすべてに振り分けられること
+checks:
+  - description: 種類が NodePort
+    apiVersion: v1
+    kind: Service
+    namespace: frontend
+    name: web-svc
+    jsonpath: '{.spec.type}'
+    equals: NodePort
+  - description: Service のポートが 80
+    apiVersion: v1
+    kind: Service
+    namespace: frontend
+    name: web-svc
+    jsonpath: '{.spec.ports[0].port}'
+    equals: "80"
+  - description: 転送先のポートが 8080
+    apiVersion: v1
+    kind: Service
+    namespace: frontend
+    name: web-svc
+    jsonpath: '{.spec.ports[0].targetPort}'
+    equals: "8080"
+  - description: ノードのポートが 30080
+    apiVersion: v1
+    kind: Service
+    namespace: frontend
+    name: web-svc
+    jsonpath: '{.spec.ports[0].nodePort}'
+    equals: "30080"
+  - description: Pod 2 つがエンドポイントになっている
+    apiVersion: discovery.k8s.io/v1
+    kind: EndpointSlice
+    namespace: frontend
+    selector: kubernetes.io/service-name=web-svc
+    jsonpath: '{.items[*].endpoints[?(@.conditions.ready==true)].targetRef.kind}'
+    equals: Pod Pod
+hint: |
+  kubectl expose deployment で Service を作れます。ただし nodePort は指定できないので、
+  --dry-run=client -o yaml で下書きを作って書き足すか、作ったあとに kubectl edit します。
+solution: |
+  kubectl -n frontend expose deployment web --name=web-svc --type=NodePort --port=80 --target-port=8080 \
+    --dry-run=client -o yaml > svc.yaml
+
+  svc.yaml の ports に nodePort: 30080 を足して kubectl apply -f svc.yaml します。
+
+  expose は Deployment の selector (app: web) をそのまま Service の selector にします。
+  kubectl -n frontend get endpointslices で Pod の IP が 2 つ入っていることを確かめます。
+  エンドポイントが空なら、Service の selector と Pod のラベルが合っていません。
+answer: |
+  apiVersion: v1
+  kind: Service
+  metadata:
+    name: web-svc
+    namespace: frontend
+  spec:
+    type: NodePort
+    selector:
+      app: web
+    ports:
+      - port: 80
+        targetPort: 8080
+        nodePort: 30080

@@ -626,12 +626,69 @@ function loadCSS(href) {
   document.head.appendChild(l);
 }
 
-// viewTerminal はクラスタの kubeconfig を設定したシェル (ミニPC の一時ユーザーのサンドボックス) を開く。
-async function viewTerminal(name) {
-  setNav("");
+// loadXterm は xterm.js を読み込む (ターミナルを使う画面で 1 度だけ)。
+async function loadXterm() {
   loadCSS("/ui/vendor/xterm/xterm.css");
   await loadScript("/ui/vendor/xterm/xterm.js");
   await loadScript("/ui/vendor/xterm/addon-fit.js");
+}
+
+// mountTerminal は el にクラスタ name のシェル (ミニPC の一時ユーザーのサンドボックス) をつなぐ。
+// statusEl に接続の状態を出し、reconnectBtn を切断時に表示する。戻り値は後片付けの関数。
+function mountTerminal(el, name, statusEl, reconnectBtn) {
+  const term = new Terminal({
+    cursorBlink: true,
+    fontSize: 14,
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Noto Sans Mono CJK JP", monospace',
+    scrollback: 5000,
+    theme: { background: "#111613", foreground: "#e3ebe6" },
+  });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(el);
+  fit.fit();
+  term.focus();
+
+  const encoder = new TextEncoder();
+  let ws = null;
+  const status = (text, cls) => { statusEl.textContent = text; statusEl.className = `badge ${cls}`; };
+  const send = (data) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(data); };
+  const sendSize = () => send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+  const connect = () => {
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    ws = new WebSocket(`${proto}//${location.host}/api/clusters/${encodeURIComponent(name)}/terminal`);
+    ws.binaryType = "arraybuffer";
+    status("接続中", "info");
+    reconnectBtn.hidden = true;
+    ws.onopen = () => { status("接続済み", "ok"); sendSize(); };
+    ws.onmessage = (e) => term.write(typeof e.data === "string" ? e.data : new Uint8Array(e.data));
+    ws.onclose = (e) => {
+      status("切断", "");
+      term.write(`\r\n\x1b[33m[切断されました${e.reason ? `: ${e.reason}` : ""}]\x1b[0m\r\n`);
+      reconnectBtn.hidden = false;
+    };
+  };
+  term.onData((d) => send(encoder.encode(d)));
+  term.onBinary((d) => send(Uint8Array.from(d, (c) => c.charCodeAt(0))));
+  term.onResize(sendSize);
+  const onWindowResize = () => fit.fit();
+  window.addEventListener("resize", onWindowResize);
+  const onReconnect = () => { term.reset(); connect(); term.focus(); };
+  reconnectBtn.addEventListener("click", onReconnect);
+  connect();
+
+  return () => {
+    window.removeEventListener("resize", onWindowResize);
+    reconnectBtn.removeEventListener("click", onReconnect);
+    if (ws) { ws.onclose = null; ws.close(); }
+    term.dispose();
+  };
+}
+
+// viewTerminal はクラスタの kubeconfig を設定したシェルを開く。
+async function viewTerminal(name) {
+  setNav("");
+  await loadXterm();
   const enc = encodeURIComponent(name);
   app.innerHTML = html`
     <h1><a href="#/clusters/${enc}">${name}</a> のターミナル <span class="badge info" id="term-status">接続中</span></h1>
@@ -642,57 +699,118 @@ async function viewTerminal(name) {
     </div>
     <p class="hint">kubectl (<code>k</code>) が設定済みのシェルです (Talos のクラスタは talosctl も)。
       ミニPC の権限の無い一時ユーザーで動き、ホームはこのセッションだけのもので、閉じると消えます。</p>`;
-
-  const term = new Terminal({
-    cursorBlink: true,
-    fontSize: 14,
-    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Noto Sans Mono CJK JP", monospace',
-    scrollback: 5000,
-    theme: { background: "#111613", foreground: "#e3ebe6" },
-  });
-  const fit = new FitAddon.FitAddon();
-  term.loadAddon(fit);
-  term.open(document.getElementById("term"));
-  fit.fit();
-  term.focus();
-
-  const encoder = new TextEncoder();
-  let ws = null;
-  const status = (text, cls) => {
-    const el = document.getElementById("term-status");
-    if (el) { el.textContent = text; el.className = `badge ${cls}`; }
-  };
-  const send = (data) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(data); };
-  const sendSize = () => send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
-  const connect = () => {
-    const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    ws = new WebSocket(`${proto}//${location.host}/api/clusters/${enc}/terminal`);
-    ws.binaryType = "arraybuffer";
-    status("接続中", "info");
-    document.getElementById("term-reconnect").hidden = true;
-    ws.onopen = () => { status("接続済み", "ok"); sendSize(); };
-    ws.onmessage = (e) => term.write(typeof e.data === "string" ? e.data : new Uint8Array(e.data));
-    ws.onclose = (e) => {
-      status("切断", "");
-      term.write(`\r\n\x1b[33m[切断されました${e.reason ? `: ${e.reason}` : ""}]\x1b[0m\r\n`);
-      const b = document.getElementById("term-reconnect");
-      if (b) b.hidden = false;
-    };
-  };
-  term.onData((d) => send(encoder.encode(d)));
-  term.onBinary((d) => send(Uint8Array.from(d, (c) => c.charCodeAt(0))));
-  term.onResize(sendSize);
-  const onWindowResize = () => fit.fit();
-  window.addEventListener("resize", onWindowResize);
-  document.getElementById("term-reconnect").addEventListener("click", () => { term.reset(); connect(); term.focus(); });
-  connect();
-
   // ほかの画面に移るときに閉じる
-  teardown = () => {
-    window.removeEventListener("resize", onWindowResize);
-    if (ws) { ws.onclose = null; ws.close(); }
-    term.dispose();
+  teardown = mountTerminal(document.getElementById("term"), name, document.getElementById("term-status"), document.getElementById("term-reconnect"));
+}
+
+// ---------- 練習問題 (CKA / CKAD) ----------
+
+const PRACTICE_CLUSTER_KEY = "niwakube.practice.cluster";
+const storageGet = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
+const storageSet = (k, v) => { try { localStorage.setItem(k, v); } catch { /* 保存できなくても動く */ } };
+
+// viewPractice は練習問題の一覧。
+async function viewPractice() {
+  setNav("practice");
+  const problems = await api("GET", "/api/practice/problems");
+  const exams = [...new Set(problems.map((p) => p.exam))];
+  app.innerHTML = html`
+    <h1>練習問題 (CKA / CKAD)</h1>
+    <div class="card">
+      <p>本物のクラスタで CKA / CKAD の練習ができます。問題を開くと、左に問題文、右にクラスタのターミナルが出ます。
+        「出題する」で問題の Namespace を作り直し、ターミナルの kubectl で解いたら「採点」を押します。</p>
+      <p class="hint">問題は公開されている出題範囲に沿ったオリジナルで、本物の試験問題ではありません。
+        練習用のクラスタを 1 つ作っておくと、ほかのクラスタを壊す心配がありません (試験と同じ kubeadm、ワーカー 1 台以上がおすすめ)。</p>
+    </div>
+    ${exams.map((exam) => html`<div class="card">
+      <h2>${exam}</h2>
+      <div class="table-wrap"><table>
+        <thead><tr><th>問題</th><th>分野</th><th class="num">配点</th></tr></thead>
+        <tbody>${problems.filter((p) => p.exam === exam).map((p) => html`<tr>
+          <td><a href="#/practice/${encodeURIComponent(p.id)}">${p.title}</a></td><td>${p.domain}</td><td class="num">${p.weight}</td></tr>`)}</tbody>
+      </table></div>
+    </div>`)}`;
+}
+
+function practiceResult(r) {
+  const all = r.passed === r.total;
+  return html`<div class="practice-result ${all ? "all" : ""}">
+    <p><strong>${r.score} / ${r.weight} 点</strong> <span class="hint">(${r.passed} / ${r.total} 項目)</span>${all ? html` <span class="badge ok">正解</span>` : ""}</p>
+    <ul class="checks">${r.checks.map((c) => html`<li class="${c.passed ? "pass" : "fail"}">
+      <span class="mark">${c.passed ? "✓" : "✗"}</span> ${c.description}${c.message ? html` <span class="hint">(${c.message})</span>` : ""}</li>`)}</ul>
+  </div>`;
+}
+
+// viewProblem は 1 問の画面。試験と同じく、左に問題文、右にターミナルを置く。
+async function viewProblem(id) {
+  setNav("practice");
+  const [p, clusters] = await Promise.all([api("GET", `/api/practice/problems/${encodeURIComponent(id)}`), api("GET", "/api/clusters")]);
+  const ready = clusters.filter((c) => c.status.phase === "ready").map((c) => c.name);
+  const saved = storageGet(PRACTICE_CLUSTER_KEY);
+  let chosen = ready.includes(saved) ? saved : ready[0];
+  app.innerHTML = html`
+    <h1><a href="#/practice">練習問題</a> / ${p.title} <span class="badge info">${p.exam}</span></h1>
+    <div class="practice-grid">
+      <div>
+        <div class="card">
+          <p class="hint">${p.domain} · 配点 ${p.weight}</p>
+          <div class="task">${p.task}</div>
+        </div>
+        <div class="card">
+          ${ready.length ? html`<div class="inline">
+            <label class="inline">クラスタ <select id="pr-cluster">${ready.map((n) => html`<option ${n === chosen ? raw("selected") : ""}>${n}</option>`)}</select></label>
+            <button class="primary" id="pr-setup">出題する</button>
+            <button id="pr-check">採点</button>
+          </div>
+          <p class="hint">「出題する」は Namespace ${p.namespaces.join(", ")} を消して作り直します。やり直すときももう一度押します。</p>`
+          : html`<p>Ready のクラスタがありません。<a href="#/clusters/new">練習用のクラスタを作って</a>から開いてください。</p>`}
+          <div id="pr-result"></div>
+        </div>
+        ${p.hint ? html`<details class="card"><summary>ヒント</summary><div class="task">${p.hint}</div></details>` : ""}
+        ${p.solution ? html`<details class="card"><summary>解説と解き方の例</summary><div class="task">${p.solution}</div></details>` : ""}
+      </div>
+      <div>
+        <div class="inline spaced-bottom"><strong>ターミナル</strong> <span class="badge" id="term-status">未接続</span> <button id="term-reconnect" hidden>再接続</button></div>
+        <div class="term-wrap" id="term"></div>
+      </div>
+    </div>`;
+  if (!ready.length) return;
+
+  app.classList.add("wide"); // 問題文とターミナルを並べるので広く使う
+  await loadXterm();
+  let closeTerm = null;
+  const open = () => {
+    if (closeTerm) closeTerm();
+    document.getElementById("term").replaceChildren();
+    closeTerm = mountTerminal(document.getElementById("term"), chosen, document.getElementById("term-status"), document.getElementById("term-reconnect"));
   };
+  open();
+  teardown = () => { if (closeTerm) closeTerm(); app.classList.remove("wide"); };
+
+  const result = document.getElementById("pr-result");
+  document.getElementById("pr-cluster").addEventListener("change", (e) => {
+    chosen = e.target.value;
+    storageSet(PRACTICE_CLUSTER_KEY, chosen);
+    result.replaceChildren();
+    open();
+  });
+  const run = async (btn, busy, fn) => {
+    const label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = busy;
+    try { await fn(); } catch (err) { toast(err.message, true); } finally { btn.disabled = false; btn.textContent = label; }
+  };
+  const setupBtn = document.getElementById("pr-setup");
+  setupBtn.addEventListener("click", () => run(setupBtn, "出題中…", async () => {
+    await api("POST", `/api/practice/problems/${encodeURIComponent(p.id)}/setup`, { cluster: chosen });
+    result.replaceChildren();
+    toast(`${chosen} に出題しました。右のターミナルで解いてください`);
+  }));
+  const checkBtn = document.getElementById("pr-check");
+  checkBtn.addEventListener("click", () => run(checkBtn, "採点中…", async () => {
+    const r = await api("POST", `/api/practice/problems/${encodeURIComponent(p.id)}/check`, { cluster: chosen });
+    result.innerHTML = practiceResult(r);
+  }));
 }
 
 // ---------- ルーター ----------
@@ -705,6 +823,8 @@ function route() {
   if (parts[0] === "clusters" && parts[1] === "new") return { view: viewNewCluster, live: false };
   if (parts[0] === "clusters" && parts[1] && parts[2] === "terminal") return { view: () => viewTerminal(parts[1]), live: false };
   if (parts[0] === "clusters" && parts[1]) return { view: () => viewCluster(parts[1]), live: true, serial: true };
+  if (parts[0] === "practice" && parts[1]) return { view: () => viewProblem(parts[1]), live: false };
+  if (parts[0] === "practice") return { view: viewPractice, live: false };
   if (parts[0] === "vms" && parts[1]) return { view: () => viewVM(parts[1]), live: true, serial: true };
   if (parts[0] === "vms") return { view: viewVMs, live: true };
   return { view: viewHome, live: true };

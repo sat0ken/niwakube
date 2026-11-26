@@ -1,0 +1,102 @@
+id: ckad-configmap-env
+exam: CKAD
+domain: アプリの環境・設定・セキュリティ
+title: ConfigMap の値を環境変数で Pod に渡す
+weight: 5
+namespaces: [shop]
+setup: |
+  apiVersion: v1
+  kind: Namespace
+  metadata:
+    name: shop
+task: |
+  Namespace shop で次の 2 つを作ってください。
+
+  1. ConfigMap app-config。キー MODE に値 production を入れる
+  2. Pod shop-api
+     - イメージ: registry.k8s.io/e2e-test-images/agnhost:2.39
+     - 引数: netexec --http-port=8080
+     - 環境変数 APP_MODE に、ConfigMap app-config のキー MODE の値を入れる (値を直接書かない)
+
+  Pod が Running で Ready になっていること。
+checks:
+  - description: ConfigMap app-config の MODE が production
+    apiVersion: v1
+    kind: ConfigMap
+    namespace: shop
+    name: app-config
+    jsonpath: '{.data.MODE}'
+    equals: production
+  - description: 環境変数 APP_MODE が ConfigMap app-config を参照している
+    apiVersion: v1
+    kind: Pod
+    namespace: shop
+    name: shop-api
+    jsonpath: '{.spec.containers[0].env[?(@.name=="APP_MODE")].valueFrom.configMapKeyRef.name}'
+    equals: app-config
+  - description: 参照するキーが MODE
+    apiVersion: v1
+    kind: Pod
+    namespace: shop
+    name: shop-api
+    jsonpath: '{.spec.containers[0].env[?(@.name=="APP_MODE")].valueFrom.configMapKeyRef.key}'
+    equals: MODE
+  - description: イメージが agnhost:2.39
+    apiVersion: v1
+    kind: Pod
+    namespace: shop
+    name: shop-api
+    jsonpath: '{.spec.containers[0].image}'
+    equals: registry.k8s.io/e2e-test-images/agnhost:2.39
+  - description: Pod が Ready
+    apiVersion: v1
+    kind: Pod
+    namespace: shop
+    name: shop-api
+    jsonpath: '{.status.conditions[?(@.type=="Ready")].status}'
+    equals: "True"
+hint: |
+  ConfigMap は kubectl create configmap で作れます。
+  Pod の YAML の下書きは kubectl run ... --dry-run=client -o yaml で作り、env を書き足すと早いです。
+solution: |
+  kubectl -n shop create configmap app-config --from-literal=MODE=production
+
+  kubectl -n shop run shop-api --image=registry.k8s.io/e2e-test-images/agnhost:2.39 \
+    --dry-run=client -o yaml -- netexec --http-port=8080 > pod.yaml
+
+  pod.yaml の containers に次を足して kubectl apply -f pod.yaml します。
+
+    env:
+      - name: APP_MODE
+        valueFrom:
+          configMapKeyRef:
+            name: app-config
+            key: MODE
+
+  ConfigMap のキーをすべて環境変数にするなら envFrom も使えますが、今回は名前を APP_MODE に変えるので valueFrom を使います。
+  Pod の env はあとから変えられないので、間違えたら Pod を作り直します。
+answer: |
+  apiVersion: v1
+  kind: ConfigMap
+  metadata:
+    name: app-config
+    namespace: shop
+  data:
+    MODE: production
+  ---
+  apiVersion: v1
+  kind: Pod
+  metadata:
+    name: shop-api
+    namespace: shop
+  spec:
+    containers:
+      - name: shop-api
+        image: registry.k8s.io/e2e-test-images/agnhost:2.39
+        args: ["netexec", "--http-port=8080"]
+        env:
+          - name: APP_MODE
+            valueFrom:
+              configMapKeyRef:
+                name: app-config
+                key: MODE

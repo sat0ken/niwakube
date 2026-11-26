@@ -1,0 +1,127 @@
+id: ckad-readiness-probe
+exam: CKAD
+domain: アプリの監視と保守
+title: Deployment に readinessProbe を付ける
+weight: 6
+namespaces: [web]
+setup: |
+  apiVersion: v1
+  kind: Namespace
+  metadata:
+    name: web
+  ---
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: api
+    namespace: web
+  spec:
+    replicas: 2
+    selector:
+      matchLabels:
+        app: api
+    template:
+      metadata:
+        labels:
+          app: api
+      spec:
+        containers:
+          - name: api
+            image: registry.k8s.io/e2e-test-images/agnhost:2.39
+            args: ["netexec", "--http-port=8080"]
+            ports:
+              - containerPort: 8080
+task: |
+  Namespace web の Deployment api に readinessProbe を追加してください。
+
+  - HTTP GET でパス /hostname、ポート 8080 を確かめる
+  - 最初の確認はコンテナの起動から 5 秒後、以降は 10 秒ごと
+
+  変更後、新しい Pod 2 つがすべて Ready になっていること。
+checks:
+  - description: readinessProbe のパスが /hostname
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: web
+    name: api
+    jsonpath: '{.spec.template.spec.containers[0].readinessProbe.httpGet.path}'
+    equals: /hostname
+  - description: readinessProbe のポートが 8080
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: web
+    name: api
+    jsonpath: '{.spec.template.spec.containers[0].readinessProbe.httpGet.port}'
+    equals: "8080"
+  - description: 最初の確認が 5 秒後 (initialDelaySeconds)
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: web
+    name: api
+    jsonpath: '{.spec.template.spec.containers[0].readinessProbe.initialDelaySeconds}'
+    equals: "5"
+  - description: 確認の間隔が 10 秒 (periodSeconds)
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: web
+    name: api
+    jsonpath: '{.spec.template.spec.containers[0].readinessProbe.periodSeconds}'
+    equals: "10"
+  - description: ロールアウトが終わっている (新しい ReplicaSet が使える)
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: web
+    name: api
+    jsonpath: '{.status.conditions[?(@.type=="Progressing")].reason}'
+    equals: NewReplicaSetAvailable
+  - description: Pod 2 つが Ready
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: web
+    name: api
+    jsonpath: '{.status.readyReplicas}'
+    equals: "2"
+hint: |
+  kubectl explain deployment.spec.template.spec.containers.readinessProbe で項目名を確かめられます。
+  kubectl -n web edit deployment api で直接書き換えるのが早いです。
+solution: |
+  kubectl -n web edit deployment api で、containers の api に次を足します。
+
+    readinessProbe:
+      httpGet:
+        path: /hostname
+        port: 8080
+      initialDelaySeconds: 5
+      periodSeconds: 10
+
+  保存するとロールアウトが始まります。kubectl -n web rollout status deployment api で終わるのを待ち、
+  kubectl -n web get pods で READY が 1/1 になっていることを確かめます。
+  readinessProbe が失敗している Pod には Service からトラフィックが来ません (livenessProbe と違って再起動はしない)。
+answer: |
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: api
+    namespace: web
+  spec:
+    replicas: 2
+    selector:
+      matchLabels:
+        app: api
+    template:
+      metadata:
+        labels:
+          app: api
+      spec:
+        containers:
+          - name: api
+            image: registry.k8s.io/e2e-test-images/agnhost:2.39
+            args: ["netexec", "--http-port=8080"]
+            ports:
+              - containerPort: 8080
+            readinessProbe:
+              httpGet:
+                path: /hostname
+                port: 8080
+              initialDelaySeconds: 5
+              periodSeconds: 10

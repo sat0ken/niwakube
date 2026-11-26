@@ -1,0 +1,110 @@
+id: ckad-security-context
+exam: CKAD
+domain: アプリの環境・設定・セキュリティ
+title: SecurityContext で Pod の権限を絞る
+weight: 6
+namespaces: [secure]
+setup: |
+  apiVersion: v1
+  kind: Namespace
+  metadata:
+    name: secure
+task: |
+  Namespace secure に Pod hardened を作ってください。
+
+  - イメージ: registry.k8s.io/e2e-test-images/agnhost:2.39、引数: netexec --http-port=8080
+  - Pod 全体を ユーザー ID 1000 で動かし、root で動かないことを Kubernetes に確かめさせる (Pod の securityContext)
+  - コンテナは、権限の昇格を禁止し、ルートファイルシステムを読み取り専用にし、Linux のケーパビリティをすべて外す
+
+  Pod が Running で Ready になっていること。
+checks:
+  - description: Pod の runAsUser が 1000
+    apiVersion: v1
+    kind: Pod
+    namespace: secure
+    name: hardened
+    jsonpath: '{.spec.securityContext.runAsUser}'
+    equals: "1000"
+  - description: Pod の runAsNonRoot が true
+    apiVersion: v1
+    kind: Pod
+    namespace: secure
+    name: hardened
+    jsonpath: '{.spec.securityContext.runAsNonRoot}'
+    equals: "true"
+  - description: 権限の昇格を禁止 (allowPrivilegeEscalation が false)
+    apiVersion: v1
+    kind: Pod
+    namespace: secure
+    name: hardened
+    jsonpath: '{.spec.containers[0].securityContext.allowPrivilegeEscalation}'
+    equals: "false"
+  - description: ルートファイルシステムが読み取り専用
+    apiVersion: v1
+    kind: Pod
+    namespace: secure
+    name: hardened
+    jsonpath: '{.spec.containers[0].securityContext.readOnlyRootFilesystem}'
+    equals: "true"
+  - description: ケーパビリティをすべて外す (drop に ALL)
+    apiVersion: v1
+    kind: Pod
+    namespace: secure
+    name: hardened
+    jsonpath: '{.spec.containers[0].securityContext.capabilities.drop}'
+    contains: ALL
+  - description: Pod が Ready
+    apiVersion: v1
+    kind: Pod
+    namespace: secure
+    name: hardened
+    jsonpath: '{.status.conditions[?(@.type=="Ready")].status}'
+    equals: "True"
+hint: |
+  securityContext は Pod (spec.securityContext) とコンテナ (spec.containers[].securityContext) の 2 か所に書けます。
+  項目によって書ける場所が違います。kubectl explain pod.spec.securityContext と
+  kubectl explain pod.spec.containers.securityContext で確かめます。
+solution: |
+  次の YAML を kubectl apply -f します。
+
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: hardened
+      namespace: secure
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsNonRoot: true
+      containers:
+        - name: hardened
+          image: registry.k8s.io/e2e-test-images/agnhost:2.39
+          args: ["netexec", "--http-port=8080"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+  runAsUser と runAsNonRoot はどちらにも書けますが、capabilities と readOnlyRootFilesystem はコンテナにしか書けません。
+  両方に書いたときはコンテナの値が優先されます。
+  kubectl -n secure exec hardened -- id で uid=1000 になっていることを確かめられます。
+answer: |
+  apiVersion: v1
+  kind: Pod
+  metadata:
+    name: hardened
+    namespace: secure
+  spec:
+    securityContext:
+      runAsUser: 1000
+      runAsNonRoot: true
+    containers:
+      - name: hardened
+        image: registry.k8s.io/e2e-test-images/agnhost:2.39
+        args: ["netexec", "--http-port=8080"]
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]

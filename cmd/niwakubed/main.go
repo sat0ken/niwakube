@@ -26,8 +26,10 @@ import (
 	"github.com/sat0ken/niwakube/internal/distro/kubeadm"
 	"github.com/sat0ken/niwakube/internal/distro/talos"
 	"github.com/sat0ken/niwakube/internal/ipam"
+	"github.com/sat0ken/niwakube/internal/kube"
 	"github.com/sat0ken/niwakube/internal/machine"
 	"github.com/sat0ken/niwakube/internal/netx"
+	"github.com/sat0ken/niwakube/internal/practice"
 	"github.com/sat0ken/niwakube/internal/store"
 	"github.com/sat0ken/niwakube/internal/sys"
 	"github.com/sat0ken/niwakube/internal/terminal"
@@ -164,6 +166,19 @@ func run() error {
 	}
 	term.Cleanup(ctx)
 
+	// CKA / CKAD の練習問題。問題を出すクラスタには admin の kubeconfig でつなぐ
+	drills, err := practice.NewService(func(ctx context.Context, name string) (practice.Cluster, error) {
+		kc, err := clusters.Kubeconfig(ctx, name)
+		if err != nil {
+			return nil, err
+		}
+		return kube.New(kc)
+	})
+	if err != nil {
+		log.Error("load practice problems", "err", err)
+		os.Exit(1)
+	}
+
 	// ホスト再起動後などに、起動しているはずの VM を起動し直す
 	go func() {
 		svc.Reconcile(ctx)
@@ -178,6 +193,7 @@ func run() error {
 			LoopbackOnly: api.IsLoopbackListen(*listen),
 			UI:           webui.Handler(),
 			Terminal:     term,
+			Practice:     drills,
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}

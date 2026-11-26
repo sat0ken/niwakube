@@ -1,0 +1,96 @@
+id: ckad-job-parallel
+exam: CKAD
+domain: アプリの設計とビルド
+title: 並列に動く Job を作る
+weight: 5
+namespaces: [batch-work]
+setup: |
+  apiVersion: v1
+  kind: Namespace
+  metadata:
+    name: batch-work
+task: |
+  Namespace batch-work に Job report-gen を作ってください。
+
+  - コンテナ名 report-gen、イメージ registry.k8s.io/e2e-test-images/agnhost:2.39、引数 dns-suffix
+    (DNS のサフィックスを表示してすぐ終わる)
+  - 合計 4 回成功したら完了とし、同時に 2 つまで動かす
+  - 失敗したときの再試行は 2 回まで
+
+  Job が完了していること。
+checks:
+  - description: 4 回成功で完了 (completions)
+    apiVersion: batch/v1
+    kind: Job
+    namespace: batch-work
+    name: report-gen
+    jsonpath: '{.spec.completions}'
+    equals: "4"
+  - description: 同時に 2 つまで (parallelism)
+    apiVersion: batch/v1
+    kind: Job
+    namespace: batch-work
+    name: report-gen
+    jsonpath: '{.spec.parallelism}'
+    equals: "2"
+  - description: 再試行は 2 回まで (backoffLimit)
+    apiVersion: batch/v1
+    kind: Job
+    namespace: batch-work
+    name: report-gen
+    jsonpath: '{.spec.backoffLimit}'
+    equals: "2"
+  - description: コンテナ report-gen の引数が dns-suffix
+    apiVersion: batch/v1
+    kind: Job
+    namespace: batch-work
+    name: report-gen
+    jsonpath: '{.spec.template.spec.containers[?(@.name=="report-gen")].args[0]}'
+    equals: dns-suffix
+  - description: 4 回成功している
+    apiVersion: batch/v1
+    kind: Job
+    namespace: batch-work
+    name: report-gen
+    jsonpath: '{.status.succeeded}'
+    equals: "4"
+hint: |
+  kubectl create job で下書きを作り、completions・parallelism・backoffLimit を書き足します。
+  kubectl create job の -- の後ろはコマンド (command) になります。今回は引数 (args) なので YAML で直します。
+solution: |
+  kubectl -n batch-work create job report-gen --image=registry.k8s.io/e2e-test-images/agnhost:2.39 \
+    --dry-run=client -o yaml > job.yaml
+
+  job.yaml を次のように直して kubectl apply -f job.yaml します。
+
+    spec:
+      completions: 4
+      parallelism: 2
+      backoffLimit: 2
+      template:
+        spec:
+          containers:
+            - name: report-gen
+              image: registry.k8s.io/e2e-test-images/agnhost:2.39
+              args: ["dns-suffix"]
+          restartPolicy: Never
+
+  Job の spec はほとんどがあとから変えられないので、間違えたら kubectl delete job して作り直します。
+  kubectl -n batch-work get job report-gen -w で COMPLETIONS が 4/4 になるのを見られます。
+answer: |
+  apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: report-gen
+    namespace: batch-work
+  spec:
+    completions: 4
+    parallelism: 2
+    backoffLimit: 2
+    template:
+      spec:
+        restartPolicy: Never
+        containers:
+          - name: report-gen
+            image: registry.k8s.io/e2e-test-images/agnhost:2.39
+            args: ["dns-suffix"]
