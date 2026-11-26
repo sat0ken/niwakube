@@ -37,7 +37,7 @@ func (h *host) runner() *sys.FakeRunner {
 				return []byte("active\n"), nil
 			}
 			return []byte("inactive\n"), errors.New("exit status 3")
-		case strings.HasPrefix(cmd, "systemctl stop"), strings.HasPrefix(cmd, "machinectl poweroff"):
+		case strings.HasPrefix(cmd, "systemctl stop"), strings.HasPrefix(cmd, "machinectl poweroff"), strings.HasPrefix(cmd, "machinectl kill"):
 			h.active = false
 		case strings.HasPrefix(cmd, "systemctl reset-failed"):
 		case name == "systemd-run":
@@ -153,7 +153,7 @@ func TestLifecycle(t *testing.T) {
 	for _, want := range []string{
 		"--unit=niwakube-vm-c1", "--property=Delegate=yes", "--property=CPUQuota=200%", "--property=MemoryMax=2048M",
 		"--setenv=SYSTEMD_NSPAWN_API_VFS_WRITABLE=yes", "--setenv=SYSTEMD_SECCOMP=0",
-		"systemd-nspawn --quiet --keep-unit --boot --machine=c1 --directory=" + filepath.Join(dir, "rootfs"),
+		"systemd-nspawn --quiet --keep-unit --machine=c1 --directory=" + filepath.Join(dir, "rootfs"), " --boot ",
 		"--network-namespace-path=/run/netns/niwakube-c1", "--capability=all", "--private-users=no",
 		"--bind-ro=" + filepath.Join(dir, "seed") + ":/var/lib/cloud/seed/nocloud",
 		"--bind=" + filepath.Join(dir, "volumes", "rancher") + ":/var/lib/rancher",
@@ -211,5 +211,87 @@ func TestLifecycle(t *testing.T) {
 	}
 	if err := b.Start(ctx, "c1"); !errors.Is(err, backend.ErrNotFound) {
 		t.Errorf("start after delete: %v", err)
+	}
+}
+
+func TestTalos(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	h := &host{}
+	r := h.runner()
+	var pulled []string
+	b := New(Config{DataDir: dataDir, StopTimeout: time.Second, Poll: 10 * time.Millisecond,
+		Pull: func(_ context.Context, ref, dir string) error {
+			pulled = append(pulled, ref)
+			return os.MkdirAll(filepath.Join(dir, "sbin"), 0o755)
+		}}, r)
+	nc, _ := seed.NetworkConfig(seed.Network{MAC: "52:54:00:aa:bb:cc", Address: netip.MustParsePrefix("172.30.2.11/16"),
+		Gateway: netip.MustParseAddr("172.30.0.1"), DNS: []netip.Addr{netip.MustParseAddr("1.1.1.1")}})
+	spec := &backend.MachineSpec{
+		Name: "tal-cp-1", CPUs: 2, MemoryMiB: 3072, Image: "talos-v1.14.7",
+		NIC: backend.NIC{Bridge: "nkbr0", MAC: "52:54:00:aa:bb:cc",
+			Address: netip.MustParsePrefix("172.30.2.11/16"), Gateway: netip.MustParseAddr("172.30.0.1")},
+		Seed: seed.Data{UserData: []byte("version: v1alpha1\nmachine: {}\n"), NetworkConfig: nc},
+	}
+	if err := b.Create(ctx, spec); err != nil {
+		t.Fatal(err)
+	}
+	// 2 台目は取得済みのイメージを使う
+	spec2 := *spec
+	spec2.Name = "tal-worker-1"
+	if err := b.Create(ctx, &spec2); err != nil {
+		t.Fatal(err)
+	}
+	if len(pulled) != 1 || pulled[0] != "ghcr.io/siderolabs/talos:v1.14.7" {
+		t.Errorf("pulled %v", pulled)
+	}
+	dir := filepath.Join(dataDir, "vms", "tal-cp-1")
+	for f, want := range map[string]string{"hostname": "tal-cp-1", "resolv.conf": "nameserver 1.1.1.1", "hosts": "172.30.2.11 tal-cp-1", "talos.yaml": "version: v1alpha1"} {
+		if b, _ := os.ReadFile(filepath.Join(dir, f)); !strings.Contains(string(b), want) {
+			t.Errorf("%s = %q, want %q", f, b, want)
+		}
+	}
+	for _, v := range []string{"var", "state", "opt"} {
+		if _, err := os.Stat(filepath.Join(dir, "volumes", v)); err != nil {
+			t.Errorf("volume %s: %v", v, err)
+		}
+	}
+
+	if err := b.Start(ctx, "tal-cp-1"); err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Join(h.runArgs, " ")
+	for _, want := range []string{
+		"--property=EnvironmentFile=" + filepath.Join(dir, "talos.env"),
+		"--setenv=PLATFORM --setenv=USERDATA --setenv=TALOSSKU",
+		"--tmpfs=/system --tmpfs=/tmp",
+		"--bind=" + filepath.Join(dir, "volumes", "state") + ":/system/state",
+		"--bind=" + filepath.Join(dir, "volumes", "var") + ":/var",
+		"--bind-ro=" + filepath.Join(dir, "hostname") + ":/etc/hostname",
+		"--network-namespace-path=/run/netns/niwakube-tal-cp-1",
+	} {
+		if !strings.Contains(args, want) {
+			t.Errorf("talos args do not contain %q:\n%s", want, args)
+		}
+	}
+	if strings.Contains(args, "--boot") || !strings.HasSuffix(args, " /sbin/init") || strings.Contains(args, "USERDATA=") {
+		t.Errorf("talos must run /sbin/init without --boot, and the config must not be on the command line:\n%s", args)
+	}
+	env, _ := os.ReadFile(filepath.Join(dir, "talos.env"))
+	if !strings.Contains(string(env), "PLATFORM=container\nUSERDATA=dmVyc2lvbjogdjFhbHBoYTEK") || !strings.Contains(string(env), "TALOSSKU=2CPU-3072RAM") {
+		t.Errorf("talos.env:\n%s", env)
+	}
+	if fi, _ := os.Stat(filepath.Join(dir, "talos.env")); fi.Mode().Perm() != 0o600 {
+		t.Errorf("talos.env must be 0600: %v", fi.Mode())
+	}
+
+	if err := b.Stop(ctx, "tal-cp-1", false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(r.Calls(), "\n"), "machinectl kill --kill-whom=leader --signal=SIGTERM tal-cp-1") {
+		t.Error("talos must be stopped with SIGTERM")
+	}
+	if err := b.Create(ctx, &backend.MachineSpec{Name: "x", Image: "ubuntu-99.04", Seed: seed.Data{NetworkConfig: nc}}); !errors.Is(err, backend.ErrImageNotFound) {
+		t.Errorf("an image that is neither present nor in a registry: %v", err)
 	}
 }

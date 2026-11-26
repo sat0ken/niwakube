@@ -50,7 +50,7 @@ type Node struct {
 
 // Requirements は Distro が Backend に求めること。
 type Requirements struct {
-	NeedsOwnKernel bool     // Talos は true
+	NeedsOwnKernel bool     // 専用のカーネル (VM) が必要か
 	OnlyRuntimes   []string // 使えるコンテナランタイムが限られる場合 (Talos は runc のみ)。nil なら制限なし
 }
 

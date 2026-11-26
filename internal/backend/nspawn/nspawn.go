@@ -13,12 +13,17 @@
 //   - ボリューム: コンテナの中の containerd / kubelet のディレクトリはホストのディレクトリにする
 //     (containerd の overlayfs は overlayfs の上に置けないため。kind も同じ理由で分けている)
 //
+// Talos (イメージ名が talos-<バージョン>) は Talos 公式のコンテナイメージ (ghcr.io/siderolabs/talos) を
+// レジストリから取得して下の層にし、--boot ではなく Talos の /sbin/init を PID 1 として起動する
+// (PLATFORM=container。Talos の Docker 用の作りと同じ tmpfs とボリュームを用意する)。
+//
 // Kubernetes を中で動かすため特権 (全 capability、seccomp なし、/proc/sys 書き込み可) で動かす。
 // ホストのカーネルを共有するので、Cilium のようにカーネルの状態を持つ CNI は使えない。
 package nspawn
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,10 +32,12 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sat0ken/niwakube/internal/backend"
 	"github.com/sat0ken/niwakube/internal/netx"
+	"github.com/sat0ken/niwakube/internal/oci"
 	"github.com/sat0ken/niwakube/internal/seed"
 	"github.com/sat0ken/niwakube/internal/sys"
 )
@@ -38,7 +45,9 @@ import (
 const Name = "nspawn"
 
 type Config struct {
-	DataDir     string        // 既定: /var/lib/niwakube
+	DataDir string // 既定: /var/lib/niwakube
+	// Pull は OCI イメージを取得して dir に展開する (既定: oci.Pull。テストで差し替える)
+	Pull        func(ctx context.Context, ref, dir string) error
 	StopTimeout time.Duration // 正常シャットダウンを待つ時間。既定: 60s
 	// Poll は停止を待つときの間隔 (テスト用。既定 1s)
 	Poll time.Duration
@@ -48,6 +57,8 @@ type Backend struct {
 	cfg   Config
 	run   sys.Runner
 	links netx.Links
+
+	pullMu sync.Mutex // イメージの取得を直列化する
 }
 
 var (
@@ -66,6 +77,9 @@ func New(cfg Config, run sys.Runner) *Backend {
 	if cfg.Poll == 0 {
 		cfg.Poll = time.Second
 	}
+	if cfg.Pull == nil {
+		cfg.Pull = func(ctx context.Context, ref, dir string) error { return oci.Pull(ctx, ref, dir) }
+	}
 	return &Backend{cfg: cfg, run: run, links: netx.Links{Run: run}}
 }
 
@@ -83,11 +97,41 @@ func (b *Backend) baseRootfs(img string) string {
 	return filepath.Join(b.cfg.DataDir, "images", img+".rootfs")
 }
 
+// ノードの種類。
+const (
+	kindSystemd = "systemd" // Ubuntu など。systemd を --boot で起動し、cloud-init で設定する
+	kindTalos   = "talos"   // Talos のコンテナ。Talos の init を PID 1 で起動し、設定は USERDATA で渡す
+)
+
+func kindOf(image string) string {
+	if strings.HasPrefix(image, "talos-") {
+		return kindTalos
+	}
+	return kindSystemd
+}
+
+// ociRef はレジストリから取得するイメージの名前を返す (talos-v1.14.7 → ghcr.io/siderolabs/talos:v1.14.7)。
+// それ以外のイメージは host-setup.sh が用意する。
+func ociRef(image string) (string, bool) {
+	if v, ok := strings.CutPrefix(image, "talos-"); ok && v != "" {
+		return "ghcr.io/siderolabs/talos:" + v, true
+	}
+	return "", false
+}
+
 // volumes はホストのディレクトリにするコンテナの中のパス (vms/<name>/volumes/<名前> に置く)。
-var volumes = map[string]string{
-	"rancher":    "/var/lib/rancher",    // k3s (containerd と kubelet のデータもここ)
-	"containerd": "/var/lib/containerd", // kubeadm の containerd
-	"kubelet":    "/var/lib/kubelet",
+var volumes = map[string]map[string]string{
+	kindSystemd: {
+		"rancher":    "/var/lib/rancher",    // k3s (containerd と kubelet のデータもここ)
+		"containerd": "/var/lib/containerd", // kubeadm の containerd
+		"kubelet":    "/var/lib/kubelet",
+	},
+	// Talos が Docker で動くときと同じ (EPHEMERAL、STATE、/opt の overlay)
+	kindTalos: {
+		"var":   "/var",
+		"state": "/system/state",
+		"opt":   "/opt",
+	},
 }
 
 // cloudCfg は cloud-init の設定。シードのディレクトリ (NoCloud) だけを見て、ネットワークは設定しない
@@ -101,6 +145,7 @@ network:
 
 // state は vms/<name>/state.json に保存する、Start に必要な情報。
 type state struct {
+	Kind      string       `json:"kind,omitempty"` // 空は systemd
 	Image     string       `json:"image"`
 	CPUs      int          `json:"cpus"`
 	MemoryMiB int          `json:"memoryMiB"`
@@ -139,11 +184,11 @@ func (b *Backend) saveState(name string, st *state) error {
 
 // Create はノードのディレクトリ (overlayfs の upper / work、シード、ボリューム) を用意する。
 // ディスクの大きさ (DiskGiB) はホストのディスクを共有するので使わない。
-func (b *Backend) Create(_ context.Context, spec *backend.MachineSpec) (err error) {
-	base := b.baseRootfs(spec.Image)
-	if fi, err := os.Stat(base); err != nil || !fi.IsDir() {
-		return fmt.Errorf("%s (%s): %w", spec.Image, base, backend.ErrImageNotFound)
+func (b *Backend) Create(ctx context.Context, spec *backend.MachineSpec) (err error) {
+	if err := b.ensureImage(ctx, spec.Image); err != nil {
+		return err
 	}
+	kind := kindOf(spec.Image)
 	dir := b.vmDir(spec.Name)
 	if _, err := os.Stat(dir); err == nil {
 		return fmt.Errorf("%s: %w", dir, backend.ErrAlreadyExists)
@@ -157,13 +202,41 @@ func (b *Backend) Create(_ context.Context, spec *backend.MachineSpec) (err erro
 		}
 	}()
 	dirs := []string{"upper", "work", "rootfs", "seed"}
-	for v := range volumes {
+	for v := range volumes[kind] {
 		dirs = append(dirs, filepath.Join("volumes", v))
 	}
 	for _, d := range dirs {
 		if err := os.MkdirAll(filepath.Join(dir, d), 0o755); err != nil {
 			return err
 		}
+	}
+	dns, err := seed.Nameservers(spec.Seed.NetworkConfig)
+	if err != nil {
+		return err
+	}
+	var resolv strings.Builder
+	resolv.WriteString("# niwakube (nspawn)\n")
+	for _, d := range dns {
+		fmt.Fprintf(&resolv, "nameserver %s\n", d)
+	}
+	st := &state{
+		Kind: kind, Image: spec.Image, CPUs: spec.CPUs, MemoryMiB: spec.MemoryMiB,
+		Bridge: spec.NIC.Bridge, MAC: spec.NIC.MAC, Address: spec.NIC.Address, Gateway: spec.NIC.Gateway,
+	}
+	if kind == kindTalos {
+		// Talos は /etc/hostname と /etc/resolv.conf を読み、設定は環境変数 USERDATA から読む
+		files := map[string][]byte{
+			"hostname":    []byte(spec.Name + "\n"),
+			"resolv.conf": []byte(resolv.String()),
+			"hosts":       []byte(fmt.Sprintf("127.0.0.1 localhost\n::1 localhost\n%s %s\n", spec.NIC.Address.Addr(), spec.Name)),
+			"talos.yaml":  spec.Seed.UserData,
+		}
+		for name, data := range files {
+			if err := os.WriteFile(filepath.Join(dir, name), data, 0o600); err != nil {
+				return err
+			}
+		}
+		return b.saveState(spec.Name, st)
 	}
 	// cloud-init はシードのディレクトリ (NoCloud) だけを見る。upper に置けば合成したルートに見える
 	cfgDir := filepath.Join(dir, "upper", "etc", "cloud", "cloud.cfg.d")
@@ -182,15 +255,6 @@ func (b *Backend) Create(_ context.Context, spec *backend.MachineSpec) (err erro
 	if err := os.Symlink("/dev/null", filepath.Join(mask, "systemd-networkd-wait-online.service")); err != nil {
 		return err
 	}
-	dns, err := seed.Nameservers(spec.Seed.NetworkConfig)
-	if err != nil {
-		return err
-	}
-	var resolv strings.Builder
-	resolv.WriteString("# niwakube (nspawn)\n")
-	for _, d := range dns {
-		fmt.Fprintf(&resolv, "nameserver %s\n", d)
-	}
 	if err := os.WriteFile(filepath.Join(dir, "upper", "etc", "resolv.conf"), []byte(resolv.String()), 0o644); err != nil {
 		return err
 	}
@@ -201,10 +265,29 @@ func (b *Backend) Create(_ context.Context, spec *backend.MachineSpec) (err erro
 			return err
 		}
 	}
-	return b.saveState(spec.Name, &state{
-		Image: spec.Image, CPUs: spec.CPUs, MemoryMiB: spec.MemoryMiB,
-		Bridge: spec.NIC.Bridge, MAC: spec.NIC.MAC, Address: spec.NIC.Address, Gateway: spec.NIC.Gateway,
-	})
+	return b.saveState(spec.Name, st)
+}
+
+// ensureImage は下の層のルートファイルシステムを用意する。無ければ、レジストリから取れるイメージなら取得する。
+func (b *Backend) ensureImage(ctx context.Context, image string) error {
+	base := b.baseRootfs(image)
+	exists := func() bool { fi, err := os.Stat(base); return err == nil && fi.IsDir() }
+	if exists() {
+		return nil
+	}
+	ref, ok := ociRef(image)
+	if !ok {
+		return fmt.Errorf("%s (%s): %w", image, base, backend.ErrImageNotFound)
+	}
+	b.pullMu.Lock()
+	defer b.pullMu.Unlock()
+	if exists() {
+		return nil
+	}
+	if err := b.cfg.Pull(ctx, ref, base); err != nil {
+		return fmt.Errorf("%s: %w", image, err)
+	}
+	return nil
 }
 
 func (b *Backend) unitActive(ctx context.Context, name string) bool {
@@ -251,6 +334,10 @@ func (b *Backend) netns(name string, st *state) netx.NetnsSpec {
 // nspawnArgs は systemd-run に渡す引数 (unit の設定と systemd-nspawn のコマンド)。
 func (b *Backend) nspawnArgs(name string, st *state) []string {
 	dir := b.vmDir(name)
+	kind := st.Kind
+	if kind == "" {
+		kind = kindSystemd
+	}
 	args := []string{
 		"--unit=" + b.unit(name), "--collect", "--quiet",
 		"--property=Description=niwakube container " + name,
@@ -263,29 +350,59 @@ func (b *Backend) nspawnArgs(name string, st *state) []string {
 		// kubelet が sysctl を書けるように /proc/sys などを書き込み可にし、seccomp の制限を外す
 		"--setenv=SYSTEMD_NSPAWN_API_VFS_WRITABLE=yes",
 		"--setenv=SYSTEMD_SECCOMP=0",
-		"systemd-nspawn", "--quiet", "--keep-unit", "--boot",
-		"--machine=" + name,
-		"--directory=" + b.rootfs(name),
-		"--network-namespace-path=" + netx.NetnsPath(name),
+	}
+	if kind == kindTalos {
+		// Talos の設定 (クラスタの秘密鍵を含む) は unit の Environment= ではなく root だけが読めるファイルで渡す
+		// (Environment= は一般ユーザーからも見える)。nspawn は --setenv=NAME で自分の環境変数を中に渡す
+		args = append(args, "--property=EnvironmentFile="+filepath.Join(dir, "talos.env"))
+	}
+	args = append(args,
+		"systemd-nspawn", "--quiet", "--keep-unit",
+		"--machine="+name,
+		"--directory="+b.rootfs(name),
+		"--network-namespace-path="+netx.NetnsPath(name),
 		"--capability=all", "--private-users=no",
 		"--console=read-only", "--link-journal=no", "--resolv-conf=off", "--timezone=off",
-		"--bind-ro=" + filepath.Join(dir, "seed") + ":/var/lib/cloud/seed/nocloud",
-		"--bind-ro=/lib/modules",
 		"--bind=/dev/kmsg",
+	)
+	for _, v := range sortedVolumes(kind) {
+		args = append(args, "--bind="+filepath.Join(dir, "volumes", v)+":"+volumes[kind][v])
 	}
-	for _, v := range sortedVolumes() {
-		args = append(args, "--bind="+filepath.Join(dir, "volumes", v)+":"+volumes[v])
+	if kind == kindTalos {
+		return append(args,
+			"--setenv=PLATFORM", "--setenv=USERDATA", "--setenv=TALOSSKU",
+			"--tmpfs=/system", "--tmpfs=/tmp",
+			"--bind-ro="+filepath.Join(dir, "hostname")+":/etc/hostname",
+			"--bind-ro="+filepath.Join(dir, "resolv.conf")+":/etc/resolv.conf",
+			"--bind-ro="+filepath.Join(dir, "hosts")+":/etc/hosts",
+			"/sbin/init",
+		)
 	}
-	return args
+	return append(args,
+		"--boot",
+		"--bind-ro="+filepath.Join(dir, "seed")+":/var/lib/cloud/seed/nocloud",
+		"--bind-ro=/lib/modules",
+	)
 }
 
-func sortedVolumes() []string {
-	out := make([]string, 0, len(volumes))
-	for v := range volumes {
+func sortedVolumes(kind string) []string {
+	out := make([]string, 0, len(volumes[kind]))
+	for v := range volumes[kind] {
 		out = append(out, v)
 	}
 	sort.Strings(out)
 	return out
+}
+
+// writeTalosEnv は Talos に渡す環境変数のファイル (unit の EnvironmentFile=) を書く。
+func (b *Backend) writeTalosEnv(name string, st *state) error {
+	cfg, err := os.ReadFile(filepath.Join(b.vmDir(name), "talos.yaml"))
+	if err != nil {
+		return err
+	}
+	env := fmt.Sprintf("PLATFORM=container\nUSERDATA=%s\nTALOSSKU=%dCPU-%dRAM\n",
+		base64.StdEncoding.EncodeToString(cfg), st.CPUs, st.MemoryMiB)
+	return os.WriteFile(filepath.Join(b.vmDir(name), "talos.env"), []byte(env), 0o600)
 }
 
 // Start はネットワーク名前空間とルートを用意して、systemd-nspawn を起動する。
@@ -303,6 +420,11 @@ func (b *Backend) Start(ctx context.Context, name string) error {
 	if err := b.mount(ctx, name, st); err != nil {
 		return err
 	}
+	if st.Kind == kindTalos {
+		if err := b.writeTalosEnv(name, st); err != nil {
+			return err
+		}
+	}
 	// 前回失敗した unit が残っていると同じ名前で起動できない
 	_, _ = b.run.Run(ctx, "systemctl", "reset-failed", b.unit(name))
 	if _, err := b.run.Run(ctx, "systemd-run", b.nspawnArgs(name, st)...); err != nil {
@@ -318,7 +440,12 @@ func (b *Backend) Stop(ctx context.Context, name string, force bool) error {
 		return err
 	}
 	if b.unitActive(ctx, name) && !force {
-		if _, err := b.run.Run(ctx, "machinectl", "poweroff", name); err == nil {
+		// systemd は電源断の依頼 (SIGRTMIN+4)、Talos は SIGTERM で正常終了する
+		cmd := []string{"poweroff", name}
+		if st.Kind == kindTalos {
+			cmd = []string{"kill", "--kill-whom=leader", "--signal=SIGTERM", name}
+		}
+		if _, err := b.run.Run(ctx, "machinectl", cmd...); err == nil {
 			b.waitInactive(ctx, name)
 		}
 	}

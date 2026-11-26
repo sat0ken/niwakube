@@ -225,7 +225,9 @@ sudo systemctl restart niwakubed
 
 host-setup.sh が `/etc/default/niwakubed` に `NIWAKUBED_OPTS="--backend=nspawn"` を書く。使い方 (API・Web UI) は VM と同じ。
 
-- 使えるディストリは k3s と kubeadm。CNI は flannel のみ (既定でそうなる)。Talos はまだ使えない
+- 使えるディストリは k3s・kubeadm・Talos。CNI は flannel のみ (既定でそうなる)
+- Talos は公式のコンテナイメージ (`ghcr.io/siderolabs/talos:<バージョン>`) を初めて使うときにレジストリから取得する
+  (Docker は使わない。niwakubed が自分で取得して展開する)
 - vCPU とメモリは systemd の上限 (`CPUQuota` / `MemoryMax`)。kubelet にはホスト全体の CPU・メモリが見える。ディスクはホストと共有
 - ノードは `machinectl list` で見える。`machinectl shell <ノード>` で中に入れる
 - 仕組みは [docs/backends.md](docs/backends.md#実装-internalbackendnspawn)
