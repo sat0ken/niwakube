@@ -426,6 +426,16 @@ scale() {
 log "ワーカーを 2 台に増やす"
 scale 2
 wait_op "ワーカーの追加"
+# kubectl wait は Node がまだ無いとすぐに失敗するので、先に登録 (kubelet の参加) を待つ
+start=$SECONDS
+until k get node "$NAME-worker-2" >/dev/null 2>&1; do
+  if (( SECONDS - start > 900 )); then
+    k get nodes -o wide || true
+    die "900s 待っても追加したワーカーが参加しません"
+  fi
+  sleep 5
+done
+log "追加したワーカーが参加しました ($((SECONDS - start))s)"
 if ! k wait --for=condition=Ready "node/$NAME-worker-2" --timeout=600s; then
   k get nodes -o wide || true
   die "追加したワーカーが Ready になりません"
