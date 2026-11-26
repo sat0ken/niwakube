@@ -17,6 +17,9 @@ TALOS_VERSIONS=${TALOS_VERSIONS-v1.14.7}
 # Image Factory の schematic。既定は拡張機能なし
 TALOS_SCHEMATIC=${TALOS_SCHEMATIC:-376567988ad370138ad8b2698212367b8edcb69b5fd68c80be1f2ec7d603b4ba}
 
+# Web UI のターミナルで使う kubectl のバージョン (niwakubed の client-go に合わせる)。talosctl は TALOS_VERSIONS の最初のもの
+KUBECTL_VERSION=${KUBECTL_VERSION:-v1.37.2}
+
 # 動作確認したバージョンに固定する (CI の E2E で検証済み)。最新を試すなら CH_VERSION=latest
 CH_VERSION=${CH_VERSION:-v55.0}
 if [[ $CH_VERSION == latest ]]; then
@@ -58,7 +61,8 @@ install_packages() {
   log "パッケージのインストール"
   apt-get update -qq
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-    qemu-utils cloud-image-utils nftables curl jq xz-utils iproute2 openssh-client netcat-openbsd nfs-kernel-server
+    qemu-utils cloud-image-utils nftables curl jq xz-utils iproute2 openssh-client netcat-openbsd nfs-kernel-server \
+    bash-completion
 }
 
 install_cloud_hypervisor() {
@@ -73,6 +77,38 @@ install_cloud_hypervisor() {
   log "UEFI ファームウェア (CLOUDHV.fd) の取得"
   mkdir -p "$NIWAKUBE_DIR/firmware"
   curl -fsSL -o "$NIWAKUBE_DIR/firmware/CLOUDHV.fd" "$EDK2_RELEASES/CLOUDHV.fd"
+}
+
+# install_verified URL SHA256 DEST: ダウンロードして SHA256 を確かめてから置く
+install_verified() {
+  local tmp
+  tmp=$(mktemp)
+  curl -fsSL --retry 3 -o "$tmp" "$1"
+  if ! echo "$2  $tmp" | sha256sum -c --quiet -; then
+    rm -f "$tmp"
+    die "$1 の SHA256 が一致しません"
+  fi
+  install -m 0755 "$tmp" "$3"
+  rm -f "$tmp"
+}
+
+# Web UI のターミナル (と手元の操作) で使う kubectl / talosctl
+install_clients() {
+  local arch sum talos
+  arch=$(dpkg --print-architecture)
+  log "kubectl のインストール ($KUBECTL_VERSION)"
+  sum=$(curl -fsSL --retry 3 "https://dl.k8s.io/release/$KUBECTL_VERSION/bin/linux/$arch/kubectl.sha256")
+  install_verified "https://dl.k8s.io/release/$KUBECTL_VERSION/bin/linux/$arch/kubectl" "$sum" /usr/local/bin/kubectl
+  echo "    $(kubectl version --client 2>/dev/null | head -n1)"
+
+  talos=${TALOS_VERSIONS%% *}
+  [[ -n $talos ]] || return 0
+  log "talosctl のインストール ($talos)"
+  sum=$(curl -fsSL --retry 3 "https://github.com/siderolabs/talos/releases/download/$talos/sha256sum.txt" |
+    awk -v f="talosctl-linux-$arch" '$2 == f || $2 == "*"f {print $1}')
+  [[ -n $sum ]] || die "talosctl-linux-$arch の SHA256 が見つかりません"
+  install_verified "https://github.com/siderolabs/talos/releases/download/$talos/talosctl-linux-$arch" "$sum" /usr/local/bin/talosctl
+  echo "    $(talosctl version --client --short 2>/dev/null | tail -n1)"
 }
 
 setup_dirs() {
@@ -225,6 +261,7 @@ check_os
 check_kvm
 install_packages
 install_cloud_hypervisor
+install_clients
 setup_dirs
 setup_bridge
 setup_nat

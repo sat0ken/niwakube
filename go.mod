@@ -3,6 +3,8 @@ module github.com/sat0ken/niwakube
 go 1.26.5
 
 require (
+	github.com/coder/websocket v1.8.14
+	github.com/creack/pty v1.1.24
 	github.com/siderolabs/talos/pkg/machinery v1.14.7
 	go.yaml.in/yaml/v4 v4.0.0-rc.6
 	golang.org/x/sys v0.49.0

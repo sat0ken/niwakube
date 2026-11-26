@@ -34,6 +34,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 
 body {
   margin: 0;
@@ -127,6 +128,7 @@ dl.kv { display: grid; grid-template-columns: 160px 1fr; gap: 6px 16px; margin: 
 dl.kv dt { color: var(--muted); }
 dl.kv dd { margin: 0; overflow-wrap: anywhere; }
 
+.term-wrap { height: calc(100vh - 250px); min-height: 320px; background: #111613; border-radius: var(--radius); padding: 8px; border: 1px solid var(--border); }
 .empty { color: var(--muted); padding: 24px 0; text-align: center; }
 .error { color: var(--danger); }
 

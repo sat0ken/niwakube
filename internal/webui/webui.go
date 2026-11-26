@@ -33,8 +33,9 @@ func Handler() http.Handler {
 			}
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-cache")
-			// 外部のスクリプトやフレームへの埋め込みを禁止する
-			w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'")
+			// 外部のスクリプトやフレームへの埋め込みを禁止する。
+			// style-src の 'unsafe-inline' はターミナル (xterm.js) が <style> を作るため (スクリプトは 'self' のみ)
+			w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'")
 			w.Header().Set("X-Content-Type-Options", "nosniff")
 			_, _ = w.Write(b)
 		default:

@@ -2,9 +2,11 @@
 package api
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -14,6 +16,7 @@ import (
 	"github.com/sat0ken/niwakube/internal/ipam"
 	"github.com/sat0ken/niwakube/internal/machine"
 	"github.com/sat0ken/niwakube/internal/store"
+	"github.com/sat0ken/niwakube/internal/terminal"
 )
 
 type Server struct {
@@ -31,6 +34,8 @@ type Options struct {
 	LoopbackOnly bool
 	// UI は Web UI のハンドラー。nil なら Web UI は出さない
 	UI http.Handler
+	// Terminal は Web UI のターミナル。nil ならターミナルは使えない (501)
+	Terminal *terminal.Manager
 }
 
 func New(svc *machine.Service, clusters *cluster.Service, log *slog.Logger, opts ...Options) *Server {
@@ -67,6 +72,7 @@ func New(svc *machine.Service, clusters *cluster.Service, log *slog.Logger, opts
 //	POST   /api/clusters/{name}/stop
 //	GET    /api/clusters/{name}/kubeconfig     ?proxy=socks5://localhost:1080 で proxy-url を入れる
 //	GET    /api/kubeconfig?cluster=a&cluster=b  複数のクラスタを 1 つにまとめた kubeconfig (?proxy= も使える)
+//	GET    /api/clusters/{name}/terminal       WebSocket。クラスタの kubeconfig を設定したシェル (Web UI のターミナル)
 //	GET    /api/clusters/{name}/talosconfig  Talos のみ (?proxy= で proxy-url を入れる)
 //	GET    /api/clusters/{name}/forwards     ホストのポートからクラスタへの転送の一覧
 //	POST   /api/clusters/{name}/forwards     {"hostPort":8080,"ip":"172.30.1.100","port":80}
@@ -102,6 +108,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/clusters/{name}/stop", s.stopCluster)
 	mux.HandleFunc("GET /api/clusters/{name}/kubeconfig", s.kubeconfig)
 	mux.HandleFunc("GET /api/kubeconfig", s.mergedKubeconfig)
+	mux.HandleFunc("GET /api/clusters/{name}/terminal", s.terminal)
 	mux.HandleFunc("GET /api/clusters/{name}/talosconfig", s.clientConfig)
 	mux.HandleFunc("GET /api/clusters/{name}/forwards", s.listForwards)
 	mux.HandleFunc("POST /api/clusters/{name}/forwards", s.addForward)
@@ -280,6 +287,28 @@ func (s *Server) kubeconfig(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(b)
 }
 
+// terminal は WebSocket に切り替えて、クラスタの kubeconfig (Talos なら talosconfig も) を設定したシェルとつなぐ。
+func (s *Server) terminal(w http.ResponseWriter, r *http.Request) {
+	if s.opts.Terminal == nil {
+		writeJSON(w, http.StatusNotImplemented, errorBody{Error: "terminal is not enabled"})
+		return
+	}
+	name := r.PathValue("name")
+	kc, err := s.clusters.Kubeconfig(r.Context(), name)
+	if err != nil {
+		s.writeError(w, err)
+		return
+	}
+	f := terminal.Files{Cluster: name, Kubeconfig: kc}
+	if _, tc, err := s.clusters.ClientConfig(r.Context(), name); err == nil {
+		f.Talosconfig = tc
+	} else if !errors.Is(err, backend.ErrNotSupported) {
+		s.writeError(w, err)
+		return
+	}
+	s.opts.Terminal.Serve(w, r, f)
+}
+
 // mergedKubeconfig は ?cluster= (複数指定) のクラスタを 1 つにまとめた kubeconfig を返す。
 func (s *Server) mergedKubeconfig(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
@@ -384,6 +413,18 @@ type statusRecorder struct {
 	http.ResponseWriter
 	code int
 }
+
+// Hijack は WebSocket (ターミナル) のために接続をそのまま渡す。
+func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hj, ok := r.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("hijack is not supported")
+	}
+	r.code = http.StatusSwitchingProtocols
+	return hj.Hijack()
+}
+
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 
 func (r *statusRecorder) WriteHeader(code int) {
 	r.code = code
