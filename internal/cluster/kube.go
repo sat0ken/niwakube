@@ -111,24 +111,39 @@ type kcContext struct {
 
 func b64(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 
-func buildKubeconfig(name, server, serverCA, proxyURL string, admin pki.KeyPair) ([]byte, error) {
+// kubeconfigEntry は kubeconfig の 1 クラスタ分 (cluster / user / context)。
+type kubeconfigEntry struct {
+	cluster kcCluster
+	user    kcUser
+	context kcContext
+}
+
+func newKubeconfigEntry(name, server, serverCA, proxyURL string, admin pki.KeyPair) kubeconfigEntry {
 	user := name + "-admin"
-	var c kcCluster
-	c.Name = name
-	c.Cluster.Server = server
-	c.Cluster.CertificateAuthorityData = b64(serverCA)
-	c.Cluster.ProxyURL = proxyURL
-	var u kcUser
-	u.Name = user
-	u.User.ClientCertificateData = b64(admin.CertPEM)
-	u.User.ClientKeyData = b64(admin.KeyPEM)
-	var ctx kcContext
-	ctx.Name = name
-	ctx.Context.Cluster = name
-	ctx.Context.User = user
-	return yaml.Marshal(kubeconfig{
-		APIVersion: "v1", Kind: "Config",
-		Clusters: []kcCluster{c}, Users: []kcUser{u}, Contexts: []kcContext{ctx},
-		CurrentContext: name,
-	})
+	var e kubeconfigEntry
+	e.cluster.Name = name
+	e.cluster.Cluster.Server = server
+	e.cluster.Cluster.CertificateAuthorityData = b64(serverCA)
+	e.cluster.Cluster.ProxyURL = proxyURL
+	e.user.Name = user
+	e.user.User.ClientCertificateData = b64(admin.CertPEM)
+	e.user.User.ClientKeyData = b64(admin.KeyPEM)
+	e.context.Name = name
+	e.context.Context.Cluster = name
+	e.context.Context.User = user
+	return e
+}
+
+// marshalKubeconfig は複数のクラスタを 1 つの kubeconfig にする。current-context は最初のクラスタ。
+func marshalKubeconfig(entries []kubeconfigEntry) ([]byte, error) {
+	kc := kubeconfig{APIVersion: "v1", Kind: "Config"}
+	for _, e := range entries {
+		kc.Clusters = append(kc.Clusters, e.cluster)
+		kc.Users = append(kc.Users, e.user)
+		kc.Contexts = append(kc.Contexts, e.context)
+	}
+	if len(entries) > 0 {
+		kc.CurrentContext = entries[0].context.Name
+	}
+	return yaml.Marshal(kc)
 }

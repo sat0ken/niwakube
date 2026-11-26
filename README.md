@@ -50,16 +50,16 @@ sudo systemctl enable --now niwakubed
 
 ### Web UI
 
-ブラウザで `http://localhost:8080/` を開くと Web UI が出る。クラスタの作成・削除・起動・停止、kubeconfig のダウンロード、
+niwakubed は `127.0.0.1:8080` で Web UI も配信する。クラスタの作成・削除・起動・停止、kubeconfig のダウンロード、
 ポートの転送、シリアルログの確認、単体 VM の作成ができる。
 
 LAN の PC からは SSH のポート転送で開く (niwakubed は認証が無いので、既定では LAN に公開しない):
 
 ```bash
-ssh -L 8080:localhost:8080 niwa
+ssh -L 18080:localhost:8080 niwa
 ```
 
-そのまま PC のブラウザで `http://localhost:8080/` を開く。
+そのまま PC のブラウザで `http://localhost:18080/` を開く (PC 側のポートは 18080。ほかのアプリの 8080 とぶつからないように)。
 
 KVM の無い PC で UI だけを触るときは、VM を実際には作らない fake バックエンドで起動できる:
 
@@ -216,7 +216,7 @@ Web UI のクラスタの画面の「SSH 経由用の kubeconfig」(API では `
 は、`server` はそのままで `proxy-url: socks5://localhost:1080` を入れた kubeconfig を返す。
 
 ```bash
-ssh -N -D 1080 -L 8080:localhost:8080 niwadmin@192.168.0.50
+ssh -N -D 1080 -L 18080:localhost:8080 niwadmin@192.168.0.50
 ```
 
 ```bash
@@ -224,6 +224,19 @@ kubectl --kubeconfig k3s-1-ssh.kubeconfig get nodes
 ```
 
 クラスタがいくつあっても SSH は 1 本でよい (どのクラスタも同じ SOCKS プロキシで届く)。
+ダッシュボードでクラスタを選んで「選んだクラスタの kubeconfig (SSH 経由用)」を押すと、選んだクラスタを
+1 つの kubeconfig にまとめてダウンロードできる (API では `GET /api/kubeconfig?cluster=a&cluster=b&proxy=socks5://localhost:1080`)。
+クラスタごとに context が入るので、`kubectl config use-context <名前>` で切り替える。
+
+PC の `~/.ssh/config` に書いておくと `ssh -N niwak8s` だけでつながる:
+
+```
+Host niwak8s
+    HostName 192.168.0.50
+    User niwadmin
+    DynamicForward 1080
+    LocalForward 18080 localhost:8080
+```
 
 ### LoadBalancer と LAN からの接続
 

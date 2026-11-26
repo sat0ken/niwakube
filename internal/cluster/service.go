@@ -604,6 +604,12 @@ func ValidateProxyURL(raw string) error {
 
 // Kubeconfig は admin の kubeconfig を発行する。
 func (s *Service) Kubeconfig(ctx context.Context, name string, opts ...KubeconfigOptions) ([]byte, error) {
+	return s.KubeconfigFor(ctx, []string{name}, opts...)
+}
+
+// KubeconfigFor は複数のクラスタの admin の kubeconfig を 1 つにまとめて発行する
+// (クラスタごとに cluster / user / context が入り、current-context は最初のクラスタ)。
+func (s *Service) KubeconfigFor(ctx context.Context, names []string, opts ...KubeconfigOptions) ([]byte, error) {
 	var o KubeconfigOptions
 	if len(opts) > 0 {
 		o = opts[0]
@@ -613,21 +619,41 @@ func (s *Service) Kubeconfig(ctx context.Context, name string, opts ...Kubeconfi
 			return nil, err
 		}
 	}
+	if len(names) == 0 {
+		return nil, invalid("no cluster selected")
+	}
+	seen := map[string]bool{}
+	var entries []kubeconfigEntry
+	for _, name := range names {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		e, err := s.kubeconfigEntry(ctx, name, o.ProxyURL)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, e)
+	}
+	return marshalKubeconfig(entries)
+}
+
+func (s *Service) kubeconfigEntry(ctx context.Context, name, proxyURL string) (kubeconfigEntry, error) {
 	rec, err := s.store.GetCluster(ctx, name)
 	if err != nil {
-		return nil, err
+		return kubeconfigEntry{}, err
 	}
 	sec, d, err := s.secrets(rec)
 	if err != nil {
-		return nil, err
+		return kubeconfigEntry{}, err
 	}
 	serverName, clientName := d.AdminCAs()
 	clientCA := sec.CAs[clientName]
 	admin, err := clientCA.SignClient("niwakube-admin", []string{"system:masters"}, 365*24*time.Hour)
 	if err != nil {
-		return nil, err
+		return kubeconfigEntry{}, err
 	}
-	return buildKubeconfig(rec.Name, s.endpoint(rec), sec.CAs[serverName].CertPEM, o.ProxyURL, admin)
+	return newKubeconfigEntry(rec.Name, s.endpoint(rec), sec.CAs[serverName].CertPEM, proxyURL, admin), nil
 }
 
 // Delete はクラスタのノードをすべて削除し、登録を消す。

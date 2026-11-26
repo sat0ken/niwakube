@@ -141,6 +141,16 @@ func TestClusterAPI(t *testing.T) {
 		!strings.Contains(resp.Header.Get("Content-Disposition"), `filename="demo-ssh.kubeconfig"`) {
 		t.Errorf("kubeconfig via SSH: %d %v %s", resp.StatusCode, resp.Header, body)
 	}
+	resp, body = do(t, http.MethodGet, ts.URL+"/api/kubeconfig?cluster=demo&proxy=socks5%3A%2F%2Flocalhost%3A1080", "")
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "current-context: demo") ||
+		!strings.Contains(resp.Header.Get("Content-Disposition"), `filename="niwakube-ssh.kubeconfig"`) {
+		t.Errorf("merged kubeconfig: %d %v %s", resp.StatusCode, resp.Header, body)
+	}
+	for path, want := range map[string]int{"/api/kubeconfig": http.StatusBadRequest, "/api/kubeconfig?cluster=demo&cluster=nope": http.StatusNotFound} {
+		if resp, body := do(t, http.MethodGet, ts.URL+path, ""); resp.StatusCode != want {
+			t.Errorf("%s: %d %s", path, resp.StatusCode, body)
+		}
+	}
 
 	cases := []struct {
 		method, path, body string
