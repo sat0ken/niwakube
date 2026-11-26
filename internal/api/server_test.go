@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sat0ken/niwakube/internal/backend/fake"
 	"github.com/sat0ken/niwakube/internal/cluster"
@@ -229,5 +230,38 @@ func TestResizeAPI(t *testing.T) {
 	}
 	if resp, body := do(t, http.MethodPost, ts.URL+"/api/clusters/demo/resize", `{"role":"etcd"}`); resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("bad role: %d %s", resp.StatusCode, body)
+	}
+}
+
+func TestScaleAPI(t *testing.T) {
+	ts := newTestServer(t)
+	if resp, body := do(t, http.MethodPost, ts.URL+"/api/clusters", `{"name":"demo","workers":0}`); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create cluster: %d %s", resp.StatusCode, body)
+	}
+	resp, body := do(t, http.MethodPost, ts.URL+"/api/clusters/demo/scale", `{"workers":1}`)
+	if resp.StatusCode != http.StatusAccepted || !strings.Contains(body, `"operation":"adding`) {
+		t.Errorf("scale: %d %s", resp.StatusCode, body)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, body := do(t, http.MethodGet, ts.URL+"/api/clusters/demo", "")
+		if strings.Contains(body, `"workers":1`) && !strings.Contains(body, `"operation"`) {
+			if !strings.Contains(body, `"name":"demo-worker-1"`) {
+				t.Errorf("worker not created: %s", body)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("scale did not finish: %s", body)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	for req, want := range map[string]int{`{}`: http.StatusBadRequest, `{"workers":-1}`: http.StatusBadRequest, `{"workers":51}`: http.StatusBadRequest} {
+		if resp, body := do(t, http.MethodPost, ts.URL+"/api/clusters/demo/scale", req); resp.StatusCode != want {
+			t.Errorf("%s: %d %s", req, resp.StatusCode, body)
+		}
+	}
+	if resp, _ := do(t, http.MethodPost, ts.URL+"/api/clusters/nope/scale", `{"workers":1}`); resp.StatusCode != http.StatusNotFound {
+		t.Errorf("unknown cluster: %d", resp.StatusCode)
 	}
 }

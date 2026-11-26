@@ -16,11 +16,12 @@ import (
 // ErrBusy はクラスタで別の操作 (ノードの大きさの変更など) が進んでいるときのエラー。
 var ErrBusy = errors.New("another operation is in progress on this cluster")
 
-// NodeOps はノードを順番に再起動するときの Kubernetes の操作 (テストで差し替える)。
+// NodeOps はノードの大きさや台数を変えるときの Kubernetes の操作 (テストで差し替える)。
 type NodeOps interface {
 	Cordon(ctx context.Context, kubeconfig []byte, node string, unschedulable bool) error
 	Drain(ctx context.Context, kubeconfig []byte, node string) error
 	ReadySince(ctx context.Context, kubeconfig []byte, node string, since time.Time) (bool, error)
+	DeleteNode(ctx context.Context, kubeconfig []byte, node string) error
 }
 
 // kubeNodeOps は kube.Nodes を使う NodeOps。
@@ -48,6 +49,14 @@ func (kubeNodeOps) ReadySince(ctx context.Context, kc []byte, node string, since
 		return false, err
 	}
 	return n.ReadySince(ctx, node, since)
+}
+
+func (kubeNodeOps) DeleteNode(ctx context.Context, kc []byte, node string) error {
+	n, err := kube.NewNodes(kc)
+	if err != nil {
+		return err
+	}
+	return n.DeleteNode(ctx, node)
 }
 
 // ResizeRequest はクラスタのノードの大きさの変更。Size の 0 の項目は変えない。ディスクは広げるだけ。
