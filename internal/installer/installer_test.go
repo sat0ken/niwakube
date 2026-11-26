@@ -3,6 +3,7 @@ package installer
 import (
 	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -398,5 +399,40 @@ func TestNetworkIPv6Off(t *testing.T) {
 	ud, _ = c.UserData()
 	if strings.Contains(string(ud), "accept-ra") {
 		t.Errorf("accept-ra must not be set by default:\n%s", ud)
+	}
+}
+
+func TestEmbedGitHubKeys(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/sat0ken.keys":
+			_, _ = io.WriteString(w, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA one\nssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ two\n")
+		case "/nokeys.keys":
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+	old := githubKeysURL
+	githubKeysURL = ts.URL + "/%s.keys"
+	defer func() { githubKeysURL = old }()
+
+	c := parse(t, "hostname: h\nuser: {name: u, github_keys: sat0ken}\n")
+	n, err := c.EmbedGitHubKeys(context.Background(), ts.Client())
+	if err != nil || n != 2 {
+		t.Fatalf("embed: %d %v", n, err)
+	}
+	ud, err := c.UserData()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(ud), "ssh_import_id") || !strings.Contains(string(ud), "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA one") {
+		t.Errorf("keys must be embedded instead of ssh_import_id:\n%s", ud)
+	}
+	for _, user := range []string{"nokeys", "missing"} {
+		c := parse(t, "hostname: h\nuser: {name: u, github_keys: "+user+"}\n")
+		if _, err := c.EmbedGitHubKeys(context.Background(), ts.Client()); err == nil {
+			t.Errorf("%s: expected error", user)
+		}
 	}
 }

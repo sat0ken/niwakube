@@ -188,3 +188,53 @@ func unattendedTitle(d DiskMatch) string {
 	}
 	return fmt.Sprintf("niwakube: UNATTENDED install - ERASES THE DISK WITH %s WITHOUT ASKING", strings.ToUpper(d.String()))
 }
+
+// githubKeysURL は GitHub の公開鍵の URL (テストで差し替える)。
+var githubKeysURL = "https://github.com/%s.keys"
+
+// FetchGitHubKeys は GitHub のユーザーの公開鍵を取得する。
+// ISO を作るときに取得して埋め込む (インストール後の初回起動でネットワークに頼らずにログインできるようにするため)。
+func FetchGitHubKeys(ctx context.Context, client *http.Client, user string) ([]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf(githubKeysURL, user), nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GitHub keys of %s: %s", user, resp.Status)
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
+	var keys []string
+	for _, l := range strings.Split(string(b), "\n") {
+		l = strings.TrimSpace(l)
+		if strings.HasPrefix(l, "ssh-") || strings.HasPrefix(l, "ecdsa-") || strings.HasPrefix(l, "sk-") {
+			keys = append(keys, l)
+		}
+	}
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("GitHub user %s has no SSH keys", user)
+	}
+	return keys, nil
+}
+
+// EmbedGitHubKeys は user.github_keys の公開鍵を取得して user.ssh_authorized_keys に足し、
+// 初回起動時の ssh-import-id をやめる。取得した鍵の数を返す。
+func (c *Config) EmbedGitHubKeys(ctx context.Context, client *http.Client) (int, error) {
+	if c.User.GitHubKeys == "" {
+		return 0, nil
+	}
+	keys, err := FetchGitHubKeys(ctx, client, c.User.GitHubKeys)
+	if err != nil {
+		return 0, err
+	}
+	c.User.SSHAuthorizedKeys = append(c.User.SSHAuthorizedKeys, keys...)
+	c.User.GitHubKeys = ""
+	return len(keys), nil
+}

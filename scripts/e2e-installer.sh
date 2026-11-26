@@ -170,6 +170,8 @@ check "SSH のパスワード認証は無効" "passwordauthentication no" "$(ssh
 check "/var/lib/niwakube は XFS" "xfs" "$(ssh_vm 'findmnt -n -o FSTYPE /var/lib/niwakube')"
 check "ルートは LVM 上の ext4" "ext4" "$(ssh_vm 'findmnt -n -o FSTYPE /')"
 check "UEFI で起動している" "yes" "$(ssh_vm '[ -d /sys/firmware/efi ] && echo yes || echo no')"
+# ISO を作るときに埋め込んだ GitHub の鍵 (テスト用の鍵に加えて 1 つ以上)
+check "GitHub の SSH 鍵が入っている" "yes" "$(ssh_vm '[ "$(grep -c . ~/.ssh/authorized_keys)" -ge 2 ] && echo yes || echo no')"
 # 小さい SATA のディスク (sda) や USB ではなく、60G の NVMe に入っていること
 check "インストール先は NVMe" "nvme" "$(ssh_vm "sudo pvs --noheadings -o pv_name | tr -d ' ' | sed -E 's#^/dev/(nvme|sd).*#\\1#'")"
 if [[ $SETUP == true ]]; then

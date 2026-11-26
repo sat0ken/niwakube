@@ -115,6 +115,15 @@ func run(args []string) error {
 			return err
 		}
 		fmt.Print(c.Summary())
+		if gh := c.User.GitHubKeys; gh != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			n, err := c.EmbedGitHubKeys(ctx, http.DefaultClient)
+			cancel()
+			if err != nil {
+				return fmt.Errorf("user.github_keys: %w", err)
+			}
+			fmt.Printf("ssh keys: embedded %d key(s) from github.com/%s.keys\n", n, gh)
+		}
 		iso = withMirror(c, iso)
 		if err := c.Build(context.Background(), sys.ExecRunner{}, installer.BuildOptions{MiniISO: *mini, Server: iso, Output: *out}); err != nil {
 			return err

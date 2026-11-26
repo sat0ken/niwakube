@@ -60,7 +60,7 @@ niwakube:
 | `timezone` / `keyboard` / `locale` | `Etc/UTC` / `us` / `en_US.UTF-8` | |
 | `ubuntu.release` | `26.04` | Ubuntu のリリース。インストール時はその最新のポイントリリースを使う |
 | `user.name` | (必須) | ログインするユーザー。sudo はパスワードなしで使える |
-| `user.github_keys` / `user.ssh_authorized_keys` | どちらか必須 | **ログインは SSH 鍵のみ。パスワードはロックする** |
+| `user.github_keys` / `user.ssh_authorized_keys` | どちらか必須 | **ログインは SSH 鍵のみ。パスワードはロックする**。`github_keys` の鍵 (`https://github.com/<名前>.keys`) は ISO を作るときに取得して埋め込む。GitHub の鍵を変えたら ISO を作り直す |
 | `network` | DHCP | 固定 IP にする場合に書く (`address` / `gateway` / `dns`)。`dns` はルーターが DNS に答えるか確かめてから書く (`dig @<ルーター> ubuntu.com`)。答えなければ `1.1.1.1` などを書く |
 | `network.ipv6` | `true` | `false` にするとルーターが配る IPv6 (RA のアドレスと DNS サーバー) を受け取らない。IPv6 の経路が通らない回線で、名前解決や接続が止まるのを防ぐ |
 | `storage.disk` | `largest` | インストール先。`largest` / `internal` / `{model: ...}` / `{serial: ...}` (下記) |
