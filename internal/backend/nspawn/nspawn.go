@@ -126,11 +126,12 @@ var volumes = map[string]map[string]string{
 		"containerd": "/var/lib/containerd", // kubeadm の containerd
 		"kubelet":    "/var/lib/kubelet",
 	},
-	// Talos が Docker で動くときと同じ (EPHEMERAL、STATE、/opt の overlay)
+	// Talos が Docker で動くときの EPHEMERAL と STATE。/opt はボリュームにしない:
+	// イメージの /opt/cni/bin に CNI プラグイン (flannel など) があり、空のディレクトリを重ねると隠れてしまう
+	// (Docker のボリュームと違って中身はコピーされない)。overlay の upper に書けるので、ノードごとに残る
 	kindTalos: {
 		"var":   "/var",
 		"state": "/system/state",
-		"opt":   "/opt",
 	},
 }
 

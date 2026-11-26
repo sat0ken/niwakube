@@ -251,7 +251,7 @@ func TestTalos(t *testing.T) {
 			t.Errorf("%s = %q, want %q", f, b, want)
 		}
 	}
-	for _, v := range []string{"var", "state", "opt"} {
+	for _, v := range []string{"var", "state"} {
 		if _, err := os.Stat(filepath.Join(dir, "volumes", v)); err != nil {
 			t.Errorf("volume %s: %v", v, err)
 		}
@@ -273,6 +273,9 @@ func TestTalos(t *testing.T) {
 		if !strings.Contains(args, want) {
 			t.Errorf("talos args do not contain %q:\n%s", want, args)
 		}
+	}
+	if strings.Contains(args, ":/opt") {
+		t.Errorf("/opt must come from the image (CNI plugins), not a volume:\n%s", args)
 	}
 	if strings.Contains(args, "--boot") || !strings.HasSuffix(args, " /sbin/init") || strings.Contains(args, "USERDATA=") {
 		t.Errorf("talos must run /sbin/init without --boot, and the config must not be on the command line:\n%s", args)
