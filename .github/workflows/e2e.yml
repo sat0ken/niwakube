@@ -68,3 +68,36 @@ jobs:
         with:
           name: e2e-logs-${{ matrix.distro }}-${{ matrix.cni }}-${{ matrix.runtime }}
           path: e2e-logs/
+
+  # systemd-nspawn のバックエンド (コンテナ型のノード。Docker も KVM も使わない)
+  nspawn:
+    name: nspawn (${{ matrix.target }})
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [machine, k3s, kubeadm]
+    env:
+      BACKEND: nspawn
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Host setup (nspawn)
+        run: ./scripts/ci-host-setup.sh
+      - name: niwakubed E2E (machine)
+        if: matrix.target == 'machine'
+        run: make e2e BACKEND=nspawn
+      - name: niwakubed E2E (cluster)
+        if: matrix.target != 'machine'
+        run: make e2e-cluster BACKEND=nspawn DISTRO=${{ matrix.target }} CNI=flannel RUNTIME=runc RUNTIMES=""
+      - name: Collect logs
+        if: failure()
+        run: ./scripts/ci-collect-logs.sh
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: e2e-logs-nspawn-${{ matrix.target }}
+          path: e2e-logs/

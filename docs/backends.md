@@ -73,6 +73,35 @@ kind / k3d / Talos の docker provisioner が実際にこの形で k8s ノード
   システムコールフィルタの緩和。cgroup v2 との相性は良い (systemd 同士なので)
 - 評価: k3s ○ / kubeadm ○ / Talos ✕。追加で入れるものがほぼ無く (`systemd-container` パッケージのみ)、仕組みを学ぶにはとても良い
 
+#### 実装 (`internal/backend/nspawn`)
+
+Docker のような管理の層 (イメージ・ネットワーク・ボリューム) は無いので、niwakube に要る分だけを自分で用意する
+([nspawn/nspawn](https://github.com/nspawn/nspawn) の作りを参考にした)。
+
+- **起動**: `systemd-run --unit=niwakube-vm-<name>` で `systemd-nspawn --keep-unit --boot` を動かす (Cloud Hypervisor と同じく
+  transient unit。machined にも登録されるので `machinectl list` / `machinectl shell` も使える)
+- **ルート**: Ubuntu のクラウドイメージのルートファイルシステム (`*-root.tar.xz`、`images/<image>.rootfs`) を下の層にして、
+  ノードごとの upper / work を overlayfs で重ねる (`vms/<name>/rootfs`)。下の層はノード間で共有する
+- **ネットワーク**: ホストでノードごとのネットワーク名前空間 (`/run/netns/niwakube-<name>`) と veth を作り、ホスト側を nkbr0 に、
+  中を `eth0` にして IPAM どおりの MAC・アドレス・デフォルトルートを付けてから `--network-namespace-path` で入る
+  (自分でアドレスを付けないゲストでも使える。nspawn/nspawn のアプリ型のマシンと同じやり方)
+- **cloud-init**: シードのディレクトリを `/var/lib/cloud/seed/nocloud` に読み取り専用でバインドし、`datasource_list: [NoCloud]`
+  を upper に置く。VM と同じ user-data がそのまま使える。ネットワークはホストで設定済みなので cloud-init には設定させず
+  (`network: {config: disabled}`。cloud-init は veth を物理のインターフェースとして扱わないので、MAC で合わせる設定は失敗する)、
+  `systemd-networkd-wait-online` は無効にし、DNS は network-config の DNS サーバーを `/etc/resolv.conf` に書く
+- **ボリューム**: `/var/lib/rancher`、`/var/lib/containerd`、`/var/lib/kubelet` はホストのディレクトリ (`vms/<name>/volumes/`)。
+  containerd の overlayfs スナップショッターは overlayfs の上に置けないため (kind も同じ理由で分けている)
+- **特権**: `--capability=all`、`SYSTEMD_SECCOMP=0` (システムコールのフィルタなし)、`SYSTEMD_NSPAWN_API_VFS_WRITABLE=yes`
+  (`/proc/sys` などを書き込み可)、`/dev/kmsg` と `/lib/modules` (読み取り専用) のバインド、unit の `Delegate=yes` (cgroup の委譲)
+- **大きさ**: vCPU は `CPUQuota`、メモリは `MemoryMax`。ディスクはホストと共有なので決められない
+- **ディストリの調整** (`distro.Cluster.Container`): kube-proxy に conntrack の上限 (ホスト全体の設定) を変えさせない、
+  kubelet のディスク不足による追い出しを止める、kubeadm の事前チェックを無視する
+- **ホストの準備** (`BACKEND=nspawn ./scripts/host-setup.sh`): `systemd-container`、カーネルモジュール (overlay / br_netfilter /
+  vxlan / nf_conntrack / iptables)、sysctl (ip_forward、bridge-nf-call、inotify の上限) をホストで設定する
+
+コンテナ型の共通の制約: ホストのカーネルを共有するので **CNI は flannel のみ** (既定の CNI も flannel になる)、
+kubelet にはホスト全体の CPU・メモリが見える (上限はスケジューラーに伝わらない)。
+
 ## 3. 対応可否マトリクス
 
 | バックエンド | 分離 | kubeadm | k3s | Talos | 主な追加作業 |

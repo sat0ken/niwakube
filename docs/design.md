@@ -138,8 +138,9 @@ GET    /api/host                     CPU / メモリ / ディスクの使用状�
    - 2d: LoadBalancer (Cilium LB IPAM + L2 アナウンス、ホストでの DNAT) (完了)
    - 2e: PV (local-path + ホストの NFS) (完了)
    - その後 CP の HA (VIP)、ワーカー数の変更
-3. Web UI (v0.1.0 に入れる) ← いまここ
-4. systemd-nspawn バックエンド (Backend インターフェースが正しく切れているかの検証を兼ねる)
+3. Web UI (v0.1.0) (完了)。ターミナル、ノードのサイズの変更 (完了)
+4. systemd-nspawn バックエンド (Backend インターフェースが正しく切れているかの検証を兼ねる) ← いまここ。k3s / kubeadm (flannel)。
+   Talos (コンテナの Talos を nspawn で動かす) は次の段階
 5. 発展: Firecracker / libkrun バックエンド、対話できるシリアルコンソール、スケール、事前ビルドしたイメージ、スナップショット
 
 ## 未検証 (実機で確認すること)

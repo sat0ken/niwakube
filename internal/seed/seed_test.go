@@ -89,3 +89,17 @@ func TestBuildISO(t *testing.T) {
 		t.Errorf("calls = %v", calls)
 	}
 }
+
+func TestNameservers(t *testing.T) {
+	nc, err := NetworkConfig(Network{MAC: "52:54:00:12:34:56", Address: netip.MustParsePrefix("172.30.0.10/16"),
+		Gateway: netip.MustParseAddr("172.30.0.1"), DNS: []netip.Addr{netip.MustParseAddr("1.1.1.1"), netip.MustParseAddr("8.8.8.8")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ns, err := Nameservers(nc); err != nil || strings.Join(ns, ",") != "1.1.1.1,8.8.8.8" {
+		t.Errorf("Nameservers = %v, %v", ns, err)
+	}
+	if _, err := Nameservers([]byte("{")); err == nil {
+		t.Error("invalid YAML must fail")
+	}
+}

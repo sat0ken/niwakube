@@ -35,6 +35,9 @@ type Cluster struct {
 	APIAddr netip.Addr // API サーバーのアドレス (いまは CP 1 台目。HA にしたら VIP)
 	Secrets *Secrets
 	Addons  Addons // CNI とコンテナランタイム
+	// Container はノードがコンテナ (systemd-nspawn など) で動くとき true。ホストのカーネルを共有するので、
+	// kube-proxy に conntrack の上限 (ホスト全体の設定) を変えさせない、事前チェックを緩めるなどの調整をする
+	Container bool
 }
 
 // Node は Distro が設定を作る対象のノード。

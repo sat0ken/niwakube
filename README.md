@@ -210,6 +210,26 @@ kubectl --kubeconfig demo.kubeconfig -n kube-system port-forward svc/hubble-ui 1
 `cni` (`cilium` / `flannel`)、`hubble` (Cilium なら `true`)、`runtime.default` (`runc` / `crun` / `youki`)、
 `runtime.install` (追加で入れるランタイム。既定にしたものは自動で入る)。
 
+### systemd-nspawn のバックエンド (VM ではなくコンテナでノードを作る)
+
+Intel VT-x / AMD-V の無い PC などでは、ノードを VM ではなく systemd-nspawn のコンテナで作れる。Docker は使わない。
+ホスト 1 台につきバックエンドは 1 つ (VM とコンテナは混ぜない)。
+
+```bash
+sudo BACKEND=nspawn ./scripts/host-setup.sh
+```
+
+```bash
+sudo systemctl restart niwakubed
+```
+
+host-setup.sh が `/etc/default/niwakubed` に `NIWAKUBED_OPTS="--backend=nspawn"` を書く。使い方 (API・Web UI) は VM と同じ。
+
+- 使えるディストリは k3s と kubeadm。CNI は flannel のみ (既定でそうなる)。Talos はまだ使えない
+- vCPU とメモリは systemd の上限 (`CPUQuota` / `MemoryMax`)。kubelet にはホスト全体の CPU・メモリが見える。ディスクはホストと共有
+- ノードは `machinectl list` で見える。`machinectl shell <ノード>` で中に入れる
+- 仕組みは [docs/backends.md](docs/backends.md#実装-internalbackendnspawn)
+
 ### ノードのサイズを変える
 
 クラスタの画面の「ノードのサイズを変える」(API では `POST /api/clusters/{name}/resize`) で、
