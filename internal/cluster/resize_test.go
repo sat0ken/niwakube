@@ -57,6 +57,11 @@ func (f *fakeNodeOps) ReadySince(_ context.Context, _ []byte, node string, since
 	return !since.IsZero(), nil
 }
 
+func (f *fakeNodeOps) DeleteNode(_ context.Context, _ []byte, node string) error {
+	f.record("delete " + node)
+	return nil
+}
+
 func waitOperation(t *testing.T, cs *Service, name string) string {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)

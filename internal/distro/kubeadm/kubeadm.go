@@ -289,6 +289,17 @@ const installScript = `#!/bin/bash
 set -euxo pipefail
 export DEBIAN_FRONTEND=noninteractive
 VERSION="{{.Version}}"
+# ネットワークの一時的な失敗 (ミラーに届かないなど) で止まらないよう、取得は何度か試す
+retry() {
+  local i
+  for i in 1 2 3 4 5; do
+    "$@" && return 0
+    echo "niwakube: retry $i/5: $*" >&2
+    sleep $((i * 10))
+  done
+  return 1
+}
+APT="apt-get -q -o Acquire::Retries=3"
 
 cat >/etc/modules-load.d/k8s.conf <<EOF
 overlay
@@ -305,8 +316,8 @@ sysctl --system >/dev/null{{if .Container}} || true # コンテナの中では�
 {{if .Container}}# コンテナの中にはホストのスワップが見えるが止められない (kubelet は failSwapOn: false)
 swapoff -a || true{{else}}swapoff -a{{end}}
 
-apt-get update -q
-apt-get install -y -q containerd apt-transport-https ca-certificates curl gpg
+retry $APT update
+retry $APT install -y containerd apt-transport-https ca-certificates curl gpg
 mkdir -p /etc/containerd
 containerd config default >/etc/containerd/config.toml
 sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
@@ -315,16 +326,17 @@ systemctl enable containerd
 
 # バージョン: stable → dl.k8s.io の stable、v1.X → その minor の最新、v1.X.Y → 固定
 case "$VERSION" in
-  ""|stable) FULL=$(curl -fsSL https://dl.k8s.io/release/stable.txt); MINOR=${FULL%.*}; PIN="" ;;
+  ""|stable) FULL=$(retry curl -fsSL https://dl.k8s.io/release/stable.txt); MINOR=${FULL%.*}; PIN="" ;;
   v*.*.*)    MINOR=${VERSION%.*}; PIN="=${VERSION#v}-*" ;;
   *)         MINOR=$VERSION; PIN="" ;;
 esac
 
 mkdir -p /etc/apt/keyrings
-curl -fsSL "https://pkgs.k8s.io/core:/stable:/${MINOR}/deb/Release.key" | gpg --batch --yes --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+retry curl -fsSL -o /tmp/kubernetes-apt-keyring.asc "https://pkgs.k8s.io/core:/stable:/${MINOR}/deb/Release.key"
+gpg --batch --yes --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg /tmp/kubernetes-apt-keyring.asc
 echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/${MINOR}/deb/ /" >/etc/apt/sources.list.d/kubernetes.list
-apt-get update -q
-apt-get install -y -q "kubelet${PIN}" "kubeadm${PIN}" "kubectl${PIN}"
+retry $APT update
+retry $APT install -y "kubelet${PIN}" "kubeadm${PIN}" "kubectl${PIN}"
 apt-mark hold kubelet kubeadm kubectl
 systemctl enable kubelet
 `

@@ -427,37 +427,46 @@ func (s *Service) createNodes(ctx context.Context, d distro.Distro, rec *store.C
 		Addons:    addonsOf(cniOf(rec), rec.Spec.Hubble, rec.Spec.Runtime),
 		Container: caps.Isolation == backend.IsolationContainer,
 	}
-	type node struct {
-		n    distro.Node
-		size store.NodeSize
-	}
-	var nodes []node
 	for i := 1; i <= rec.Spec.ControlPlanes; i++ {
-		nodes = append(nodes, node{distro.Node{Name: cpName(rec.Name, i), Role: distro.RoleControlPlane, Index: i, IP: s.hostIP(rec.Index, cpHostBase+i)}, rec.Spec.ControlPlane})
-	}
-	for i := 1; i <= rec.Spec.Workers; i++ {
-		nodes = append(nodes, node{distro.Node{Name: workerName(rec.Name, i), Role: distro.RoleWorker, Index: i, IP: s.hostIP(rec.Index, wHostBase+i)}, rec.Spec.Worker})
-	}
-	for _, nd := range nodes {
-		req := machine.CreateRequest{
-			Name: nd.n.Name, Backend: rec.Spec.Backend, Image: rec.Spec.Image,
-			CPUs: nd.size.CPUs, MemoryMiB: nd.size.MemoryMiB, DiskGiB: nd.size.DiskGiB,
-			SSHAuthorizedKeys: rec.Spec.SSHKeys,
-			IP:                nd.n.IP, Cluster: rec.Name, Role: string(nd.n.Role),
-		}
-		var err error
-		if rp, ok := d.(distro.RawUserDataProvider); ok {
-			req.RawUserData, err = rp.RawUserData(dc, &nd.n)
-		} else {
-			req.UserData, err = d.UserData(dc, &nd.n)
-		}
-		if err != nil {
+		if err := s.createNode(ctx, d, dc, rec, s.cpNode(rec, i), rec.Spec.ControlPlane); err != nil {
 			return err
 		}
-		_, err = s.machines.Create(ctx, req)
-		if err != nil {
-			return fmt.Errorf("create node %s: %w", nd.n.Name, err)
+	}
+	for i := 1; i <= rec.Spec.Workers; i++ {
+		if err := s.createNode(ctx, d, dc, rec, s.workerNode(rec, i), rec.Spec.Worker); err != nil {
+			return err
 		}
+	}
+	return nil
+}
+
+func (s *Service) cpNode(rec *store.Cluster, i int) distro.Node {
+	return distro.Node{Name: cpName(rec.Name, i), Role: distro.RoleControlPlane, Index: i, IP: s.hostIP(rec.Index, cpHostBase+i)}
+}
+
+func (s *Service) workerNode(rec *store.Cluster, i int) distro.Node {
+	return distro.Node{Name: workerName(rec.Name, i), Role: distro.RoleWorker, Index: i, IP: s.hostIP(rec.Index, wHostBase+i)}
+}
+
+// createNode はノードのマシンを作って起動する (user-data はディストリが作る)。
+func (s *Service) createNode(ctx context.Context, d distro.Distro, dc *distro.Cluster, rec *store.Cluster, n distro.Node, size store.NodeSize) error {
+	req := machine.CreateRequest{
+		Name: n.Name, Backend: rec.Spec.Backend, Image: rec.Spec.Image,
+		CPUs: size.CPUs, MemoryMiB: size.MemoryMiB, DiskGiB: size.DiskGiB,
+		SSHAuthorizedKeys: rec.Spec.SSHKeys,
+		IP:                n.IP, Cluster: rec.Name, Role: string(n.Role),
+	}
+	var err error
+	if rp, ok := d.(distro.RawUserDataProvider); ok {
+		req.RawUserData, err = rp.RawUserData(dc, &n)
+	} else {
+		req.UserData, err = d.UserData(dc, &n)
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := s.machines.Create(ctx, req); err != nil {
+		return fmt.Errorf("create node %s: %w", n.Name, err)
 	}
 	return nil
 }

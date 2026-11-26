@@ -405,6 +405,62 @@ fi
 [[ -z $unsched || $unsched == false ]] || die "ノードが cordon されたままです"
 [[ $(curl -fs "$API/clusters/$NAME" | jq -r '.worker.memoryMiB') == 4096 ]] || die "クラスタの設定 (worker の大きさ) が更新されていません"
 
+# --- ワーカーの台数の変更 (1 → 2 → 1) ---
+# wait_op <説明>: クラスタの operation が空になるまで待つ
+wait_op() {
+  local what=$1 start=$SECONDS op
+  while :; do
+    op=$(curl -fs "$API/clusters/$NAME" | jq -r '.operation // ""')
+    [[ -z $op ]] && break
+    [[ $op == failed:* ]] && die "$what に失敗しました: $op"
+    (( SECONDS - start < 900 )) || die "900s 待っても $what が終わりません: $op"
+    sleep 5
+  done
+  log "$what が終わりました ($((SECONDS - start))s)"
+}
+scale() {
+  local code
+  code=$(curl -s -o "$LOG_DIR/scale.json" -w '%{http_code}' -X POST "$API/clusters/$NAME/scale" -d "{\"workers\":$1}")
+  [[ $code == 202 ]] || die "台数の変更を受け付けません: $code $(cat "$LOG_DIR/scale.json")"
+}
+log "ワーカーを 2 台に増やす"
+scale 2
+wait_op "ワーカーの追加"
+# kubectl wait は Node がまだ無いとすぐに失敗するので、先に登録 (kubelet の参加) を待つ
+start=$SECONDS
+until k get node "$NAME-worker-2" >/dev/null 2>&1; do
+  if (( SECONDS - start > 900 )); then
+    k get nodes -o wide || true
+    die "900s 待っても追加したワーカーが参加しません"
+  fi
+  sleep 5
+done
+log "追加したワーカーが参加しました ($((SECONDS - start))s)"
+if ! k wait --for=condition=Ready "node/$NAME-worker-2" --timeout=600s; then
+  k get nodes -o wide || true
+  die "追加したワーカーが Ready になりません"
+fi
+k get nodes -o wide
+[[ $(k get nodes --no-headers | wc -l) == 3 ]] || die "ノードが 3 台になっていません"
+[[ $(curl -fs "$API/clusters/$NAME" | jq -r '.workers') == 2 ]] || die "クラスタの設定 (workers) が 2 になっていません"
+# 追加したワーカーで Pod が動くこと (CNI が使えること)
+k run on-new-worker --image="$TEST_IMAGE" --restart=Never \
+  --overrides="{\"spec\":{\"nodeName\":\"$NAME-worker-2\"}}" --command -- /agnhost pause
+if ! k wait --for=condition=Ready pod/on-new-worker --timeout=300s; then
+  k describe pod/on-new-worker | tail -n 20 || true
+  die "追加したワーカーで Pod が動きません"
+fi
+k delete pod/on-new-worker --wait=false >/dev/null
+
+log "ワーカーを 1 台に減らす (番号の大きい $NAME-worker-2 を drain して消す)"
+scale 1
+wait_op "ワーカーの削除"
+k get nodes -o wide
+k get node "$NAME-worker-2" >/dev/null 2>&1 && die "消したワーカーの Node が残っています"
+[[ ! -e $NIWAKUBE_DIR/vms/$NAME-worker-2 ]] || die "消したワーカーのディレクトリが残っています"
+k get node "$NAME-worker-1" >/dev/null || die "$NAME-worker-1 が消えています"
+k rollout status deployment/hello --timeout=300s || die "ワーカーを減らしたあと Deployment が戻りません"
+
 log "クラスタを削除"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$API/clusters/$NAME")
 [[ $code == 204 ]] || die "削除に失敗しました: HTTP $code"
