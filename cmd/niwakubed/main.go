@@ -29,6 +29,7 @@ import (
 	"github.com/sat0ken/niwakube/internal/netx"
 	"github.com/sat0ken/niwakube/internal/store"
 	"github.com/sat0ken/niwakube/internal/sys"
+	"github.com/sat0ken/niwakube/internal/terminal"
 	"github.com/sat0ken/niwakube/internal/webui"
 )
 
@@ -140,6 +141,18 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Web UI のターミナル。シェルは systemd-run の一時ユーザーとサンドボックスで動かし、
+	// VM のディスクや秘密鍵のあるデータディレクトリと API socket のディレクトリは見せない
+	term := terminal.New(terminal.Config{
+		Dir:     filepath.Join(*runDir, "term"),
+		Sandbox: !*devFake,
+		Hidden:  []string{*dataDir, *runDir},
+	}, log)
+	if *devFake {
+		log.Warn("terminal runs without the sandbox (dev mode)")
+	}
+	term.Cleanup(ctx)
+
 	// ホスト再起動後などに、起動しているはずの VM を起動し直す
 	go func() {
 		svc.Reconcile(ctx)
@@ -153,6 +166,7 @@ func run() error {
 			DataDir:      *dataDir,
 			LoopbackOnly: api.IsLoopbackListen(*listen),
 			UI:           webui.Handler(),
+			Terminal:     term,
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}

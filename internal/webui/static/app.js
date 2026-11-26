@@ -302,6 +302,7 @@ async function viewCluster(name) {
       <span class="hint">${c.status.readyNodes} / ${c.status.nodes} ノード Ready${c.status.message ? ` · ${c.status.message}` : ""}</span></h1>
     <div class="card">
       <div class="actions">
+        <a class="button primary" href="#/clusters/${enc}/terminal">ターミナル</a>
         <a class="button" href="/api/clusters/${enc}/kubeconfig" download>kubeconfig をダウンロード</a>
         <a class="button" href="/api/clusters/${enc}/kubeconfig?proxy=${encodeURIComponent(SSH_PROXY)}" download
           title="ミニPC の外 (SSH でつないでいる PC) から使う kubeconfig。proxy-url: ${SSH_PROXY} 入り">SSH 経由用の kubeconfig</a>
@@ -484,11 +485,105 @@ async function viewVM(name) {
   loadSerial(v.name);
 }
 
+// ---------- 画面: ターミナル ----------
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    if (document.querySelector(`script[src="${src}"]`)) return resolve();
+    const s = document.createElement("script");
+    s.src = src;
+    s.onload = resolve;
+    s.onerror = () => reject(new Error(`${src} を読み込めません`));
+    document.head.appendChild(s);
+  });
+}
+
+function loadCSS(href) {
+  if (document.querySelector(`link[href="${href}"]`)) return;
+  const l = document.createElement("link");
+  l.rel = "stylesheet";
+  l.href = href;
+  document.head.appendChild(l);
+}
+
+// viewTerminal はクラスタの kubeconfig を設定したシェル (ミニPC の一時ユーザーのサンドボックス) を開く。
+async function viewTerminal(name) {
+  setNav("");
+  loadCSS("/ui/vendor/xterm/xterm.css");
+  await loadScript("/ui/vendor/xterm/xterm.js");
+  await loadScript("/ui/vendor/xterm/addon-fit.js");
+  const enc = encodeURIComponent(name);
+  app.innerHTML = html`
+    <h1><a href="#/clusters/${enc}">${name}</a> のターミナル <span class="badge info" id="term-status">接続中</span></h1>
+    <div class="term-wrap" id="term"></div>
+    <div class="actions spaced-top">
+      <button id="term-reconnect" hidden>再接続</button>
+      <a class="button" href="#/clusters/${enc}">クラスタの画面に戻る</a>
+    </div>
+    <p class="hint">kubectl (<code>k</code>) が設定済みのシェルです (Talos のクラスタは talosctl も)。
+      ミニPC の権限の無い一時ユーザーで動き、ホームはこのセッションだけのもので、閉じると消えます。</p>`;
+
+  const term = new Terminal({
+    cursorBlink: true,
+    fontSize: 14,
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Noto Sans Mono CJK JP", monospace',
+    scrollback: 5000,
+    theme: { background: "#111613", foreground: "#e3ebe6" },
+  });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(document.getElementById("term"));
+  fit.fit();
+  term.focus();
+
+  const encoder = new TextEncoder();
+  let ws = null;
+  const status = (text, cls) => {
+    const el = document.getElementById("term-status");
+    if (el) { el.textContent = text; el.className = `badge ${cls}`; }
+  };
+  const send = (data) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(data); };
+  const sendSize = () => send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+  const connect = () => {
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    ws = new WebSocket(`${proto}//${location.host}/api/clusters/${enc}/terminal`);
+    ws.binaryType = "arraybuffer";
+    status("接続中", "info");
+    document.getElementById("term-reconnect").hidden = true;
+    ws.onopen = () => { status("接続済み", "ok"); sendSize(); };
+    ws.onmessage = (e) => term.write(typeof e.data === "string" ? e.data : new Uint8Array(e.data));
+    ws.onclose = (e) => {
+      status("切断", "");
+      term.write(`\r\n\x1b[33m[切断されました${e.reason ? `: ${e.reason}` : ""}]\x1b[0m\r\n`);
+      const b = document.getElementById("term-reconnect");
+      if (b) b.hidden = false;
+    };
+  };
+  term.onData((d) => send(encoder.encode(d)));
+  term.onBinary((d) => send(Uint8Array.from(d, (c) => c.charCodeAt(0))));
+  term.onResize(sendSize);
+  const onWindowResize = () => fit.fit();
+  window.addEventListener("resize", onWindowResize);
+  document.getElementById("term-reconnect").addEventListener("click", () => { term.reset(); connect(); term.focus(); });
+  connect();
+
+  // ほかの画面に移るときに閉じる
+  teardown = () => {
+    window.removeEventListener("resize", onWindowResize);
+    if (ws) { ws.onclose = null; ws.close(); }
+    term.dispose();
+  };
+}
+
 // ---------- ルーター ----------
+
+// 表示中の画面の後片付け (ターミナルの WebSocket を閉じるなど)
+let teardown = null;
 
 function route() {
   const parts = location.hash.replace(/^#\/?/, "").split("/").map(decodeURIComponent);
   if (parts[0] === "clusters" && parts[1] === "new") return { view: viewNewCluster, live: false };
+  if (parts[0] === "clusters" && parts[1] && parts[2] === "terminal") return { view: () => viewTerminal(parts[1]), live: false };
   if (parts[0] === "clusters" && parts[1]) return { view: () => viewCluster(parts[1]), live: true, serial: true };
   if (parts[0] === "vms" && parts[1]) return { view: () => viewVM(parts[1]), live: true, serial: true };
   if (parts[0] === "vms") return { view: viewVMs, live: true };
@@ -507,7 +602,12 @@ async function render() {
   }
 }
 
-window.addEventListener("hashchange", () => { current = route(); window.scrollTo(0, 0); render(); });
+window.addEventListener("hashchange", () => {
+  if (teardown) { teardown(); teardown = null; }
+  current = route();
+  window.scrollTo(0, 0);
+  render();
+});
 
 setInterval(() => {
   if (document.hidden || !current.live) return;
