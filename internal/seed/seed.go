@@ -112,25 +112,17 @@ func NetworkConfig(n Network) ([]byte, error) {
 	return yaml.Marshal(netplan{Version: 2, Ethernets: map[string]netplanEthernet{"eth0": e}})
 }
 
-// MatchByName は network-config のインターフェースの合わせ方を、MAC (と set-name) からインターフェース名に変える。
-// コンテナ型のバックエンドでは、中のインターフェースはホスト側で名前・MAC・アドレスまで付けてある。
-// cloud-init は veth を物理のインターフェースとして扱わないので、MAC で合わせると「機器が無い」と失敗する。
-func MatchByName(networkConfig []byte, ifname string) ([]byte, error) {
-	var cfg map[string]any
+// Nameservers は network-config に書いた DNS サーバーを返す。
+func Nameservers(networkConfig []byte) ([]string, error) {
+	var cfg netplan
 	if err := yaml.Unmarshal(networkConfig, &cfg); err != nil {
 		return nil, fmt.Errorf("parse network-config: %w", err)
 	}
-	eths, _ := cfg["ethernets"].(map[string]any)
-	for name, v := range eths {
-		e, ok := v.(map[string]any)
-		if !ok {
-			continue
-		}
-		delete(e, "set-name")
-		e["match"] = map[string]any{"name": ifname}
-		eths[name] = e
+	var out []string
+	for _, e := range cfg.Ethernets {
+		out = append(out, e.Nameservers.Addresses...)
 	}
-	return yaml.Marshal(cfg)
+	return out, nil
 }
 
 // WriteFiles は dir に user-data / meta-data / network-config を書き出す。

@@ -86,7 +86,9 @@ Docker のような管理の層 (イメージ・ネットワーク・ボリュ�
   中を `eth0` にして IPAM どおりの MAC・アドレス・デフォルトルートを付けてから `--network-namespace-path` で入る
   (自分でアドレスを付けないゲストでも使える。nspawn/nspawn のアプリ型のマシンと同じやり方)
 - **cloud-init**: シードのディレクトリを `/var/lib/cloud/seed/nocloud` に読み取り専用でバインドし、`datasource_list: [NoCloud]`
-  を upper に置く。VM と同じ user-data / network-config がそのまま使える
+  を upper に置く。VM と同じ user-data がそのまま使える。ネットワークはホストで設定済みなので cloud-init には設定させず
+  (`network: {config: disabled}`。cloud-init は veth を物理のインターフェースとして扱わないので、MAC で合わせる設定は失敗する)、
+  `systemd-networkd-wait-online` は無効にし、DNS は network-config の DNS サーバーを `/etc/resolv.conf` に書く
 - **ボリューム**: `/var/lib/rancher`、`/var/lib/containerd`、`/var/lib/kubelet` はホストのディレクトリ (`vms/<name>/volumes/`)。
   containerd の overlayfs スナップショッターは overlayfs の上に置けないため (kind も同じ理由で分けている)
 - **特権**: `--capability=all`、`SYSTEMD_SECCOMP=0` (システムコールのフィルタなし)、`SYSTEMD_NSPAWN_API_VFS_WRITABLE=yes`

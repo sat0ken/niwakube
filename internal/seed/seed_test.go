@@ -90,22 +90,16 @@ func TestBuildISO(t *testing.T) {
 	}
 }
 
-func TestMatchByName(t *testing.T) {
+func TestNameservers(t *testing.T) {
 	nc, err := NetworkConfig(Network{MAC: "52:54:00:12:34:56", Address: netip.MustParsePrefix("172.30.0.10/16"),
-		Gateway: netip.MustParseAddr("172.30.0.1"), DNS: []netip.Addr{netip.MustParseAddr("1.1.1.1")}})
+		Gateway: netip.MustParseAddr("172.30.0.1"), DNS: []netip.Addr{netip.MustParseAddr("1.1.1.1"), netip.MustParseAddr("8.8.8.8")}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := MatchByName(nc, "eth0")
-	if err != nil {
-		t.Fatal(err)
+	if ns, err := Nameservers(nc); err != nil || strings.Join(ns, ",") != "1.1.1.1,8.8.8.8" {
+		t.Errorf("Nameservers = %v, %v", ns, err)
 	}
-	s := string(out)
-	if strings.Contains(s, "macaddress") || strings.Contains(s, "set-name") || !strings.Contains(s, "name: eth0") ||
-		!strings.Contains(s, "172.30.0.10/16") || !strings.Contains(s, "via: 172.30.0.1") || !strings.Contains(s, "1.1.1.1") {
-		t.Errorf("MatchByName:\n%s", s)
-	}
-	if _, err := MatchByName([]byte("{"), "eth0"); err == nil {
+	if _, err := Nameservers([]byte("{")); err == nil {
 		t.Error("invalid YAML must fail")
 	}
 }

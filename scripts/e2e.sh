@@ -135,6 +135,7 @@ unit_prop() { systemctl show -p "$1" --value "niwakube-vm-$NAME"; }
 if [[ $BACKEND == nspawn ]]; then
   [[ $(unit_prop CPUQuotaPerSecUSec) == 2s ]] || die "CPU の上限が違います: $(unit_prop CPUQuotaPerSecUSec)"
   echo "    nspawn: $(machinectl list --no-legend | grep -w "$NAME" || true)"
+  ssh_vm 'ip -br addr; ip route; cat /etc/resolv.conf; systemctl --failed --no-legend; systemd-analyze 2>/dev/null | head -n1' | sed 's/^/    /' || true
 else
   [[ $(ssh_vm nproc) == 2 ]] || die "vCPU 数が違います"
 fi

@@ -117,11 +117,15 @@ func TestLifecycle(t *testing.T) {
 	if s, _ := b.Status(ctx, "c1"); s.State != backend.StateStopped {
 		t.Fatalf("status after create: %+v", s)
 	}
-	// cloud-init にはインターフェース名で合わせさせる (MAC と set-name は使わない)
-	netcfg, _ := os.ReadFile(filepath.Join(dir, "seed", "network-config"))
-	if s := string(netcfg); !strings.Contains(s, "name: eth0") || strings.Contains(s, "macaddress") || strings.Contains(s, "set-name") ||
-		!strings.Contains(s, "172.30.0.10/16") || !strings.Contains(s, "1.1.1.1") {
-		t.Errorf("seed network-config:\n%s", s)
+	// ネットワークはホストで設定するので、cloud-init には設定させず、DNS は resolv.conf に書く
+	if cfg, _ := os.ReadFile(filepath.Join(dir, "upper", "etc", "cloud", "cloud.cfg.d", "90-niwakube-nspawn.cfg")); !strings.Contains(string(cfg), "config: disabled") {
+		t.Errorf("cloud-init must not configure the network:\n%s", cfg)
+	}
+	if resolv, _ := os.ReadFile(filepath.Join(dir, "upper", "etc", "resolv.conf")); !strings.Contains(string(resolv), "nameserver 1.1.1.1") {
+		t.Errorf("resolv.conf:\n%s", resolv)
+	}
+	if target, err := os.Readlink(filepath.Join(dir, "upper", "etc", "systemd", "system", "systemd-networkd-wait-online.service")); err != nil || target != "/dev/null" {
+		t.Errorf("systemd-networkd-wait-online must be masked: %q %v", target, err)
 	}
 
 	// Start: ネットワーク名前空間 → overlayfs → systemd-run

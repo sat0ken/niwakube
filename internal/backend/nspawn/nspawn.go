@@ -90,9 +90,13 @@ var volumes = map[string]string{
 	"kubelet":    "/var/lib/kubelet",
 }
 
-// cloudCfg は NoCloud のシードのディレクトリだけを見るようにする cloud-init の設定。
+// cloudCfg は cloud-init の設定。シードのディレクトリ (NoCloud) だけを見て、ネットワークは設定しない
+// (eth0 のアドレスとルートはホスト側で付けてある。DNS は /etc/resolv.conf に書く)。
 const cloudCfg = `# niwakube (nspawn): シードは /var/lib/cloud/seed/nocloud にバインドしてある
 datasource_list: [ NoCloud, None ]
+# ネットワークはホスト側で設定済み (ネットワーク名前空間の eth0)
+network:
+  config: disabled
 `
 
 // state は vms/<name>/state.json に保存する、Start に必要な情報。
@@ -169,13 +173,29 @@ func (b *Backend) Create(_ context.Context, spec *backend.MachineSpec) (err erro
 	if err := os.WriteFile(filepath.Join(cfgDir, "90-niwakube-nspawn.cfg"), []byte(cloudCfg), 0o644); err != nil {
 		return err
 	}
-	// 中の eth0 はホスト側で MAC・アドレスまで付けるので、cloud-init には名前で合わせさせる
-	netcfg, err := seed.MatchByName(spec.Seed.NetworkConfig, "eth0")
+	// ネットワークはホスト側で設定するので、中ではネットワークの準備を待たない (待つと既定で 2 分かかる)。
+	// DNS は network-config の DNS サーバーを /etc/resolv.conf に直接書く (どちらも upper に置く)
+	mask := filepath.Join(dir, "upper", "etc", "systemd", "system")
+	if err := os.MkdirAll(mask, 0o755); err != nil {
+		return err
+	}
+	if err := os.Symlink("/dev/null", filepath.Join(mask, "systemd-networkd-wait-online.service")); err != nil {
+		return err
+	}
+	dns, err := seed.Nameservers(spec.Seed.NetworkConfig)
 	if err != nil {
 		return err
 	}
+	var resolv strings.Builder
+	resolv.WriteString("# niwakube (nspawn)\n")
+	for _, d := range dns {
+		fmt.Fprintf(&resolv, "nameserver %s\n", d)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "upper", "etc", "resolv.conf"), []byte(resolv.String()), 0o644); err != nil {
+		return err
+	}
 	for name, data := range map[string][]byte{
-		"user-data": spec.Seed.UserData, "meta-data": spec.Seed.MetaData, "network-config": netcfg,
+		"user-data": spec.Seed.UserData, "meta-data": spec.Seed.MetaData, "network-config": spec.Seed.NetworkConfig,
 	} {
 		if err := os.WriteFile(filepath.Join(dir, "seed", name), data, 0o600); err != nil {
 			return err
