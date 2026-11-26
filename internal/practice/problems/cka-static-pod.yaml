@@ -1,0 +1,80 @@
+id: cka-static-pod
+exam: CKA
+domain: ワークロードとスケジューリング
+title: ワーカーに static Pod を置く
+weight: 6
+requires: kubeadm
+namespaces: [static-web]
+setup: |
+  apiVersion: v1
+  kind: Namespace
+  metadata:
+    name: static-web
+nodeSetup:
+  - node: worker
+    run: sudo rm -f /etc/kubernetes/manifests/web-static.yaml
+cleanup:
+  - node: worker
+    run: sudo rm -f /etc/kubernetes/manifests/web-static.yaml
+task: |
+  ワーカーのノード (ターミナルから ssh worker で入れます) で、kubelet が直接動かす static Pod を作ってください。
+
+  - マニフェストのファイル: /etc/kubernetes/manifests/web-static.yaml
+  - Pod の名前 web-static、Namespace static-web
+  - コンテナ名 web、イメージ registry.k8s.io/e2e-test-images/agnhost:2.39、引数 netexec --http-port=8080
+
+  kubectl get pods -n static-web で、この Pod が Running で見えること。
+checks:
+  - description: マニフェストのファイルがワーカーにある
+    node: worker
+    run: sudo test -f /etc/kubernetes/manifests/web-static.yaml
+  - description: Pod web-static-<ワーカーの名前> がある (static Pod)
+    apiVersion: v1
+    kind: Pod
+    namespace: static-web
+    name: 'web-static-{{worker}}'
+  - description: イメージが agnhost:2.39
+    apiVersion: v1
+    kind: Pod
+    namespace: static-web
+    name: 'web-static-{{worker}}'
+    jsonpath: '{.spec.containers[?(@.name=="web")].image}'
+    equals: registry.k8s.io/e2e-test-images/agnhost:2.39
+  - description: Pod が Ready
+    apiVersion: v1
+    kind: Pod
+    namespace: static-web
+    name: 'web-static-{{worker}}'
+    jsonpath: '{.status.conditions[?(@.type=="Ready")].status}'
+    equals: "True"
+hint: |
+  kubelet は設定の staticPodPath にあるマニフェストを読み、API サーバーを通さずに Pod を動かします。
+  マニフェストの下書きは、ターミナルで kubectl run ... --dry-run=client -o yaml で作れます。
+  ワーカーで sudo grep staticPodPath /var/lib/kubelet/config.yaml とすると置き場所を確かめられます。
+solution: |
+  ターミナルで下書きを作り、内容を確かめます。
+
+  kubectl run web-static -n static-web --image=registry.k8s.io/e2e-test-images/agnhost:2.39 \
+    --dry-run=client -o yaml -- netexec --http-port=8080
+
+  ssh worker で入り、sudo vi /etc/kubernetes/manifests/web-static.yaml に貼ります (コンテナ名は web に直す)。
+  保存すると kubelet がすぐに Pod を起動し、API サーバーには「ミラー Pod」が web-static-<ノード名> の名前で見えます。
+
+  static Pod は kubectl delete しても消えません (すぐに作り直されます)。消すにはマニフェストのファイルを消します。
+  コントロールプレーンの etcd や kube-apiserver も、同じ仕組みの static Pod です (/etc/kubernetes/manifests)。
+answerRun:
+  - node: worker
+    run: |
+      sudo mkdir -p /etc/kubernetes/manifests
+      sudo tee /etc/kubernetes/manifests/web-static.yaml >/dev/null <<'EOF'
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: web-static
+        namespace: static-web
+      spec:
+        containers:
+          - name: web
+            image: registry.k8s.io/e2e-test-images/agnhost:2.39
+            args: ["netexec", "--http-port=8080"]
+      EOF

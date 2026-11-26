@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sat0ken/niwakube/internal/cluster"
+	"github.com/sat0ken/niwakube/internal/distro"
 	"github.com/sat0ken/niwakube/internal/practice"
 	"github.com/sat0ken/niwakube/internal/store"
 )
@@ -18,7 +20,7 @@ func TestPracticeAPI(t *testing.T) {
 		t.Errorf("without practice: %d", resp.StatusCode)
 	}
 
-	drills, err := practice.NewService(func(_ context.Context, name string) (practice.Cluster, error) {
+	drills, err := practice.NewService(func(_ context.Context, name string) (*practice.Target, error) {
 		return nil, fmt.Errorf("cluster %s: %w", name, store.ErrNotFound)
 	})
 	if err != nil {
@@ -45,9 +47,25 @@ func TestPracticeAPI(t *testing.T) {
 		"setup unknown":    {http.MethodPost, "/ckad-cronjob/setup", `{"cluster":"nope"}`, http.StatusNotFound},
 		"check unknown":    {http.MethodPost, "/ckad-cronjob/check", `{"cluster":"nope"}`, http.StatusNotFound},
 		"check bad id":     {http.MethodPost, "/nope/check", `{"cluster":"demo"}`, http.StatusNotFound},
+		"solve unknown":    {http.MethodPost, "/ckad-cronjob/solve", `{"cluster":"nope"}`, http.StatusNotFound},
 	} {
 		if resp, body := do(t, c.method, base+c.path, c.body); resp.StatusCode != c.want {
 			t.Errorf("%s: %d %s", name, resp.StatusCode, body)
 		}
+	}
+}
+
+func TestTerminalSSH(t *testing.T) {
+	x := terminalSSH(&cluster.NodeAccess{User: "ubuntu", Key: "k", Nodes: []cluster.Node{
+		{Name: "d-cp-1", Alias: "cp", Role: distro.RoleControlPlane, IP: "172.30.1.11"},
+		{Name: "d-worker-1", Alias: "worker", Role: distro.RoleWorker, IP: "172.30.1.21"},
+		{Name: "d-worker-2", Alias: "worker2", Role: distro.RoleWorker, IP: "172.30.1.22"},
+	}})
+	var got []string
+	for _, h := range x.Hosts {
+		got = append(got, strings.Join(h.Names, "/")+"="+h.IP.String())
+	}
+	if strings.Join(got, ",") != "d-cp-1/cp=172.30.1.11,d-worker-1/worker=172.30.1.21,d-worker-2/worker2=172.30.1.22" || x.User != "ubuntu" {
+		t.Errorf("hosts: %v", got)
 	}
 }

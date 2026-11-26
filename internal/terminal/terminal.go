@@ -15,6 +15,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -47,6 +48,40 @@ type Files struct {
 	Cluster     string
 	Kubeconfig  []byte
 	Talosconfig []byte // Talos のクラスタのみ
+	// SSH があれば、シェルから ssh <ノード名> でそのクラスタのノードに入れる (鍵はクラスタごと)
+	SSH *SSH
+}
+
+// SSH はノードに入るための鍵と接続先。
+type SSH struct {
+	User  string
+	Key   []byte // 秘密鍵 (OpenSSH 形式)
+	Hosts []SSHHost
+}
+
+// SSHHost は ssh の接続先 1 台。Names は ssh に渡せる名前 (ノード名と cp / worker などの別名)。
+type SSHHost struct {
+	Names []string
+	IP    netip.Addr
+}
+
+var sshNameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$`)
+
+func (x *SSH) validate() error {
+	if !sshNameRe.MatchString(x.User) || len(x.Key) == 0 {
+		return errors.New("ssh: bad user or empty key")
+	}
+	for _, h := range x.Hosts {
+		if !h.IP.IsValid() || len(h.Names) == 0 {
+			return errors.New("ssh: bad host")
+		}
+		for _, n := range h.Names {
+			if !sshNameRe.MatchString(n) {
+				return fmt.Errorf("ssh: bad host name %q", n)
+			}
+		}
+	}
+	return nil
 }
 
 // Manager はターミナルのセッションを管理する。
@@ -91,14 +126,33 @@ type session struct {
 	dir     string // credential のファイル
 	cluster string
 	talos   bool
+	ssh     bool
 }
 
 func (s *session) unit() string { return unitPrefix + s.id }
 
 var clusterRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
+// sshConfig は ~/.ssh/config の中身。DynamicUser のホームは / なので、ssh には -F でこのファイルを渡す
+// (ssh は HOME ではなくユーザーの登録情報からホームを決める)。
+func sshConfig(x *SSH) string {
+	var b strings.Builder
+	for _, h := range x.Hosts {
+		fmt.Fprintf(&b, "Host %s\n  HostName %s\n", strings.Join(h.Names, " "), h.IP)
+	}
+	fmt.Fprintf(&b, `Host *
+  User %s
+  IdentityFile $HOME/.ssh/id_ed25519
+  IdentitiesOnly yes
+  UserKnownHostsFile $HOME/.ssh/known_hosts
+  StrictHostKeyChecking accept-new
+  LogLevel ERROR
+`, x.User)
+	return b.String()
+}
+
 // bashrc はシェルの起動時に読む設定。credential を書き込める HOME にコピーし、補完とプロンプトを設定する。
-func bashrc(cluster string, talos bool) string {
+func bashrc(cluster string, talos bool, ssh *SSH) string {
 	var b strings.Builder
 	b.WriteString(`# niwakube のターミナル (このセッションだけのホーム。閉じると消える)
 [ -f /etc/bash.bashrc ] && . /etc/bash.bashrc
@@ -111,6 +165,15 @@ export KUBECONFIG="$HOME/.kube/config"
 		b.WriteString(`mkdir -p "$HOME/.talos"
 cp "$CREDENTIALS_DIRECTORY/talosconfig" "$HOME/.talos/config"
 export TALOSCONFIG="$HOME/.talos/config"
+`)
+	}
+	if ssh != nil {
+		b.WriteString(`mkdir -p "$HOME/.ssh"
+cp "$CREDENTIALS_DIRECTORY/sshkey" "$HOME/.ssh/id_ed25519"
+cat > "$HOME/.ssh/config" <<NIWAKUBE_SSH
+` + sshConfig(ssh) + `NIWAKUBE_SSH
+ssh() { command ssh -F "$HOME/.ssh/config" "$@"; }
+scp() { command scp -F "$HOME/.ssh/config" "$@"; }
 `)
 	}
 	b.WriteString(`alias k=kubectl
@@ -133,6 +196,13 @@ echo "niwakube: クラスタ %s のターミナル (kubectl / k`, cluster, clust
 	}
 	b.WriteString(` が使えます。ホームはこのセッションだけのもので、閉じると消えます)"
 `)
+	if ssh != nil {
+		var names []string
+		for _, h := range ssh.Hosts {
+			names = append(names, h.Names[0])
+		}
+		fmt.Fprintf(&b, "echo \"niwakube: ssh <ノード> でノードに入れます (%s。sudo も使えます)\"\n", strings.Join(names, ", "))
+	}
 	return b.String()
 }
 
@@ -178,6 +248,9 @@ func (m *Manager) shellCommand(s *session) *exec.Cmd {
 	if s.talos {
 		args = append(args, "--property=LoadCredential=talosconfig:"+filepath.Join(s.dir, "talosconfig"))
 	}
+	if s.ssh {
+		args = append(args, "--property=LoadCredential=sshkey:"+filepath.Join(s.dir, "sshkey"))
+	}
 	for _, p := range m.cfg.Hidden {
 		args = append(args, "--property=InaccessiblePaths=-"+p) // "-" は無くてもよい
 	}
@@ -213,14 +286,22 @@ func (m *Manager) prepare(f Files) (*session, error) {
 	if _, err := rand.Read(b[:]); err != nil {
 		return nil, err
 	}
-	s := &session{id: f.Cluster + "-" + hex.EncodeToString(b[:]), cluster: f.Cluster, talos: len(f.Talosconfig) > 0}
+	if f.SSH != nil {
+		if err := f.SSH.validate(); err != nil {
+			return nil, err
+		}
+	}
+	s := &session{id: f.Cluster + "-" + hex.EncodeToString(b[:]), cluster: f.Cluster, talos: len(f.Talosconfig) > 0, ssh: f.SSH != nil}
 	s.dir = filepath.Join(m.cfg.Dir, s.id)
 	if err := os.MkdirAll(s.dir, 0o700); err != nil {
 		return nil, err
 	}
-	files := map[string][]byte{"kubeconfig": f.Kubeconfig, "bashrc": []byte(bashrc(f.Cluster, s.talos))}
+	files := map[string][]byte{"kubeconfig": f.Kubeconfig, "bashrc": []byte(bashrc(f.Cluster, s.talos, f.SSH))}
 	if s.talos {
 		files["talosconfig"] = f.Talosconfig
+	}
+	if s.ssh {
+		files["sshkey"] = f.SSH.Key
 	}
 	for name, data := range files {
 		if err := os.WriteFile(filepath.Join(s.dir, name), data, 0o600); err != nil {

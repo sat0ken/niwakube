@@ -720,14 +720,18 @@ async function viewPractice() {
       <p>本物のクラスタで CKA / CKAD の練習ができます。問題を開くと、左に問題文、右にクラスタのターミナルが出ます。
         「出題する」で問題の Namespace を作り直し、ターミナルの kubectl で解いたら「採点」を押します。</p>
       <p class="hint">問題は公開されている出題範囲に沿ったオリジナルで、本物の試験問題ではありません。
-        練習用のクラスタを 1 つ作っておくと、ほかのクラスタを壊す心配がありません (試験と同じ kubeadm、ワーカー 1 台以上がおすすめ)。</p>
+        練習用のクラスタを 1 つ作っておくと、ほかのクラスタを壊す心配がありません (試験と同じ kubeadm、ワーカー 1 台以上がおすすめ)。
+        「ノードに SSH」の問題 (CKA) は、ターミナルから ssh cp / ssh worker でノードに入って解きます。
+        この機能より前に作ったクラスタにはノードの鍵が無いので、新しく作ったクラスタを使ってください。</p>
     </div>
     ${exams.map((exam) => html`<div class="card">
       <h2>${exam}</h2>
       <div class="table-wrap"><table>
-        <thead><tr><th>問題</th><th>分野</th><th class="num">配点</th></tr></thead>
+        <thead><tr><th>問題</th><th>分野</th><th>使えるクラスタ</th><th class="num">配点</th></tr></thead>
         <tbody>${problems.filter((p) => p.exam === exam).map((p) => html`<tr>
-          <td><a href="#/practice/${encodeURIComponent(p.id)}">${p.title}</a></td><td>${p.domain}</td><td class="num">${p.weight}</td></tr>`)}</tbody>
+          <td><a href="#/practice/${encodeURIComponent(p.id)}">${p.title}</a></td><td>${p.domain}</td>
+          <td>${p.requires ? html`<span class="tag">${p.requires}</span>` : html`<span class="hint">どれでも</span>`}${p.nodes ? html`<span class="tag">ノードに SSH</span>` : ""}</td>
+          <td class="num">${p.weight}</td></tr>`)}</tbody>
       </table></div>
     </div>`)}`;
 }
@@ -745,7 +749,7 @@ function practiceResult(r) {
 async function viewProblem(id) {
   setNav("practice");
   const [p, clusters] = await Promise.all([api("GET", `/api/practice/problems/${encodeURIComponent(id)}`), api("GET", "/api/clusters")]);
-  const ready = clusters.filter((c) => c.status.phase === "ready").map((c) => c.name);
+  const ready = clusters.filter((c) => c.status.phase === "ready" && (!p.requires || c.distro === p.requires)).map((c) => c.name);
   const saved = storageGet(PRACTICE_CLUSTER_KEY);
   let chosen = ready.includes(saved) ? saved : ready[0];
   app.innerHTML = html`
@@ -763,11 +767,13 @@ async function viewProblem(id) {
             <button id="pr-check">採点</button>
           </div>
           <p class="hint">「出題する」は Namespace ${p.namespaces.join(", ")} を消して作り直します。やり直すときももう一度押します。</p>`
-          : html`<p>Ready のクラスタがありません。<a href="#/clusters/new">練習用のクラスタを作って</a>から開いてください。</p>`}
+          : html`<p>${p.requires ? `${p.requires} の` : ""}Ready のクラスタがありません。<a href="#/clusters/new">練習用のクラスタを作って</a>から開いてください。</p>`}
           <div id="pr-result"></div>
         </div>
         ${p.hint ? html`<details class="card"><summary>ヒント</summary><div class="task">${p.hint}</div></details>` : ""}
-        ${p.solution ? html`<details class="card"><summary>解説と解き方の例</summary><div class="task">${p.solution}</div></details>` : ""}
+        ${p.solution ? html`<details class="card"><summary>解説と解き方の例</summary><div class="task">${p.solution}</div>
+          ${ready.length ? html`<div class="actions spaced-top"><button id="pr-solve">模範解答をクラスタに当てる</button></div>
+          <p class="hint">解き方の例と同じ状態をクラスタに作ります。当てたあとに「採点」で満点になることを確かめられます。</p>` : ""}</details>` : ""}
       </div>
       <div>
         <div class="inline spaced-bottom"><strong>ターミナル</strong> <span class="badge" id="term-status">未接続</span> <button id="term-reconnect" hidden>再接続</button></div>
@@ -806,6 +812,15 @@ async function viewProblem(id) {
     result.replaceChildren();
     toast(`${chosen} に出題しました。右のターミナルで解いてください`);
   }));
+  const solveBtn = document.getElementById("pr-solve");
+  if (solveBtn) solveBtn.addEventListener("click", () => {
+    if (!confirm(`模範解答を ${chosen} に当てます。自分の解答は上書きされます。よろしいですか?`)) return;
+    run(solveBtn, "当てています…", async () => {
+      await api("POST", `/api/practice/problems/${encodeURIComponent(p.id)}/solve`, { cluster: chosen });
+      result.replaceChildren();
+      toast("模範解答を当てました。少し待ってから「採点」を押してください");
+    });
+  });
   const checkBtn = document.getElementById("pr-check");
   checkBtn.addEventListener("click", () => run(checkBtn, "採点中…", async () => {
     const r = await api("POST", `/api/practice/problems/${encodeURIComponent(p.id)}/check`, { cluster: chosen });

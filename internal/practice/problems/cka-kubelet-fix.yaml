@@ -1,0 +1,47 @@
+id: cka-kubelet-fix
+exam: CKA
+domain: トラブルシューティング
+title: NotReady になったワーカーを直す
+weight: 7
+requires: kubeadm
+nodeSetup:
+  - node: worker
+    run: sudo systemctl disable --now kubelet
+cleanup:
+  - node: worker
+    run: sudo systemctl enable --now kubelet
+task: |
+  ワーカーのノード (ターミナルから ssh worker で入れます) が、しばらくすると NotReady になります。
+  原因を調べて Ready に戻し、ノードを再起動しても同じことが起きないようにしてください。
+
+  (出題の直後は Ready のままに見えることがあります。kubectl get nodes -w で様子を見てください)
+checks:
+  - description: ワーカーの kubelet が動いている
+    node: worker
+    run: systemctl is-active --quiet kubelet
+  - description: 再起動しても kubelet が動く (enabled)
+    node: worker
+    run: systemctl is-enabled --quiet kubelet
+  - description: ワーカーが Ready
+    apiVersion: v1
+    kind: Node
+    name: '{{worker}}'
+    jsonpath: '{.status.conditions[?(@.type=="Ready")].status}'
+    equals: "True"
+hint: |
+  ノードの状態を Kubernetes に報告しているのは、ノードで動く kubelet です。
+  ssh worker で入り、systemctl status kubelet や journalctl -u kubelet で様子を見ます。
+solution: |
+  kubectl get nodes で NotReady のノードを見つけ、kubectl describe node で Conditions を見ると
+  「Kubelet stopped posting node status」と出ています。
+
+  ssh worker
+  systemctl status kubelet          # inactive (dead)、disabled になっている
+  sudo systemctl enable --now kubelet
+
+  enable で再起動後も起動するようになり、--now で今すぐ起動します。
+  kubelet が起動しても失敗し続けるときは、sudo journalctl -u kubelet -e で原因 (設定ファイルの誤り、
+  証明書、containerd が止まっている、など) を探します。
+answerRun:
+  - node: worker
+    run: sudo systemctl enable --now kubelet

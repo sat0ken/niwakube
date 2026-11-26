@@ -4,9 +4,13 @@
 // 公開されている出題範囲 (CNCF のカリキュラム) に沿ったオリジナルの問題にする。
 //
 // 1 問の流れ:
-//  1. Setup: 問題の Namespace を消して作り直し、setup のマニフェストを server-side apply する
-//  2. 受験者がターミナルの kubectl で解く
-//  3. Check: checks に書いた条件を、クラスタのオブジェクトを読んで確かめる (シェルは動かさない)
+//  1. Setup: ノードの後片付け (全問の cleanup) → 問題の Namespace を作り直す → setup のマニフェストを
+//     server-side apply → nodeSetup をノードで動かす
+//  2. 受験者がターミナルの kubectl (と ssh) で解く
+//  3. Check: checks の条件を確かめる。オブジェクトの値、ノードでのコマンドの終了コード、権限 (can-i) の 3 種類
+//
+// ノードを使う問題 (CKA) は、ノードに SSH で入れるクラスタ (kubeadm / k3s で、ノードの鍵があるもの) でだけ出せる。
+// ノードで動かすコマンドはリポジトリにある問題のファイルに書いたものだけ。
 package practice
 
 import (
@@ -21,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sat0ken/niwakube/internal/nodeexec"
 	"k8s.io/client-go/util/jsonpath"
 	"sigs.k8s.io/yaml"
 )
@@ -28,8 +33,12 @@ import (
 //go:embed problems/*.yaml
 var problemFS embed.FS
 
-// ErrNotFound は問題が無いときのエラー。
-var ErrNotFound = errors.New("problem not found")
+var (
+	// ErrNotFound は問題が無いときのエラー。
+	ErrNotFound = errors.New("problem not found")
+	// ErrUnsupported はこのクラスタでは出せない問題のときのエラー (ディストリが違う、ノードに入れない)。
+	ErrUnsupported = errors.New("this problem cannot be used on this cluster")
+)
 
 // Problem は 1 問。
 type Problem struct {
@@ -38,43 +47,82 @@ type Problem struct {
 	Domain string `json:"domain"` // 出題範囲の分野
 	Title  string `json:"title"`
 	Weight int    `json:"weight"` // 配点
+	// Requires は問題を出せるディストリ (例: kubeadm)。空ならどれでもよい
+	Requires string `json:"requires,omitempty"`
 	// Namespaces はこの問題が使う Namespace。準備のたびに消して作り直す (setup で作ること)
-	Namespaces []string `json:"namespaces"`
-	Setup      string   `json:"setup,omitempty"` // 出題前に適用するマニフェスト
-	Task       string   `json:"task"`            // 問題文
-	Checks     []Check  `json:"checks"`
-	Hint       string   `json:"hint,omitempty"`
-	Solution   string   `json:"solution,omitempty"` // 解説と解き方の例
-	// Answer は問題を解いた状態にするマニフェスト (CI で、採点が満点になることを確かめるのに使う)
-	Answer string `json:"answer,omitempty"`
+	Namespaces []string `json:"namespaces,omitempty"`
+	Setup      string   `json:"setup,omitempty"`     // 出題前に適用するマニフェスト
+	NodeSetup  []Step   `json:"nodeSetup,omitempty"` // 出題前にノードで動かすコマンド (マニフェストの後)
+	// Cleanup はこの問題がノードに残す変更 (taint、cordon、止めたサービスなど) を元に戻すコマンド。
+	// どの問題を出すときも、全問の cleanup を先に動かす (ほかの問題の邪魔をしないように)。何度動かしてもよいこと
+	Cleanup  []Step  `json:"cleanup,omitempty"`
+	Task     string  `json:"task"` // 問題文
+	Checks   []Check `json:"checks"`
+	Hint     string  `json:"hint,omitempty"`
+	Solution string  `json:"solution,omitempty"` // 解説と解き方の例
+	// Answer と AnswerRun は問題を解いた状態にする (CI で満点になることを確かめる。Web UI の「模範解答を当てる」)
+	Answer    string `json:"answer,omitempty"`
+	AnswerRun []Step `json:"answerRun,omitempty"`
 }
 
-// Check は採点の 1 項目。Name か Selector のどちらかでオブジェクトを選び、JSONPath の結果を比べる。
-// Selector のときは {"items": [...]} に対して JSONPath を評価する。
-// Equals / Contains / Exists がどれも無ければ、オブジェクトがあれば合格。
+// Step はノードで動かすコマンド。Node は cp / worker (1 台目)、cp2 / worker2 ... (2 台目以降)。
+// Run は bash で動かし、ubuntu ユーザーなので root が要るものは sudo を付ける。
+type Step struct {
+	Node string `json:"node"`
+	Run  string `json:"run"`
+}
+
+// Check は採点の 1 項目。次のどれか 1 つ:
+//   - オブジェクト: Name か Selector (と FieldSelector) で選び、JSONPath の結果を比べる。
+//     Selector のときは {"items": [...]} に対して評価する。Equals / Contains / Exists がどれも無ければ、あれば合格
+//   - ノード: Node で Run を動かし、終了コードが 0 なら合格
+//   - 権限: CanI の操作を、その ServiceAccount ができる (Allowed: true) / できない (false) なら合格
+//
+// Name・Selector・FieldSelector・JSONPath・Run の {{cp}} や {{worker}} は、ノードの名前に置き換える。
 type Check struct {
-	Description string  `json:"description"`
-	APIVersion  string  `json:"apiVersion"`
-	Kind        string  `json:"kind"`
-	Namespace   string  `json:"namespace,omitempty"`
-	Name        string  `json:"name,omitempty"`
-	Selector    string  `json:"selector,omitempty"`
-	JSONPath    string  `json:"jsonpath,omitempty"`
-	Equals      *string `json:"equals,omitempty"`
-	Contains    string  `json:"contains,omitempty"`
-	Exists      bool    `json:"exists,omitempty"`
+	Description   string  `json:"description"`
+	APIVersion    string  `json:"apiVersion,omitempty"`
+	Kind          string  `json:"kind,omitempty"`
+	Namespace     string  `json:"namespace,omitempty"`
+	Name          string  `json:"name,omitempty"`
+	Selector      string  `json:"selector,omitempty"`
+	FieldSelector string  `json:"fieldSelector,omitempty"`
+	JSONPath      string  `json:"jsonpath,omitempty"`
+	Equals        *string `json:"equals,omitempty"`
+	Contains      string  `json:"contains,omitempty"`
+	Exists        bool    `json:"exists,omitempty"`
+	Node          string  `json:"node,omitempty"`
+	Run           string  `json:"run,omitempty"`
+	CanI          *CanI   `json:"canI,omitempty"`
+	Allowed       *bool   `json:"allowed,omitempty"`
+}
+
+// CanI は権限の確認 (kubectl auth can-i --as=system:serviceaccount:<ns>:<name> と同じ)。
+type CanI struct {
+	ServiceAccount string `json:"serviceAccount"` // <namespace>/<name>
+	Verb           string `json:"verb"`
+	Group          string `json:"group,omitempty"` // API グループ (Deployment なら apps。core は空)
+	Resource       string `json:"resource"`        // 複数形 (pods、deployments)
+	Namespace      string `json:"namespace,omitempty"`
 }
 
 // Summary は一覧に出す項目 (問題文や解答は含めない)。
 type Summary struct {
-	ID     string `json:"id"`
-	Exam   string `json:"exam"`
-	Domain string `json:"domain"`
-	Title  string `json:"title"`
-	Weight int    `json:"weight"`
+	ID       string `json:"id"`
+	Exam     string `json:"exam"`
+	Domain   string `json:"domain"`
+	Title    string `json:"title"`
+	Weight   int    `json:"weight"`
+	Requires string `json:"requires,omitempty"`
+	Nodes    bool   `json:"nodes,omitempty"` // ノードに入る問題 (ノードの鍵があるクラスタが要る)
 }
 
-var idRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+var (
+	idRe   = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+	nodeRe = regexp.MustCompile(`^(cp|worker)[0-9]*$`)
+	saRe   = regexp.MustCompile(`^[a-z0-9-]+/[a-z0-9.-]+$`)
+	phRe   = regexp.MustCompile(`\{\{\s*([a-z0-9]+)\s*\}\}`)
+)
 
 // Load は埋め込んだ問題をすべて読み、形を確かめる。
 func Load() ([]*Problem, error) {
@@ -123,32 +171,96 @@ func (p *Problem) validate() error {
 		return errors.New("title, domain and task are required")
 	case p.Weight <= 0:
 		return errors.New("weight must be positive")
-	case len(p.Namespaces) == 0:
-		return errors.New("namespaces is required (the problem's own namespaces, recreated on setup)")
 	case len(p.Checks) == 0:
 		return errors.New("checks is required")
+	case p.Requires != "" && p.Requires != "k3s" && p.Requires != "kubeadm":
+		return fmt.Errorf("requires must be k3s or kubeadm, got %q", p.Requires)
 	}
 	for _, ns := range p.Namespaces {
 		if slices.Contains(protectedNamespaces, ns) {
 			return fmt.Errorf("namespace %q cannot be used by a problem", ns)
 		}
 	}
-	for i, c := range p.Checks {
-		if c.Description == "" || c.APIVersion == "" || c.Kind == "" {
-			return fmt.Errorf("check %d: description, apiVersion and kind are required", i+1)
-		}
-		if (c.Name == "") == (c.Selector == "") {
-			return fmt.Errorf("check %d: set exactly one of name and selector", i+1)
-		}
-		if c.JSONPath != "" {
-			if _, err := parseJSONPath(c.JSONPath); err != nil {
-				return fmt.Errorf("check %d: jsonpath: %w", i+1, err)
+	for name, steps := range map[string][]Step{"nodeSetup": p.NodeSetup, "cleanup": p.Cleanup, "answerRun": p.AnswerRun} {
+		for i, st := range steps {
+			if !nodeRe.MatchString(st.Node) || strings.TrimSpace(st.Run) == "" {
+				return fmt.Errorf("%s %d: node must be cp/worker(N) and run is required", name, i+1)
 			}
-		} else if c.Equals != nil || c.Contains != "" || c.Exists {
-			return fmt.Errorf("check %d: equals/contains/exists need a jsonpath", i+1)
+		}
+	}
+	for i, c := range p.Checks {
+		if err := c.validate(); err != nil {
+			return fmt.Errorf("check %d: %w", i+1, err)
 		}
 	}
 	return nil
+}
+
+func (c *Check) validate() error {
+	if c.Description == "" {
+		return errors.New("description is required")
+	}
+	kinds := 0
+	if c.Kind != "" || c.APIVersion != "" {
+		kinds++
+	}
+	if c.Node != "" || c.Run != "" {
+		kinds++
+	}
+	if c.CanI != nil {
+		kinds++
+	}
+	if kinds != 1 {
+		return errors.New("set exactly one of an object (apiVersion/kind), a node command (node/run) or canI")
+	}
+	switch {
+	case c.CanI != nil:
+		if !saRe.MatchString(c.CanI.ServiceAccount) || c.CanI.Verb == "" || c.CanI.Resource == "" {
+			return errors.New("canI needs serviceAccount (<ns>/<name>), verb and resource")
+		}
+		if c.Allowed == nil {
+			return errors.New("canI needs allowed: true or false")
+		}
+	case c.Node != "" || c.Run != "":
+		if !nodeRe.MatchString(c.Node) || strings.TrimSpace(c.Run) == "" {
+			return errors.New("a node check needs node (cp/worker(N)) and run")
+		}
+	default:
+		if c.APIVersion == "" || c.Kind == "" {
+			return errors.New("apiVersion and kind are required")
+		}
+		if (c.Name == "") == (c.Selector == "" && c.FieldSelector == "") {
+			return errors.New("set exactly one of name and selector/fieldSelector")
+		}
+		if c.JSONPath != "" {
+			if _, err := parseJSONPath(c.JSONPath); err != nil {
+				return fmt.Errorf("jsonpath: %w", err)
+			}
+		} else if c.Equals != nil || c.Contains != "" || c.Exists {
+			return errors.New("equals/contains/exists need a jsonpath")
+		}
+	}
+	if c.Allowed != nil && c.CanI == nil {
+		return errors.New("allowed is only for canI")
+	}
+	return nil
+}
+
+// usesNodes はノードに入る (ノードの名前を使う) 問題か。cleanup は後片付けなので数えない。
+func (p *Problem) usesNodes() bool {
+	if len(p.NodeSetup)+len(p.AnswerRun) > 0 || phRe.MatchString(p.Answer) || phRe.MatchString(p.Setup) {
+		return true
+	}
+	for _, c := range p.Checks {
+		eq := ""
+		if c.Equals != nil {
+			eq = *c.Equals
+		}
+		if c.Node != "" || phRe.MatchString(c.Name+c.Selector+c.FieldSelector+c.JSONPath+eq) {
+			return true
+		}
+	}
+	return false
 }
 
 // protectedNamespaces は問題が消してはいけない Namespace。
@@ -162,26 +274,80 @@ func parseJSONPath(expr string) (*jsonpath.JSONPath, error) {
 	return j, nil
 }
 
-// Cluster は問題を出すクラスタの操作 (kube.Client が満たす。テストで差し替える)。
+// Cluster は問題を出すクラスタの Kubernetes の操作 (kube.Client が満たす。テストで差し替える)。
 type Cluster interface {
 	Apply(ctx context.Context, manifest string) error
 	Get(ctx context.Context, apiVersion, kind, ns, name string) (map[string]any, error)
-	List(ctx context.Context, apiVersion, kind, ns, selector string) (map[string]any, error)
+	List(ctx context.Context, apiVersion, kind, ns, selector, fieldSelector string) (map[string]any, error)
 	DeleteNamespace(ctx context.Context, name string) error
 	NamespaceExists(ctx context.Context, name string) (bool, error)
+	CanI(ctx context.Context, user string, groups []string, verb, group, resource, ns string) (bool, error)
+}
+
+// Target は問題を出すクラスタ。
+type Target struct {
+	Kube   Cluster
+	Distro string
+	// Nodes は別名 (cp, worker, worker2, ...) からノードの名前。Run と一緒に、ノードに入れるクラスタだけ
+	Nodes map[string]string
+	// Run は別名のノードで script を動かす。ノードに入れないクラスタは nil
+	Run func(ctx context.Context, node, script string) (*nodeexec.Result, error)
+}
+
+// expand は {{cp}} や {{worker}} をノードの名前に置き換える。知らない別名があればエラー。
+func (t *Target) expand(s string) (string, error) {
+	var missing string
+	out := phRe.ReplaceAllStringFunc(s, func(m string) string {
+		alias := phRe.FindStringSubmatch(m)[1]
+		if name, ok := t.Nodes[alias]; ok {
+			return name
+		}
+		missing = alias
+		return m
+	})
+	if missing != "" {
+		return "", fmt.Errorf("the cluster has no node %q: %w", missing, ErrUnsupported)
+	}
+	return out, nil
+}
+
+func (t *Target) runSteps(ctx context.Context, what string, steps []Step, skipMissing bool) error {
+	for _, st := range steps {
+		if _, ok := t.Nodes[st.Node]; !ok {
+			if skipMissing {
+				continue
+			}
+			return fmt.Errorf("%s: the cluster has no node %q: %w", what, st.Node, ErrUnsupported)
+		}
+		script, err := t.expand(st.Run)
+		if err != nil {
+			if skipMissing {
+				continue
+			}
+			return err
+		}
+		res, err := t.Run(ctx, st.Node, script)
+		if err != nil {
+			return fmt.Errorf("%s on %s: %w", what, st.Node, err)
+		}
+		if res.ExitCode != 0 {
+			return fmt.Errorf("%s on %s exited with %d: %s", what, st.Node, res.ExitCode, strings.TrimSpace(res.Output))
+		}
+	}
+	return nil
 }
 
 // Service は問題の一覧と、準備・採点。
 type Service struct {
 	problems []*Problem
 	byID     map[string]*Problem
-	connect  func(ctx context.Context, cluster string) (Cluster, error)
+	connect  func(ctx context.Context, cluster string) (*Target, error)
 	poll     time.Duration
 	nsWait   time.Duration
 }
 
-// NewService は問題を読み込む。connect はクラスタ名から操作用のクライアントを作る。
-func NewService(connect func(ctx context.Context, cluster string) (Cluster, error)) (*Service, error) {
+// NewService は問題を読み込む。connect はクラスタ名から問題を出す相手を作る。
+func NewService(connect func(ctx context.Context, cluster string) (*Target, error)) (*Service, error) {
 	ps, err := Load()
 	if err != nil {
 		return nil, err
@@ -189,7 +355,7 @@ func NewService(connect func(ctx context.Context, cluster string) (Cluster, erro
 	return newService(ps, connect), nil
 }
 
-func newService(ps []*Problem, connect func(ctx context.Context, cluster string) (Cluster, error)) *Service {
+func newService(ps []*Problem, connect func(ctx context.Context, cluster string) (*Target, error)) *Service {
 	s := &Service{problems: ps, byID: map[string]*Problem{}, connect: connect, poll: 2 * time.Second, nsWait: 3 * time.Minute}
 	for _, p := range ps {
 		s.byID[p.ID] = p
@@ -201,7 +367,7 @@ func newService(ps []*Problem, connect func(ctx context.Context, cluster string)
 func (s *Service) List() []Summary {
 	out := make([]Summary, 0, len(s.problems))
 	for _, p := range s.problems {
-		out = append(out, Summary{ID: p.ID, Exam: p.Exam, Domain: p.Domain, Title: p.Title, Weight: p.Weight})
+		out = append(out, Summary{ID: p.ID, Exam: p.Exam, Domain: p.Domain, Title: p.Title, Weight: p.Weight, Requires: p.Requires, Nodes: p.usesNodes()})
 	}
 	slices.SortStableFunc(out, func(a, b Summary) int {
 		return strings.Compare(a.Exam+"\x00"+a.Domain+"\x00"+a.ID, b.Exam+"\x00"+b.Domain+"\x00"+b.ID)
@@ -218,19 +384,45 @@ func (s *Service) Get(id string) (*Problem, error) {
 	return p, nil
 }
 
-// Setup は問題の Namespace を消して (消え終わるのを待って) から、setup を適用する。
+// target は問題を出す相手を作り、その問題を出せるか確かめる。
+func (s *Service) target(ctx context.Context, cluster string, p *Problem) (*Target, error) {
+	t, err := s.connect(ctx, cluster)
+	if err != nil {
+		return nil, err
+	}
+	if p.Requires != "" && t.Distro != p.Requires {
+		return nil, fmt.Errorf("%s needs a %s cluster (%s is %s): %w", p.ID, p.Requires, cluster, t.Distro, ErrUnsupported)
+	}
+	if p.usesNodes() && t.Run == nil {
+		return nil, fmt.Errorf("%s needs ssh access to the nodes, which %s does not have (create a new cluster): %w", p.ID, cluster, ErrUnsupported)
+	}
+	return t, nil
+}
+
+// Setup はノードの後片付けをし、問題の Namespace を消して (消え終わるのを待って) から、setup と nodeSetup を適用する。
 // 何度呼んでも同じ「出題直後」の状態になる (やり直しにも使う)。
 func (s *Service) Setup(ctx context.Context, cluster, id string) error {
 	p, err := s.Get(id)
 	if err != nil {
 		return err
 	}
-	c, err := s.connect(ctx, cluster)
+	t, err := s.target(ctx, cluster, p)
 	if err != nil {
 		return err
 	}
+	// ほかの問題がノードに残した変更を戻す (このクラスタで出せる問題の分だけ。無いノードの手順は飛ばす)
+	if t.Run != nil {
+		for _, q := range s.problems {
+			if len(q.Cleanup) == 0 || (q.Requires != "" && q.Requires != t.Distro) {
+				continue
+			}
+			if err := t.runSteps(ctx, q.ID+" cleanup", q.Cleanup, true); err != nil {
+				return err
+			}
+		}
+	}
 	for _, ns := range p.Namespaces {
-		if err := c.DeleteNamespace(ctx, ns); err != nil {
+		if err := t.Kube.DeleteNamespace(ctx, ns); err != nil {
 			return fmt.Errorf("delete namespace %s: %w", ns, err)
 		}
 	}
@@ -238,7 +430,7 @@ func (s *Service) Setup(ctx context.Context, cluster, id string) error {
 	defer cancel()
 	for _, ns := range p.Namespaces {
 		for {
-			exists, err := c.NamespaceExists(wctx, ns)
+			exists, err := t.Kube.NamespaceExists(wctx, ns)
 			if err != nil {
 				return fmt.Errorf("namespace %s: %w", ns, err)
 			}
@@ -252,13 +444,38 @@ func (s *Service) Setup(ctx context.Context, cluster, id string) error {
 			}
 		}
 	}
-	if strings.TrimSpace(p.Setup) == "" {
-		return nil
+	if strings.TrimSpace(p.Setup) != "" {
+		manifest, err := t.expand(p.Setup)
+		if err != nil {
+			return err
+		}
+		if err := t.Kube.Apply(ctx, manifest); err != nil {
+			return fmt.Errorf("setup: %w", err)
+		}
 	}
-	if err := c.Apply(ctx, p.Setup); err != nil {
-		return fmt.Errorf("setup: %w", err)
+	return t.runSteps(ctx, "nodeSetup", p.NodeSetup, false)
+}
+
+// Solve は模範解答をクラスタに当てる (answer のマニフェストと answerRun)。
+func (s *Service) Solve(ctx context.Context, cluster, id string) error {
+	p, err := s.Get(id)
+	if err != nil {
+		return err
 	}
-	return nil
+	t, err := s.target(ctx, cluster, p)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(p.Answer) != "" {
+		manifest, err := t.expand(p.Answer)
+		if err != nil {
+			return err
+		}
+		if err := t.Kube.Apply(ctx, manifest); err != nil {
+			return fmt.Errorf("answer: %w", err)
+		}
+	}
+	return t.runSteps(ctx, "answerRun", p.AnswerRun, false)
 }
 
 // CheckResult は採点の 1 項目の結果。答えが分かってしまうので、実際の値は返さない。
@@ -284,13 +501,13 @@ func (s *Service) Check(ctx context.Context, cluster, id string) (*Result, error
 	if err != nil {
 		return nil, err
 	}
-	c, err := s.connect(ctx, cluster)
+	t, err := s.target(ctx, cluster, p)
 	if err != nil {
 		return nil, err
 	}
 	r := &Result{ID: p.ID, Weight: p.Weight, Total: len(p.Checks)}
 	for _, chk := range p.Checks {
-		ok, msg, err := evaluate(ctx, c, chk)
+		ok, msg, err := evaluate(ctx, t, chk)
 		if err != nil {
 			return nil, fmt.Errorf("check %q: %w", chk.Description, err)
 		}
@@ -304,30 +521,76 @@ func (s *Service) Check(ctx context.Context, cluster, id string) (*Result, error
 }
 
 // evaluate は 1 項目を確かめる。クラスタに届かないなどはエラー、条件を満たさないのは (false, 理由)。
-func evaluate(ctx context.Context, c Cluster, chk Check) (bool, string, error) {
+func evaluate(ctx context.Context, t *Target, chk Check) (bool, string, error) {
+	switch {
+	case chk.CanI != nil:
+		ns, name, _ := strings.Cut(chk.CanI.ServiceAccount, "/")
+		user := "system:serviceaccount:" + ns + ":" + name
+		groups := []string{"system:serviceaccounts", "system:serviceaccounts:" + ns, "system:authenticated"}
+		allowed, err := t.Kube.CanI(ctx, user, groups, chk.CanI.Verb, chk.CanI.Group, chk.CanI.Resource, chk.CanI.Namespace)
+		if err != nil {
+			return false, "", err
+		}
+		if allowed != *chk.Allowed {
+			return false, "権限が違います", nil
+		}
+		return true, "", nil
+	case chk.Node != "":
+		script, err := t.expand(chk.Run)
+		if err != nil {
+			return false, "", err
+		}
+		res, err := t.Run(ctx, chk.Node, script)
+		if err != nil {
+			return false, "", err
+		}
+		if res.ExitCode != 0 {
+			return false, "ノードでの確認が通りません", nil
+		}
+		return true, "", nil
+	}
+
+	name, err := t.expand(chk.Name)
+	if err != nil {
+		return false, "", err
+	}
 	var obj map[string]any
-	var err error
-	if chk.Name != "" {
-		obj, err = c.Get(ctx, chk.APIVersion, chk.Kind, chk.Namespace, chk.Name)
+	if name != "" {
+		obj, err = t.Kube.Get(ctx, chk.APIVersion, chk.Kind, chk.Namespace, name)
 	} else {
-		obj, err = c.List(ctx, chk.APIVersion, chk.Kind, chk.Namespace, chk.Selector)
+		var sel, fsel string
+		if sel, err = t.expand(chk.Selector); err != nil {
+			return false, "", err
+		}
+		if fsel, err = t.expand(chk.FieldSelector); err != nil {
+			return false, "", err
+		}
+		obj, err = t.Kube.List(ctx, chk.APIVersion, chk.Kind, chk.Namespace, sel, fsel)
 	}
 	if err != nil {
 		return false, "", err
 	}
 	if obj == nil {
-		return false, fmt.Sprintf("%s %s が見つかりません", chk.Kind, chk.Name), nil
+		return false, fmt.Sprintf("%s %s が見つかりません", chk.Kind, name), nil
 	}
 	if chk.JSONPath == "" {
 		return true, "", nil
 	}
-	got, err := find(obj, chk.JSONPath)
+	expr, err := t.expand(chk.JSONPath)
+	if err != nil {
+		return false, "", err
+	}
+	got, err := find(obj, expr)
 	if err != nil {
 		return false, "", err
 	}
 	switch {
 	case chk.Equals != nil:
-		if got != strings.TrimSpace(*chk.Equals) {
+		want, err := t.expand(strings.TrimSpace(*chk.Equals))
+		if err != nil {
+			return false, "", err
+		}
+		if got != want {
 			return false, "値が違います", nil
 		}
 	case chk.Contains != "":
