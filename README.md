@@ -209,6 +209,22 @@ kubectl --kubeconfig demo.kubeconfig -n kube-system port-forward svc/hubble-ui 1
 `cni` (`cilium` / `flannel`)、`hubble` (Cilium なら `true`)、`runtime.default` (`runc` / `crun` / `youki`)、
 `runtime.install` (追加で入れるランタイム。既定にしたものは自動で入る)。
 
+### SSH でつないでいる PC から kubectl を使う
+
+クラスタはミニPC の中の NAT (`172.30.0.0/16`) にあるので、PC からは SSH の SOCKS プロキシを通して使う。
+Web UI のクラスタの画面の「SSH 経由用の kubeconfig」(API では `GET /api/clusters/{name}/kubeconfig?proxy=socks5://localhost:1080`)
+は、`server` はそのままで `proxy-url: socks5://localhost:1080` を入れた kubeconfig を返す。
+
+```bash
+ssh -N -D 1080 -L 8080:localhost:8080 niwadmin@192.168.0.50
+```
+
+```bash
+kubectl --kubeconfig k3s-1-ssh.kubeconfig get nodes
+```
+
+クラスタがいくつあっても SSH は 1 本でよい (どのクラスタも同じ SOCKS プロキシで届く)。
+
 ### LoadBalancer と LAN からの接続
 
 Cilium のクラスタでは、`type: LoadBalancer` の Service に `172.30.N.100〜199` の IP が割り当てられる

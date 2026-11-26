@@ -236,6 +236,23 @@ func TestKubeconfig(t *testing.T) {
 	if _, err := cs.Kubeconfig(ctx, "nope"); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("want ErrNotFound, got %v", err)
 	}
+	if strings.Contains(string(raw), "proxy-url") {
+		t.Errorf("proxy-url must not be set by default: %s", raw)
+	}
+
+	// SSH の SOCKS プロキシ経由で使う kubeconfig: server はそのまま、proxy-url を足す
+	raw, err = cs.Kubeconfig(ctx, "demo", KubeconfigOptions{ProxyURL: "socks5://localhost:1080"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "server: https://172.30.1.11:6443") || !strings.Contains(string(raw), "proxy-url: socks5://localhost:1080") {
+		t.Errorf("kubeconfig with proxy: %s", raw)
+	}
+	for _, bad := range []string{"localhost:1080", "ftp://localhost:1080", "socks5://localhost", "socks5://u:p@localhost:1080", "socks5://localhost:1080/x", "socks5://:1080"} {
+		if _, err := cs.Kubeconfig(ctx, "demo", KubeconfigOptions{ProxyURL: bad}); !errors.Is(err, machine.ErrInvalid) {
+			t.Errorf("%s: want ErrInvalid, got %v", bad, err)
+		}
+	}
 }
 
 func TestKubeadmCluster(t *testing.T) {

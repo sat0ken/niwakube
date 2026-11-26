@@ -3,6 +3,8 @@
 
 const app = document.getElementById("app");
 const REFRESH_MS = 5000;
+// SSH 経由用の kubeconfig の proxy-url (PC で ssh -D 1080 を使う前提)
+const SSH_PROXY = "socks5://localhost:1080";
 
 // ---------- 小さな道具 ----------
 
@@ -259,11 +261,15 @@ async function viewCluster(name) {
     <div class="card">
       <div class="actions">
         <a class="button" href="/api/clusters/${enc}/kubeconfig" download>kubeconfig をダウンロード</a>
+        <a class="button" href="/api/clusters/${enc}/kubeconfig?proxy=${encodeURIComponent(SSH_PROXY)}" download
+          title="ミニPC の外 (SSH でつないでいる PC) から使う kubeconfig。proxy-url: ${SSH_PROXY} 入り">SSH 経由用の kubeconfig</a>
         ${c.distro === "talos" ? html`<a class="button" href="/api/clusters/${enc}/talosconfig" download>talosconfig をダウンロード</a>` : ""}
         <button data-act="start" ${c.desiredState === "running" ? raw("disabled") : ""}>起動</button>
         <button data-act="stop" ${c.desiredState === "stopped" ? raw("disabled") : ""}>停止</button>
         <button class="danger" data-act="delete">削除</button>
       </div>
+      <p class="hint spaced-top">「SSH 経由用の kubeconfig」は、PC で <code>ssh -N -D 1080 &lt;ユーザー&gt;@&lt;ミニPC&gt;</code> をつないだまま、
+        PC の kubectl で使います (クラスタがいくつあっても SSH は 1 本でよい)。ミニPC の上では普通の kubeconfig を使います。</p>
     </div>
     <div class="card">
       <h2>概要</h2>

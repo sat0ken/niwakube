@@ -136,6 +136,11 @@ func TestClusterAPI(t *testing.T) {
 		resp.Header.Get("Content-Type") != "application/yaml" {
 		t.Errorf("kubeconfig: %d %s", resp.StatusCode, body)
 	}
+	resp, body = do(t, http.MethodGet, base+"/demo/kubeconfig?proxy=socks5%3A%2F%2Flocalhost%3A1080", "")
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "proxy-url: socks5://localhost:1080") ||
+		!strings.Contains(resp.Header.Get("Content-Disposition"), `filename="demo-ssh.kubeconfig"`) {
+		t.Errorf("kubeconfig via SSH: %d %v %s", resp.StatusCode, resp.Header, body)
+	}
 
 	cases := []struct {
 		method, path, body string
@@ -149,6 +154,7 @@ func TestClusterAPI(t *testing.T) {
 		{http.MethodPost, "/demo/stop", "", http.StatusOK},
 		{http.MethodPost, "/demo/start", "", http.StatusOK},
 		{http.MethodGet, "/nope/kubeconfig", "", http.StatusNotFound},
+		{http.MethodGet, "/demo/kubeconfig?proxy=ftp%3A%2F%2Fx%3A1", "", http.StatusBadRequest},
 		{http.MethodGet, "/demo/talosconfig", "", http.StatusNotImplemented},
 		{http.MethodPost, "/demo/forwards", `{"hostPort":18080,"ip":"172.30.1.100","port":8080}`, http.StatusCreated},
 		{http.MethodPost, "/demo/forwards", `{"hostPort":18080,"ip":"172.30.1.100","port":8080}`, http.StatusConflict},

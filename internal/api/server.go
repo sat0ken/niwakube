@@ -65,7 +65,7 @@ func New(svc *machine.Service, clusters *cluster.Service, log *slog.Logger, opts
 //	DELETE /api/clusters/{name}
 //	POST   /api/clusters/{name}/start
 //	POST   /api/clusters/{name}/stop
-//	GET    /api/clusters/{name}/kubeconfig
+//	GET    /api/clusters/{name}/kubeconfig     ?proxy=socks5://localhost:1080 で proxy-url を入れる
 //	GET    /api/clusters/{name}/talosconfig  Talos のみ
 //	GET    /api/clusters/{name}/forwards     ホストのポートからクラスタへの転送の一覧
 //	POST   /api/clusters/{name}/forwards     {"hostPort":8080,"ip":"172.30.1.100","port":80}
@@ -259,15 +259,22 @@ func (s *Server) stopCluster(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, c)
 }
 
+// kubeconfig は admin の kubeconfig を返す。?proxy=socks5://localhost:1080 を付けると proxy-url を入れる
+// (別の PC から ssh -D 1080 の SOCKS プロキシ経由で kubectl を使うため)。
 func (s *Server) kubeconfig(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	b, err := s.clusters.Kubeconfig(r.Context(), name)
+	proxy := r.URL.Query().Get("proxy")
+	b, err := s.clusters.Kubeconfig(r.Context(), name, cluster.KubeconfigOptions{ProxyURL: proxy})
 	if err != nil {
 		s.writeError(w, err)
 		return
 	}
+	filename := name + ".kubeconfig"
+	if proxy != "" {
+		filename = name + "-ssh.kubeconfig"
+	}
 	w.Header().Set("Content-Type", "application/yaml")
-	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`.kubeconfig"`)
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 	_, _ = w.Write(b)
 }
 

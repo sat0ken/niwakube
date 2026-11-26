@@ -89,6 +89,7 @@ type kcCluster struct {
 	Cluster struct {
 		Server                   string `yaml:"server"`
 		CertificateAuthorityData string `yaml:"certificate-authority-data"`
+		ProxyURL                 string `yaml:"proxy-url,omitempty"`
 	} `yaml:"cluster"`
 }
 
@@ -110,12 +111,13 @@ type kcContext struct {
 
 func b64(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 
-func buildKubeconfig(name, server, serverCA string, admin pki.KeyPair) ([]byte, error) {
+func buildKubeconfig(name, server, serverCA, proxyURL string, admin pki.KeyPair) ([]byte, error) {
 	user := name + "-admin"
 	var c kcCluster
 	c.Name = name
 	c.Cluster.Server = server
 	c.Cluster.CertificateAuthorityData = b64(serverCA)
+	c.Cluster.ProxyURL = proxyURL
 	var u kcUser
 	u.Name = user
 	u.User.ClientCertificateData = b64(admin.CertPEM)
