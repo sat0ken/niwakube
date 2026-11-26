@@ -120,3 +120,12 @@ func (n *Nodes) ReadySince(ctx context.Context, node string, since time.Time) (b
 	}
 	return false, nil
 }
+
+// DeleteNode は Node オブジェクトを消す (ワーカーを減らすとき、マシンを消す前に呼ぶ)。無ければ何もしない。
+func (n *Nodes) DeleteNode(ctx context.Context, node string) error {
+	err := n.cs.CoreV1().Nodes().Delete(ctx, node, metav1.DeleteOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	return err
+}

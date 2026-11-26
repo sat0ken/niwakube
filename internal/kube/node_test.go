@@ -139,3 +139,18 @@ func TestReadySince(t *testing.T) {
 		}
 	}
 }
+
+func TestDeleteNode(t *testing.T) {
+	cs := fake.NewSimpleClientset(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "w2"}})
+	n := NewNodesFor(cs)
+	if err := n.DeleteNode(context.Background(), "w2"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cs.CoreV1().Nodes().Get(context.Background(), "w2", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("node must be deleted: %v", err)
+	}
+	// もう無いノードはエラーにしない (途中で失敗してやり直したとき)
+	if err := n.DeleteNode(context.Background(), "w2"); err != nil {
+		t.Errorf("deleting a missing node: %v", err)
+	}
+}

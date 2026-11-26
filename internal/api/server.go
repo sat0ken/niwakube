@@ -72,6 +72,7 @@ func New(svc *machine.Service, clusters *cluster.Service, log *slog.Logger, opts
 //	POST   /api/clusters/{name}/start
 //	POST   /api/clusters/{name}/stop
 //	POST   /api/clusters/{name}/resize   {"role":"worker","size":{"cpus":4,"memoryMiB":8192,"diskGiB":50}} 1 台ずつ drain して再起動 (202)
+//	POST   /api/clusters/{name}/scale    {"workers":3} ワーカーの台数を変える (減らすときは drain してから消す) (202)
 //	GET    /api/clusters/{name}/kubeconfig     ?proxy=socks5://localhost:1080 で proxy-url を入れる
 //	GET    /api/kubeconfig?cluster=a&cluster=b  複数のクラスタを 1 つにまとめた kubeconfig (?proxy= も使える)
 //	GET    /api/clusters/{name}/terminal       WebSocket。クラスタの kubeconfig を設定したシェル (Web UI のターミナル)
@@ -110,6 +111,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/clusters/{name}/start", s.startCluster)
 	mux.HandleFunc("POST /api/clusters/{name}/stop", s.stopCluster)
 	mux.HandleFunc("POST /api/clusters/{name}/resize", s.resizeCluster)
+	mux.HandleFunc("POST /api/clusters/{name}/scale", s.scaleCluster)
 	mux.HandleFunc("GET /api/clusters/{name}/kubeconfig", s.kubeconfig)
 	mux.HandleFunc("GET /api/kubeconfig", s.mergedKubeconfig)
 	mux.HandleFunc("GET /api/clusters/{name}/terminal", s.terminal)
@@ -286,6 +288,20 @@ func (s *Server) resizeCluster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c, err := s.clusters.Resize(r.Context(), r.PathValue("name"), req)
+	if err != nil {
+		s.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, c)
+}
+
+// scaleCluster はワーカーの台数を変える ({"workers":3})。裏で進むので 202 を返す。
+func (s *Server) scaleCluster(w http.ResponseWriter, r *http.Request) {
+	var req cluster.ScaleRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	c, err := s.clusters.Scale(r.Context(), r.PathValue("name"), req)
 	if err != nil {
 		s.writeError(w, err)
 		return

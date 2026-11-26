@@ -200,6 +200,8 @@ kubectl --kubeconfig demo.kubeconfig -n kube-system port-forward svc/hubble-ui 1
 | DELETE | `/api/clusters/{name}` | ノードをすべて削除する |
 | POST | `/api/clusters/{name}/start` | すべてのノードを起動 (CP から) |
 | POST | `/api/clusters/{name}/stop` | すべてのノードを正常停止 (ワーカーから) |
+| POST | `/api/clusters/{name}/resize` | ロールのノードのサイズを変える (下記、202) |
+| POST | `/api/clusters/{name}/scale` | ワーカーの台数を変える (`{"workers":3}`、下記、202) |
 | GET | `/api/clusters/{name}/kubeconfig` | admin の kubeconfig |
 | GET | `/api/clusters/{name}/talosconfig` | Talos の talosconfig (Talos のみ) |
 | GET / POST / DELETE | `/api/clusters/{name}/forwards` | ホストのポートからクラスタへの転送 (下記) |
@@ -247,6 +249,21 @@ curl -s -X POST localhost:8080/api/clusters/demo/resize -d '{"role":"worker","si
 - ディスクは広げるだけ。パーティションとファイルシステムは起動時に広がる (Ubuntu は cloud-init、Talos は自動)
 - クラスタの構成も更新するので、これから足すノードも新しいサイズになる
 - クラスタのノードは単体の VM の API (`/api/vms/{name}/resize`) では変えられない (drain しないため)
+
+### ワーカーの台数を変える
+
+クラスタの画面の「ワーカーの台数を変える」(API では `POST /api/clusters/{name}/scale`) で、作ったあとにワーカーを増やしたり減らしたりできる (0〜50 台)。
+
+```bash
+curl -s -X POST localhost:8080/api/clusters/demo/scale -d '{"workers":3}'
+```
+
+- 増やす: 空いている番号 (`<クラスタ>-worker-N`、IP は `172.30.<n>.20+N`) のワーカーを、クラスタを作ったときと同じ参加の設定
+  (k3s のトークン、kubeadm の期限なしのブートストラップトークン、Talos の worker の設定) で作る。サイズは今のワーカーのサイズ
+- 減らす: 番号の大きいワーカーから 1 台ずつ、cordon → drain → Node を消す → マシンを消す。
+  Kubernetes の API に届かないときは、Node を残さないようにマシンを消さずに止まる (`failed: ...`)
+- 消したワーカーのディスクのデータ (hostPath や local-path の PV) は残らない。NFS の PV は残る
+- 進み具合はクラスタの `operation` に出る。クラスタが動いているときだけ変えられる
 
 ### Web UI のターミナル
 

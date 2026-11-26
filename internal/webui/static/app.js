@@ -66,8 +66,11 @@ function stateBadge(state) {
 function operationLabel(op) {
   if (!op) return "";
   if (op.startsWith("failed:")) return `失敗: ${op.slice(7).trim()}`;
-  const m = op.match(/^resizing (.+)$/);
-  return m ? `サイズを変更中: ${m[1]}` : op;
+  for (const [re, label] of [[/^resizing (.+)$/, "サイズを変更中"], [/^adding (.+)$/, "ワーカーを追加中"], [/^removing (.+)$/, "ワーカーを削除中"]]) {
+    const m = op.match(re);
+    if (m) return `${label}: ${m[1]}`;
+  }
+  return op;
 }
 
 // クラスタの画面で操作が進んでいる間は、画面全体を 5 秒ごとに更新する
@@ -352,6 +355,17 @@ async function viewCluster(name) {
       </table></div>
     </div>
     <div class="card">
+      <h2>ワーカーの台数を変える</h2>
+      <p class="hint">増やすと、新しいワーカーを作ってクラスタに参加させます (サイズは今のワーカーのサイズ)。
+        減らすと、番号の大きいワーカーから 1 台ずつ drain (Pod をほかのノードへ移す) してから Node とマシンを消します。
+        消したワーカーのディスクのデータ (hostPath や local-path の PV) は残りません。</p>
+      <form id="scale-form" class="inline" autocomplete="off">
+        <label class="inline">ワーカー <input name="workers" type="number" min="0" max="50" value="${c.machines.filter((m) => m.role === "worker").length}" required> 台</label>
+        <button class="primary" type="submit" ${(c.operation && !c.operation.startsWith("failed:")) || c.desiredState !== "running" ? raw("disabled") : ""}>適用</button>
+        ${c.desiredState !== "running" ? html`<span class="hint">クラスタを起動してから変えられます</span>` : ""}
+      </form>
+    </div>
+    <div class="card">
       <h2>ノードのサイズを変える</h2>
       <p class="hint">選んだ役割のノードを 1 台ずつ、drain (Pod をほかのノードへ移す) → 止めてサイズを変えて起動 → Ready に戻ったら次へ、の順に変えます。
         ワーカーが 2 台以上ならサービスは止まりません。コントロールプレーンは 1 台なので、再起動中の 1〜2 分は API が使えません。
@@ -439,6 +453,20 @@ async function viewCluster(name) {
     try {
       await api("POST", `/api/clusters/${enc}/resize`, { role, size });
       toast(`${label}のサイズの変更を始めました。1 台ずつ再起動します`);
+      document.activeElement.blur();
+      render();
+    } catch (err) { toast(err.message, true); }
+  });
+  const sf = document.getElementById("scale-form");
+  sf.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const have = c.machines.filter((m) => m.role === "worker").length;
+    const workers = Number(sf.workers.value);
+    if (workers === have) return;
+    if (workers < have && !confirm(`ワーカーを ${have} 台から ${workers} 台に減らします。番号の大きい ${have - workers} 台を drain してから削除します。よろしいですか?`)) return;
+    try {
+      await api("POST", `/api/clusters/${enc}/scale`, { workers });
+      toast(workers > have ? `ワーカーを ${workers - have} 台追加しています` : `ワーカーを ${have - workers} 台減らしています`);
       document.activeElement.blur();
       render();
     } catch (err) { toast(err.message, true); }
