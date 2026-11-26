@@ -14,9 +14,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sat0ken/niwakube/internal/installer"
 	"github.com/sat0ken/niwakube/internal/sys"
@@ -91,6 +93,12 @@ func run(args []string) error {
 			if err != nil {
 				return err
 			}
+			if c.Install.ISOMirror != "" {
+				// render はネットワークに触らないので、ミラーにあるかは確かめない
+				if u, err := installer.MirrorURL(c.Install.ISOMirror, iso.URL); err == nil {
+					iso.Mirrors = []string{u}
+				}
+			}
 			g, err := c.GrubConfig(iso)
 			if err != nil {
 				return err
@@ -107,6 +115,16 @@ func run(args []string) error {
 			return err
 		}
 		fmt.Print(c.Summary())
+		if gh := c.User.GitHubKeys; gh != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			n, err := c.EmbedGitHubKeys(ctx, http.DefaultClient)
+			cancel()
+			if err != nil {
+				return fmt.Errorf("user.github_keys: %w", err)
+			}
+			fmt.Printf("ssh keys: embedded %d key(s) from github.com/%s.keys\n", n, gh)
+		}
+		iso = withMirror(c, iso)
 		if err := c.Build(context.Background(), sys.ExecRunner{}, installer.BuildOptions{MiniISO: *mini, Server: iso, Output: *out}); err != nil {
 			return err
 		}
@@ -115,6 +133,30 @@ func run(args []string) error {
 	default:
 		return usage()
 	}
+}
+
+// withMirror は install.iso_mirror に同じ ISO があれば、先に試す URL として足す。
+// 無ければ (同期が遅れているなど) 警告を出して releases.ubuntu.com だけにする。
+func withMirror(c *installer.Config, iso installer.ServerISO) installer.ServerISO {
+	if c.Install.ISOMirror == "" {
+		return iso
+	}
+	u, err := installer.MirrorURL(c.Install.ISOMirror, iso.URL)
+	if err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		err = installer.CheckMirror(ctx, http.DefaultClient, u, iso.Size)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: install.iso_mirror is not used: %v\n", err)
+		if os.Getenv("GITHUB_ACTIONS") == "true" {
+			fmt.Printf("::warning title=install.iso_mirror::not used (downloads from releases.ubuntu.com): %v\n", err)
+		}
+		return iso
+	}
+	fmt.Printf("iso mirror: %s\n", u)
+	iso.Mirrors = []string{u}
+	return iso
 }
 
 type multiFlag []string

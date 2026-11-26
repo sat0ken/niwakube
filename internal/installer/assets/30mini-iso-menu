@@ -53,9 +53,25 @@ for x in $(cat /proc/cmdline); do
     esac
 done
 
+# niwakube のパーティション構成 (ESP を /boot/efi) は UEFI 用。レガシー BIOS (CSM) で起動すると、
+# Server ISO を 3GB ダウンロードしたあとに "autoinstall config did not create needed bootloader partition" で
+# 止まってしまうので、最初に止めて UEFI で起動し直すよう案内する。
+require_uefi() {
+    [ -d /sys/firmware/efi ] && return 0
+    echo ""
+    echo "niwakube: ERROR: this PC booted the USB in legacy BIOS (CSM) mode."
+    echo "niwakube: niwakube installs Ubuntu for UEFI. Turn the PC off and boot the USB in UEFI mode:"
+    echo "niwakube:   - in the boot menu (F11 on ASRock), choose the entry that starts with \"UEFI:\""
+    echo "niwakube:   - or disable CSM in the BIOS setup (F2 > Boot > CSM > Disabled)"
+    echo ""
+    debug_shell "booted in legacy BIOS mode (power off and boot in UEFI mode)"
+    return 1
+}
+
 step1() {
     echo "niwakube: step1 (url=$NK_URL)"
     if [ -n "$NK_URL" ]; then
+        require_uefi || return
         MEDIA_URL="$NK_URL"
         MEDIA_SIZE="$NK_SIZE"
         MEDIA_256SUM="$NK_SUM"
@@ -93,6 +109,91 @@ step1() {
     kexec --exec
 }
 
+# download URLS TARGET SIZE: URLS ("," 区切り) の ISO を TARGET (/dev/pmem0) にダウンロードする。
+#
+# 元のスクリプトは wget を 1 回実行するだけなので、途中で LAN のリンクが切れるとそのまま止まってしまう。
+# initrd の busybox の wget にはタイムアウトもヘッダーの指定も無いので、次のようにする:
+#   - CHUNK ごとにダウンロードする。大きさ OFFSET の疎なファイルに wget -c すると
+#     "Range: bytes=OFFSET-" を送るので、途中から取れる
+#   - ファイルが STALL 秒増えなければ wget を止めて、そこから取り直す。取り直すたびに次の URL を使う
+#     (ミラーと releases.ubuntu.com を交互に試す。中身は最後に SHA256 で確かめる)
+#   - CHUNK 分取れたら TARGET の同じ位置に dd で書き、ファイルを消す (メモリを ISO 2 つ分使わない)
+show_network() {
+    echo "niwakube: ----- network -----"
+    ip -o link 2>&1 | cut -c1-120
+    ip -o -f inet addr 2>&1
+    ip route 2>&1
+    cat /etc/resolv.conf 2>&1
+    echo "niwakube: -------------------"
+}
+
+download() {
+    urls=$1 target=$2 size=$3
+    nurls=$(echo "$urls" | tr ',' '\n' | wc -l)
+    mib=1048576
+    chunk_mib=256
+    stall=30
+    tmp=/niwakube-download
+    [ -n "$size" ] || { echo "niwakube: ISO size is unknown"; return 1; }
+    total_mib=$(( (size + mib - 1) / mib ))
+    shown_net=""
+
+    off_mib=0
+    while [ "$off_mib" -lt "$total_mib" ]; do
+        end=$(( (off_mib + chunk_mib) * mib ))
+        [ "$end" -gt "$size" ] && end=$size
+        rm -f "$tmp"
+        # 大きさ OFFSET の疎なファイル (メモリは使わない)
+        dd if=/dev/null of="$tmp" bs=$mib seek=$off_mib 2>/dev/null || return 1
+        tries=0
+        while :; do
+            have=$(stat -c %s "$tmp")
+            [ "$have" -ge "$end" ] && break
+            tries=$((tries + 1))
+            if [ "$tries" -gt 100 ]; then
+                echo "niwakube: giving up after $tries attempts at $((have / mib)) MiB"
+                return 1
+            fi
+            url=$(echo "$urls" | tr ',' '\n' | sed -n "$(( (tries - 1) % nurls + 1 ))p")
+            [ "$tries" -gt 1 ] && echo "niwakube: retrying from $((have / mib)) MiB (attempt $tries, $url)"
+            # -q を付けない: "Connecting to host (address:443)" と wget のエラーが出るので、どこで止まったか分かる
+            wget -c -O "$tmp" "$url" &
+            pid=$!
+            last=$have
+            idle=0
+            while kill -0 "$pid" 2>/dev/null; do
+                sleep 1
+                now=$(stat -c %s "$tmp")
+                if [ "$now" -ge "$end" ]; then
+                    break
+                elif [ "$now" -gt "$last" ]; then
+                    last=$now
+                    idle=0
+                else
+                    idle=$((idle + 1))
+                    if [ "$idle" -ge "$stall" ]; then
+                        echo "niwakube: download stalled for ${stall}s at $((now / mib)) MiB (check the LAN cable / link)"
+                        if [ -z "$shown_net" ]; then
+                            shown_net=1
+                            show_network
+                        fi
+                        break
+                    fi
+                fi
+            done
+            kill "$pid" 2>/dev/null
+            wait "$pid" 2>/dev/null
+            # wget が失敗してすぐ終わったとき (リンクが切れている間など) に、連続で叩かない
+            [ "$(stat -c %s "$tmp")" -ge "$end" ] || sleep 3
+        done
+        count=$(( (end - off_mib * mib + mib - 1) / mib ))
+        dd if="$tmp" of="$target" bs=$mib skip=$off_mib seek=$off_mib count=$count conv=notrunc 2>/dev/null || return 1
+        off_mib=$((off_mib + chunk_mib))
+        echo "niwakube: downloaded $(( (end + mib - 1) / mib )) / $total_mib MiB"
+    done
+    rm -f "$tmp"
+}
+
 step2() {
     echo "niwakube: step2"
     configure_networking
@@ -100,8 +201,15 @@ step2() {
     target="/dev/pmem0"
     [ -e "$target" ] || debug_shell "failed to find $target"
 
-    echo "Downloading $URL ..."
-    wget "$URL" -O "$target" || debug_shell "download failed"
+    # IPv4 だけで取る。ルーターが IPv6 を配っていると、IPv6 の経路が使えないときに接続が止まってしまうため
+    # (DHCP で IPv4 のアドレスはもらっている。インストーラー本体の起動時には元に戻る)
+    v6=$(ip -o -f inet6 addr 2>/dev/null | grep -c 'scope global')
+    echo "niwakube: global IPv6 addresses: $v6 (IPv6 is disabled while downloading)"
+    for f in /proc/sys/net/ipv6/conf/*/disable_ipv6; do
+        [ -w "$f" ] && echo 1 > "$f"
+    done
+    echo "Downloading $(echo "$URL" | tr ',' ' ') ..."
+    download "$URL" "$target" "$MEDIA_SIZE" || debug_shell "download failed"
 
     if [ -n "$MEDIA_256SUM" ]; then
         echo "Checksum verification ..."

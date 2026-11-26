@@ -49,21 +49,29 @@ type Network struct {
 	Address string   `yaml:"address"` // 例: 192.168.1.50/24
 	Gateway string   `yaml:"gateway"`
 	DNS     []string `yaml:"dns"`
+	// IPv6 を false にすると、ルーターが配る IPv6 (RA のアドレスと DNS サーバー) を受け取らない。
+	// IPv6 の経路が使えない回線で、名前解決や接続が IPv6 に向かって止まるのを防ぐ (既定 true)
+	IPv6 *bool `yaml:"ipv6"`
 }
 
-// DiskMatch はインストール先のディスクの選び方。"largest" か、モデル名 / シリアル番号。
+// DiskMatch はインストール先のディスクの選び方。"largest"、"internal" か、モデル名 / シリアル番号。
 type DiskMatch struct {
-	Largest bool
-	Model   string
-	Serial  string
+	Largest  bool
+	Internal bool // 内蔵 (SATA / NVMe) のうち一番大きいディスク。USB のディスクは選ばない
+	Model    string
+	Serial   string
 }
 
 func (d *DiskMatch) UnmarshalYAML(n *yaml.Node) error {
 	if n.Kind == yaml.ScalarNode {
-		if n.Value != "largest" {
-			return fmt.Errorf("storage.disk: want \"largest\" or {model: ...} / {serial: ...}, got %q", n.Value)
+		switch n.Value {
+		case "largest":
+			d.Largest = true
+		case "internal":
+			d.Internal = true
+		default:
+			return fmt.Errorf("storage.disk: want \"largest\", \"internal\" or {model: ...} / {serial: ...}, got %q", n.Value)
 		}
-		d.Largest = true
 		return nil
 	}
 	var m struct {
@@ -83,6 +91,8 @@ func (d DiskMatch) String() string {
 		return "serial " + d.Serial
 	case d.Model != "":
 		return "model " + d.Model
+	case d.Internal:
+		return "largest internal disk (SATA / NVMe)"
 	default:
 		return "largest disk"
 	}
@@ -98,6 +108,9 @@ type InstallConfig struct {
 	After      string   `yaml:"after"`       // poweroff | reboot
 	Timeout    int      `yaml:"timeout"`     // GRUB のメニューの待ち時間 (秒)
 	KernelArgs []string `yaml:"kernel_args"` // インストーラーのカーネルに追加する引数
+	// ISOMirror は Server ISO を取るミラー (https://releases.ubuntu.com の代わり。
+	// 例: https://ftp.jaist.ac.jp/pub/Linux/ubuntu-releases)。止まったときは releases.ubuntu.com と交互に試す
+	ISOMirror string `yaml:"iso_mirror"`
 }
 
 type NiwakubeSetup struct {
@@ -117,6 +130,7 @@ var (
 	repoRe     = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 	refRe      = regexp.MustCompile(`^[A-Za-z0-9_./-]+$`)
 	safeArgRe  = regexp.MustCompile(`^[A-Za-z0-9_.,:=/+-]+$`)
+	mirrorRe   = regexp.MustCompile(`^https?://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9_.~/-]*)?$`)
 	simpleRe   = regexp.MustCompile(`^[A-Za-z0-9_./+-]+$`)
 	diskIDRe   = regexp.MustCompile(`^[A-Za-z0-9_.-]+( [A-Za-z0-9_.-]+)*$`)
 )
@@ -157,7 +171,7 @@ func (c *Config) setDefaults() {
 	if c.Ubuntu.Release == "" {
 		c.Ubuntu.Release = "26.04"
 	}
-	if !c.Storage.Disk.Largest && c.Storage.Disk.Model == "" && c.Storage.Disk.Serial == "" {
+	if !c.Storage.Disk.Largest && !c.Storage.Disk.Internal && c.Storage.Disk.Model == "" && c.Storage.Disk.Serial == "" {
 		c.Storage.Disk.Largest = true
 	}
 	if c.Storage.RootSize == "" {
@@ -239,7 +253,7 @@ func (c *Config) Validate() error {
 	case "confirm":
 	case "unattended":
 		if d.Largest {
-			bad("install.mode unattended erases the disk without asking, so storage.disk must be {model: ...} or {serial: ...}, not largest")
+			bad("install.mode unattended erases the disk without asking, so storage.disk must be internal, {model: ...} or {serial: ...}, not largest")
 		}
 	default:
 		bad("install.mode must be confirm or unattended: %q", c.Install.Mode)
@@ -254,6 +268,10 @@ func (c *Config) Validate() error {
 		if !safeArgRe.MatchString(a) {
 			bad("install.kernel_args: invalid argument %q", a)
 		}
+	}
+	c.Install.ISOMirror = strings.TrimRight(c.Install.ISOMirror, "/")
+	if c.Install.ISOMirror != "" && !mirrorRe.MatchString(c.Install.ISOMirror) {
+		bad("install.iso_mirror must be an http(s) URL like https://ftp.jaist.ac.jp/pub/Linux/ubuntu-releases: %q", c.Install.ISOMirror)
 	}
 	if !repoRe.MatchString(c.Niwakube.Repo) {
 		bad("niwakube.repo must be owner/name: %q", c.Niwakube.Repo)
@@ -272,7 +290,11 @@ const TestDiskSerial = "niwakube-ci-disk"
 // シリアルコンソールだけ。autoinstall の生成や ISO の作り方は同じコードを通る。
 func (c *Config) ForTest() {
 	c.Network = nil
-	c.Storage.Disk = DiskMatch{Serial: TestDiskSerial}
+	// 実機のモデル名やシリアル番号は VM に無いので、VM の NVMe のシリアル番号にする。
+	// internal はそのまま試す (VM には USB の ISO と、小さい SATA のディスクもつないである)
+	if !c.Storage.Disk.Internal {
+		c.Storage.Disk = DiskMatch{Serial: TestDiskSerial}
+	}
 	c.Storage.RootSize = "20G"
 	c.Install.Mode = "unattended"
 	c.Install.After = "poweroff"

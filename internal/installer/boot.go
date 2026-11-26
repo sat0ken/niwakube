@@ -2,9 +2,11 @@ package installer
 
 import (
 	"bytes"
+	"context"
 	_ "embed"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"text/template"
 )
@@ -15,14 +17,58 @@ var premountScript []byte
 // ServerISO はインストーラーがダウンロードする Ubuntu Server の ISO。
 type ServerISO struct {
 	Version string // 例: 26.04.1
-	URL     string
+	URL     string // releases.ubuntu.com の URL
 	Size    int64
 	SHA256  string
+	Mirrors []string // URL より先に試す URL (install.iso_mirror)
 }
 
 func (s ServerISO) validate() error {
 	if !strings.HasPrefix(s.URL, "https://") || !strings.HasSuffix(s.URL, ".iso") || s.Size <= 0 || len(s.SHA256) != 64 {
 		return fmt.Errorf("invalid server ISO info: %+v", s)
+	}
+	for _, m := range s.Mirrors {
+		if !mirrorRe.MatchString(m) || !strings.HasSuffix(m, ".iso") {
+			return fmt.Errorf("invalid mirror URL: %q", m)
+		}
+	}
+	return nil
+}
+
+// URLs はダウンロードを試す順の URL。インストーラーには "," でつないで渡す。
+func (s ServerISO) URLs() []string {
+	return append(append([]string{}, s.Mirrors...), s.URL)
+}
+
+// officialBase は ServerISO.URL の取得元。ミラーはこの下と同じ構成 (<release>/<file>) になっている。
+const officialBase = "https://releases.ubuntu.com"
+
+// MirrorURL は ServerISO.URL を install.iso_mirror の下の URL に置き換える。
+func MirrorURL(mirror, official string) (string, error) {
+	rest, ok := strings.CutPrefix(official, officialBase+"/")
+	if !ok {
+		return "", fmt.Errorf("server ISO URL is not under %s: %s", officialBase, official)
+	}
+	return strings.TrimRight(mirror, "/") + "/" + rest, nil
+}
+
+// CheckMirror はミラーに同じ大きさの ISO があることを確かめる (ミラーの同期が遅れていることがあるため)。
+// 中身は、インストール時に SHA256 で確かめる。
+func CheckMirror(ctx context.Context, client *http.Client, url string, size int64) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s: %s", url, resp.Status)
+	}
+	if resp.ContentLength != size {
+		return fmt.Errorf("%s: size %d, want %d (the mirror may not be in sync yet)", url, resp.ContentLength, size)
 	}
 	return nil
 }
@@ -58,7 +104,7 @@ func (c *Config) GrubConfig(iso ServerISO) ([]byte, error) {
 		return nil, err
 	}
 	base := fmt.Sprintf("iso-chooser-menu ip=dhcp niwakube-iso-url=%s niwakube-iso-size=%d niwakube-iso-256sum=%s nk.ds=nocloud",
-		iso.URL, iso.Size, iso.SHA256)
+		strings.Join(iso.URLs(), ","), iso.Size, iso.SHA256)
 	for _, a := range c.Install.KernelArgs {
 		base += " nk." + a
 	}
@@ -70,11 +116,11 @@ func (c *Config) GrubConfig(iso ServerISO) ([]byte, error) {
 		{Title: fmt.Sprintf("niwakube: install Ubuntu Server %s on %s (asks before erasing the disk)", iso.Version, c.Hostname), Args: base},
 	}
 	def := 0
-	// 無人インストールの項目は、ディスクをモデル名かシリアル番号で指定したときだけ出す
-	// ("largest" のままだと、どの PC で起動しても一番大きいディスクを確認なしで消してしまうため)
+	// 無人インストールの項目は、ディスクを internal かモデル名 / シリアル番号で指定したときだけ出す
+	// ("largest" のままだと、どの PC で起動しても USB のディスクを含めて一番大きいディスクを確認なしで消してしまうため)
 	if !c.Storage.Disk.Largest {
 		entries = append(entries, grubEntry{
-			Title: fmt.Sprintf("niwakube: UNATTENDED install - ERASES THE DISK WITH %s WITHOUT ASKING", strings.ToUpper(c.Storage.Disk.String())),
+			Title: unattendedTitle(c.Storage.Disk),
 			Args:  base + " nk.autoinstall",
 		})
 		if c.Install.Mode == "unattended" {
@@ -134,4 +180,61 @@ func InitrdOverlay() ([]byte, error) {
 		buf.WriteByte(0)
 	}
 	return buf.Bytes(), nil
+}
+
+func unattendedTitle(d DiskMatch) string {
+	if d.Internal {
+		return "niwakube: UNATTENDED install - ERASES THE LARGEST INTERNAL DISK (SATA / NVMe) WITHOUT ASKING"
+	}
+	return fmt.Sprintf("niwakube: UNATTENDED install - ERASES THE DISK WITH %s WITHOUT ASKING", strings.ToUpper(d.String()))
+}
+
+// githubKeysURL は GitHub の公開鍵の URL (テストで差し替える)。
+var githubKeysURL = "https://github.com/%s.keys"
+
+// FetchGitHubKeys は GitHub のユーザーの公開鍵を取得する。
+// ISO を作るときに取得して埋め込む (インストール後の初回起動でネットワークに頼らずにログインできるようにするため)。
+func FetchGitHubKeys(ctx context.Context, client *http.Client, user string) ([]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf(githubKeysURL, user), nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GitHub keys of %s: %s", user, resp.Status)
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
+	var keys []string
+	for _, l := range strings.Split(string(b), "\n") {
+		l = strings.TrimSpace(l)
+		if strings.HasPrefix(l, "ssh-") || strings.HasPrefix(l, "ecdsa-") || strings.HasPrefix(l, "sk-") {
+			keys = append(keys, l)
+		}
+	}
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("GitHub user %s has no SSH keys", user)
+	}
+	return keys, nil
+}
+
+// EmbedGitHubKeys は user.github_keys の公開鍵を取得して user.ssh_authorized_keys に足し、
+// 初回起動時の ssh-import-id をやめる。取得した鍵の数を返す。
+func (c *Config) EmbedGitHubKeys(ctx context.Context, client *http.Client) (int, error) {
+	if c.User.GitHubKeys == "" {
+		return 0, nil
+	}
+	keys, err := FetchGitHubKeys(ctx, client, c.User.GitHubKeys)
+	if err != nil {
+		return 0, err
+	}
+	c.User.SSHAuthorizedKeys = append(c.User.SSHAuthorizedKeys, keys...)
+	c.User.GitHubKeys = ""
+	return len(keys), nil
 }

@@ -94,6 +94,9 @@ func (c *Config) netplan() map[string]any {
 		if len(n.DNS) > 0 {
 			eth["nameservers"] = map[string]any{"addresses": n.DNS}
 		}
+		if n.IPv6 != nil && !*n.IPv6 {
+			eth["accept-ra"] = false
+		}
 	}
 	return map[string]any{"version": 2, "ethernets": map[string]any{"lan": eth}}
 }
@@ -107,6 +110,9 @@ func (c *Config) storage() map[string]any {
 		match["serial"] = diskGlob(d.Serial)
 	case d.Model != "":
 		match["model"] = diskGlob(d.Model)
+	case d.Internal:
+		match["id_path"] = internalIDPath
+		match["size"] = "largest"
 	default:
 		match["size"] = "largest"
 	}
@@ -126,6 +132,13 @@ func (c *Config) storage() map[string]any {
 	}
 	return map[string]any{"swap": map[string]any{"size": 0}, "config": cfg}
 }
+
+// internalIDPath は内蔵の SATA / NVMe のディスクに合う udev の ID_PATH のパターン。
+// 例: SATA "pci-0000:00:17.0-ata-1" (または ata-1.0)、NVMe "pci-0000:01:00.0-nvme-1"。
+// USB のディスクは "pci-0000:00:14.0-usb-0:1:1.0-scsi-0:0:0:0" なので合わない。
+// subiquity の照合 (fnmatch) には「または」が無いので、"-ata" と "-nvm" の両方に合う文字クラスにしている。
+// 起動に使った USB は、size を指定すると使用中のディスクとして外される。
+const internalIDPath = "*-[an][tv][am]*"
 
 // diskGlob は lsblk で見えるモデル名 / シリアル番号を、curtin の照合に使うパターンに変換する。
 // udev の値は lsblk の表示と違い、スペースが "_" になったり (ID_MODEL)、NVMe ではシリアルの前に
@@ -195,9 +208,18 @@ func (c *Config) Summary() string {
 	if c.Network == nil {
 		b.WriteString("network:  DHCP\n")
 	} else {
-		fmt.Fprintf(&b, "network:  %s via %s\n", c.Network.Address, c.Network.Gateway)
+		fmt.Fprintf(&b, "network:  %s via %s, DNS %s", c.Network.Address, c.Network.Gateway, strings.Join(c.Network.DNS, " "))
+		if c.Network.IPv6 != nil && !*c.Network.IPv6 {
+			b.WriteString(", IPv6 off")
+		}
+		b.WriteString("\n")
 	}
 	fmt.Fprintf(&b, "disk:     %s (root %s, 残りは /var/lib/niwakube)\n", c.Storage.Disk, c.Storage.RootSize)
 	fmt.Fprintf(&b, "install:  %s, %s after install\n", c.Install.Mode, c.Install.After)
+	if c.Install.ISOMirror != "" {
+		fmt.Fprintf(&b, "iso:      %s (止まったら releases.ubuntu.com と交互に試す)\n", c.Install.ISOMirror)
+	} else {
+		b.WriteString("iso:      https://releases.ubuntu.com\n")
+	}
 	return b.String()
 }
