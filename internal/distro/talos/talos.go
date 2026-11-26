@@ -81,8 +81,9 @@ func (Talos) ValidateVersion(v string) error {
 }
 
 func (Talos) Requirements() distro.Requirements {
-	// 専用のカーネルが必要。コンテナランタイムは Talos に組み込まれた runc のみ
-	return distro.Requirements{NeedsOwnKernel: true, OnlyRuntimes: []string{distro.RuntimeRunc}}
+	// VM でも、コンテナ (Talos のコンテナモード。nspawn のバックエンドが Talos 公式のイメージで動かす) でも動く。
+	// コンテナランタイムは Talos に組み込まれた runc のみ
+	return distro.Requirements{OnlyRuntimes: []string{distro.RuntimeRunc}}
 }
 
 func (t Talos) Image(v string) string {

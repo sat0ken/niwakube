@@ -712,7 +712,15 @@ func TestContainerBackend(t *testing.T) {
 	if _, err := cs.Create(ctx, CreateRequest{Name: "cil", CNI: distro.CNICilium}); !errors.Is(err, machine.ErrInvalid) {
 		t.Errorf("cilium must be rejected on a container backend: %v", err)
 	}
-	if _, err := cs.Create(ctx, CreateRequest{Name: "tal", Distro: "talos"}); !errors.Is(err, machine.ErrInvalid) {
-		t.Errorf("talos must be rejected on a container backend (for now): %v", err)
+	// Talos はコンテナモードで動く (CNI は flannel)
+	tal, err := cs.Create(ctx, CreateRequest{Name: "tal", Distro: "talos", Workers: &one})
+	if err != nil {
+		t.Fatalf("talos on a container backend: %v", err)
+	}
+	if tal.CNI != distro.CNIFlannel {
+		t.Errorf("talos container cluster: cni %s", tal.CNI)
+	}
+	if _, err := cs.Create(ctx, CreateRequest{Name: "tal2", Distro: "talos", CNI: distro.CNICilium}); !errors.Is(err, machine.ErrInvalid) {
+		t.Errorf("talos with cilium must be rejected on a container backend: %v", err)
 	}
 }

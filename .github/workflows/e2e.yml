@@ -77,7 +77,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [machine, k3s, kubeadm]
+        target: [machine, k3s, kubeadm, talos]
     env:
       BACKEND: nspawn
     steps:

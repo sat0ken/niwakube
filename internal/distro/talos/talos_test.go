@@ -195,7 +195,8 @@ func TestVersionAndRequirements(t *testing.T) {
 		}
 	}
 	r := k.Requirements()
-	if !r.NeedsOwnKernel || len(r.OnlyRuntimes) != 1 || r.OnlyRuntimes[0] != "runc" {
+	// コンテナモードでも動くので専用のカーネルは要らない。ランタイムは runc のみ
+	if r.NeedsOwnKernel || len(r.OnlyRuntimes) != 1 || r.OnlyRuntimes[0] != "runc" {
 		t.Errorf("requirements: %+v", r)
 	}
 }
