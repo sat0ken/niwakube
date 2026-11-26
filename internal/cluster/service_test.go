@@ -236,6 +236,23 @@ func TestKubeconfig(t *testing.T) {
 	if _, err := cs.Kubeconfig(ctx, "nope"); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("want ErrNotFound, got %v", err)
 	}
+	if strings.Contains(string(raw), "proxy-url") {
+		t.Errorf("proxy-url must not be set by default: %s", raw)
+	}
+
+	// SSH の SOCKS プロキシ経由で使う kubeconfig: server はそのまま、proxy-url を足す
+	raw, err = cs.Kubeconfig(ctx, "demo", KubeconfigOptions{ProxyURL: "socks5://localhost:1080"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "server: https://172.30.1.11:6443") || !strings.Contains(string(raw), "proxy-url: socks5://localhost:1080") {
+		t.Errorf("kubeconfig with proxy: %s", raw)
+	}
+	for _, bad := range []string{"localhost:1080", "ftp://localhost:1080", "socks5://localhost", "socks5://u:p@localhost:1080", "socks5://localhost:1080/x", "socks5://:1080"} {
+		if _, err := cs.Kubeconfig(ctx, "demo", KubeconfigOptions{ProxyURL: bad}); !errors.Is(err, machine.ErrInvalid) {
+			t.Errorf("%s: want ErrInvalid, got %v", bad, err)
+		}
+	}
 }
 
 func TestKubeadmCluster(t *testing.T) {
@@ -407,6 +424,13 @@ func TestTalosCluster(t *testing.T) {
 	name, tc, err := cs.ClientConfig(ctx, "tal")
 	if err != nil || name != "tal.talosconfig" || !strings.Contains(string(tc), "172.30.1.11") {
 		t.Errorf("talosconfig: %s %v", name, err)
+	}
+	name, tc, err = cs.ClientConfig(ctx, "tal", KubeconfigOptions{ProxyURL: "socks5://localhost:1080"})
+	if err != nil || name != "tal-ssh.talosconfig" || !strings.Contains(string(tc), "proxy-url: socks5://localhost:1080") {
+		t.Errorf("talosconfig via SSH: %s %v\n%s", name, err, tc)
+	}
+	if _, _, err := cs.ClientConfig(ctx, "tal", KubeconfigOptions{ProxyURL: "ftp://x:1"}); !errors.Is(err, machine.ErrInvalid) {
+		t.Errorf("bad proxy: want ErrInvalid, got %v", err)
 	}
 	if _, err := cs.Kubeconfig(ctx, "tal"); err != nil {
 		t.Errorf("kubeconfig: %v", err)
@@ -592,5 +616,58 @@ func TestStorageAddons(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "st")); !os.IsNotExist(err) {
 		t.Errorf("nfs dir must be removed: %v", err)
+	}
+}
+
+func TestKubeconfigFor(t *testing.T) {
+	ctx := context.Background()
+	cs, _, _, _ := newTest(t)
+	zero := 0
+	for _, n := range []string{"a", "b"} {
+		if _, err := cs.Create(ctx, CreateRequest{Name: n, Workers: &zero}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw, err := cs.KubeconfigFor(ctx, []string{"b", "a", "b"}, KubeconfigOptions{ProxyURL: "socks5://localhost:1080"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kc struct {
+		Clusters []struct {
+			Name    string `yaml:"name"`
+			Cluster struct {
+				Server   string `yaml:"server"`
+				ProxyURL string `yaml:"proxy-url"`
+			} `yaml:"cluster"`
+		} `yaml:"clusters"`
+		Users    []struct{ Name string } `yaml:"users"`
+		Contexts []struct {
+			Name    string `yaml:"name"`
+			Context struct{ Cluster, User string }
+		} `yaml:"contexts"`
+		CurrentContext string `yaml:"current-context"`
+	}
+	if err := yaml.Unmarshal(raw, &kc); err != nil {
+		t.Fatal(err)
+	}
+	if len(kc.Clusters) != 2 || len(kc.Users) != 2 || len(kc.Contexts) != 2 || kc.CurrentContext != "b" {
+		t.Fatalf("merged kubeconfig: %s", raw)
+	}
+	want := map[string]string{"a": "https://172.30.1.11:6443", "b": "https://172.30.2.11:6443"}
+	for _, c := range kc.Clusters {
+		if want[c.Name] != c.Cluster.Server || c.Cluster.ProxyURL != "socks5://localhost:1080" {
+			t.Errorf("cluster %+v", c)
+		}
+	}
+	for _, c := range kc.Contexts {
+		if c.Context.Cluster != c.Name || c.Context.User != c.Name+"-admin" {
+			t.Errorf("context %+v", c)
+		}
+	}
+	if _, err := cs.KubeconfigFor(ctx, nil); !errors.Is(err, machine.ErrInvalid) {
+		t.Errorf("no cluster: want ErrInvalid, got %v", err)
+	}
+	if _, err := cs.KubeconfigFor(ctx, []string{"a", "nope"}); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("unknown cluster: want ErrNotFound, got %v", err)
 	}
 }

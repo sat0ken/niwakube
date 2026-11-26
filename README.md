@@ -50,16 +50,16 @@ sudo systemctl enable --now niwakubed
 
 ### Web UI
 
-ブラウザで `http://localhost:8080/` を開くと Web UI が出る。クラスタの作成・削除・起動・停止、kubeconfig のダウンロード、
+niwakubed は `127.0.0.1:8080` で Web UI も配信する。クラスタの作成・削除・起動・停止、kubeconfig のダウンロード、
 ポートの転送、シリアルログの確認、単体 VM の作成ができる。
 
 LAN の PC からは SSH のポート転送で開く (niwakubed は認証が無いので、既定では LAN に公開しない):
 
 ```bash
-ssh -L 8080:localhost:8080 niwa
+ssh -L 18080:localhost:8080 niwa
 ```
 
-そのまま PC のブラウザで `http://localhost:8080/` を開く。
+そのまま PC のブラウザで `http://localhost:18080/` を開く (PC 側のポートは 18080。ほかのアプリの 8080 とぶつからないように)。
 
 KVM の無い PC で UI だけを触るときは、VM を実際には作らない fake バックエンドで起動できる:
 
@@ -208,6 +208,43 @@ kubectl --kubeconfig demo.kubeconfig -n kube-system port-forward svc/hubble-ui 1
 `controlPlane` / `worker` (`{"cpus":2,"memoryMiB":4096,"diskGiB":30}`)、`sshAuthorizedKeys`、
 `cni` (`cilium` / `flannel`)、`hubble` (Cilium なら `true`)、`runtime.default` (`runc` / `crun` / `youki`)、
 `runtime.install` (追加で入れるランタイム。既定にしたものは自動で入る)。
+
+### SSH でつないでいる PC から kubectl を使う
+
+クラスタはミニPC の中の NAT (`172.30.0.0/16`) にあるので、PC からは SSH の SOCKS プロキシを通して使う。
+Web UI のクラスタの画面の「SSH 経由用の kubeconfig」(API では `GET /api/clusters/{name}/kubeconfig?proxy=socks5://localhost:1080`)
+は、`server` はそのままで `proxy-url: socks5://localhost:1080` を入れた kubeconfig を返す。
+
+```bash
+ssh -N -D 1080 -L 18080:localhost:8080 niwadmin@192.168.0.50
+```
+
+```bash
+kubectl --kubeconfig k3s-1-ssh.kubeconfig get nodes
+```
+
+クラスタがいくつあっても SSH は 1 本でよい (どのクラスタも同じ SOCKS プロキシで届く)。
+ダッシュボードでクラスタを選んで「選んだクラスタの kubeconfig (SSH 経由用)」を押すと、選んだクラスタを
+1 つの kubeconfig にまとめてダウンロードできる (API では `GET /api/kubeconfig?cluster=a&cluster=b&proxy=socks5://localhost:1080`)。
+クラスタごとに context が入るので、`kubectl config use-context <名前>` で切り替える。
+
+Talos のクラスタは「SSH 経由用の talosconfig」(`GET /api/clusters/{name}/talosconfig?proxy=socks5://localhost:1080`) も使える。
+各 context に `proxy-url` が入り、talosctl も同じ SOCKS プロキシを通して Talos API につなぐ
+(talosctl は talosconfig の `proxy-url` に対応したバージョン (v1.14 以降) を使う)。
+
+```bash
+talosctl --talosconfig tal-ssh.talosconfig version
+```
+
+PC の `~/.ssh/config` に書いておくと `ssh -N niwak8s` だけでつながる:
+
+```
+Host niwak8s
+    HostName 192.168.0.50
+    User niwadmin
+    DynamicForward 1080
+    LocalForward 18080 localhost:8080
+```
 
 ### LoadBalancer と LAN からの接続
 

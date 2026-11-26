@@ -3,6 +3,10 @@
 
 const app = document.getElementById("app");
 const REFRESH_MS = 5000;
+// SSH 経由用の kubeconfig の proxy-url (PC で ssh -D 1080 を使う前提)
+const SSH_PROXY = "socks5://localhost:1080";
+// ダッシュボードで選んだクラスタ (5 秒ごとの再描画でも消えないようにここで持つ)
+const selectedClusters = new Set();
 
 // ---------- 小さな道具 ----------
 
@@ -105,16 +109,56 @@ async function viewHome() {
       ${clusters.length === 0
         ? html`<div class="empty">まだクラスタはありません。「クラスタを作る」から始めましょう。</div>`
         : html`<div class="table-wrap"><table>
-            <thead><tr><th>名前</th><th>状態</th><th>ディストリ</th><th>CNI</th><th class="num">ノード</th><th>API</th></tr></thead>
+            <thead><tr><th class="check"><input type="checkbox" id="sel-all" title="すべて選ぶ"
+              ${clusters.every((c) => selectedClusters.has(c.name)) ? raw("checked") : ""}></th>
+              <th>名前</th><th>状態</th><th>ディストリ</th><th>CNI</th><th class="num">ノード</th><th>API</th></tr></thead>
             <tbody>${clusters.map((c) => html`<tr>
+              <td class="check"><input type="checkbox" data-sel="${c.name}" ${selectedClusters.has(c.name) ? raw("checked") : ""}></td>
               <td><a href="#/clusters/${encodeURIComponent(c.name)}"><strong>${c.name}</strong></a></td>
               <td>${phaseBadge(c.status.phase)}</td>
               <td>${c.distro} <span class="hint">${c.version}</span></td>
               <td>${c.cni}${c.hubble ? " + Hubble" : ""}</td>
               <td class="num">${c.status.readyNodes} / ${c.status.nodes}</td>
               <td><code>${c.endpoint}</code></td>
-            </tr>`)}</tbody></table></div>`}
+            </tr>`)}</tbody></table></div>
+          <div class="actions spaced-top">
+            <button data-kubeconfig="plain">選んだクラスタの kubeconfig</button>
+            <button data-kubeconfig="ssh">選んだクラスタの kubeconfig (SSH 経由用)</button>
+            <span class="hint" id="sel-count"></span>
+          </div>
+          <p class="hint">選んだクラスタを 1 つの kubeconfig にまとめます (クラスタごとに context が入る。切り替えは
+            <code>kubectl config use-context &lt;名前&gt;</code>)。SSH 経由用は PC で <code>ssh -N -D 1080 &lt;ユーザー&gt;@&lt;ミニPC&gt;</code>
+            をつないだまま使います。</p>`}
     </div>`;
+
+  // 消えたクラスタは選択から外す
+  for (const n of [...selectedClusters]) if (!clusters.some((c) => c.name === n)) selectedClusters.delete(n);
+  const syncSelection = () => {
+    const n = selectedClusters.size;
+    app.querySelectorAll("[data-kubeconfig]").forEach((b) => { b.disabled = n === 0; });
+    const count = document.getElementById("sel-count");
+    if (count) count.textContent = n ? `${n} 個のクラスタを選択中` : "クラスタを選んでください";
+    const all = document.getElementById("sel-all");
+    if (all) all.checked = clusters.length > 0 && n === clusters.length;
+  };
+  app.querySelectorAll("[data-sel]").forEach((cb) => cb.addEventListener("change", () => {
+    if (cb.checked) selectedClusters.add(cb.dataset.sel); else selectedClusters.delete(cb.dataset.sel);
+    syncSelection();
+  }));
+  const all = document.getElementById("sel-all");
+  if (all) all.addEventListener("change", () => {
+    clusters.forEach((c) => { if (all.checked) selectedClusters.add(c.name); else selectedClusters.delete(c.name); });
+    app.querySelectorAll("[data-sel]").forEach((cb) => { cb.checked = all.checked; });
+    syncSelection();
+  });
+  app.querySelectorAll("[data-kubeconfig]").forEach((b) => b.addEventListener("click", () => {
+    const params = new URLSearchParams();
+    // 一覧の順に並べる (current-context は先頭のクラスタ)
+    clusters.filter((c) => selectedClusters.has(c.name)).forEach((c) => params.append("cluster", c.name));
+    if (b.dataset.kubeconfig === "ssh") params.set("proxy", SSH_PROXY);
+    location.href = `/api/kubeconfig?${params}`;
+  }));
+  syncSelection();
 }
 
 // ---------- 画面: クラスタを作る ----------
@@ -259,11 +303,17 @@ async function viewCluster(name) {
     <div class="card">
       <div class="actions">
         <a class="button" href="/api/clusters/${enc}/kubeconfig" download>kubeconfig をダウンロード</a>
-        ${c.distro === "talos" ? html`<a class="button" href="/api/clusters/${enc}/talosconfig" download>talosconfig をダウンロード</a>` : ""}
+        <a class="button" href="/api/clusters/${enc}/kubeconfig?proxy=${encodeURIComponent(SSH_PROXY)}" download
+          title="ミニPC の外 (SSH でつないでいる PC) から使う kubeconfig。proxy-url: ${SSH_PROXY} 入り">SSH 経由用の kubeconfig</a>
+        ${c.distro === "talos" ? html`<a class="button" href="/api/clusters/${enc}/talosconfig" download>talosconfig をダウンロード</a>
+          <a class="button" href="/api/clusters/${enc}/talosconfig?proxy=${encodeURIComponent(SSH_PROXY)}" download
+            title="ミニPC の外 (SSH でつないでいる PC) から使う talosconfig。proxy-url: ${SSH_PROXY} 入り">SSH 経由用の talosconfig</a>` : ""}
         <button data-act="start" ${c.desiredState === "running" ? raw("disabled") : ""}>起動</button>
         <button data-act="stop" ${c.desiredState === "stopped" ? raw("disabled") : ""}>停止</button>
         <button class="danger" data-act="delete">削除</button>
       </div>
+      <p class="hint spaced-top">「SSH 経由用の kubeconfig${c.distro === "talos" ? " / talosconfig" : ""}」は、PC で <code>ssh -N -D 1080 &lt;ユーザー&gt;@&lt;ミニPC&gt;</code> をつないだまま、
+        PC の kubectl${c.distro === "talos" ? " / talosctl" : ""} で使います (クラスタがいくつあっても SSH は 1 本でよい)。ミニPC の上では普通の kubeconfig を使います。</p>
     </div>
     <div class="card">
       <h2>概要</h2>

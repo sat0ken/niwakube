@@ -65,8 +65,9 @@ func New(svc *machine.Service, clusters *cluster.Service, log *slog.Logger, opts
 //	DELETE /api/clusters/{name}
 //	POST   /api/clusters/{name}/start
 //	POST   /api/clusters/{name}/stop
-//	GET    /api/clusters/{name}/kubeconfig
-//	GET    /api/clusters/{name}/talosconfig  Talos のみ
+//	GET    /api/clusters/{name}/kubeconfig     ?proxy=socks5://localhost:1080 で proxy-url を入れる
+//	GET    /api/kubeconfig?cluster=a&cluster=b  複数のクラスタを 1 つにまとめた kubeconfig (?proxy= も使える)
+//	GET    /api/clusters/{name}/talosconfig  Talos のみ (?proxy= で proxy-url を入れる)
 //	GET    /api/clusters/{name}/forwards     ホストのポートからクラスタへの転送の一覧
 //	POST   /api/clusters/{name}/forwards     {"hostPort":8080,"ip":"172.30.1.100","port":80}
 //	DELETE /api/clusters/{name}/forwards/{proto}/{port}
@@ -100,6 +101,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/clusters/{name}/start", s.startCluster)
 	mux.HandleFunc("POST /api/clusters/{name}/stop", s.stopCluster)
 	mux.HandleFunc("GET /api/clusters/{name}/kubeconfig", s.kubeconfig)
+	mux.HandleFunc("GET /api/kubeconfig", s.mergedKubeconfig)
 	mux.HandleFunc("GET /api/clusters/{name}/talosconfig", s.clientConfig)
 	mux.HandleFunc("GET /api/clusters/{name}/forwards", s.listForwards)
 	mux.HandleFunc("POST /api/clusters/{name}/forwards", s.addForward)
@@ -259,20 +261,46 @@ func (s *Server) stopCluster(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, c)
 }
 
+// kubeconfig は admin の kubeconfig を返す。?proxy=socks5://localhost:1080 を付けると proxy-url を入れる
+// (別の PC から ssh -D 1080 の SOCKS プロキシ経由で kubectl を使うため)。
 func (s *Server) kubeconfig(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	b, err := s.clusters.Kubeconfig(r.Context(), name)
+	proxy := r.URL.Query().Get("proxy")
+	b, err := s.clusters.Kubeconfig(r.Context(), name, cluster.KubeconfigOptions{ProxyURL: proxy})
 	if err != nil {
 		s.writeError(w, err)
 		return
 	}
+	filename := name + ".kubeconfig"
+	if proxy != "" {
+		filename = name + "-ssh.kubeconfig"
+	}
 	w.Header().Set("Content-Type", "application/yaml")
-	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`.kubeconfig"`)
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+	_, _ = w.Write(b)
+}
+
+// mergedKubeconfig は ?cluster= (複数指定) のクラスタを 1 つにまとめた kubeconfig を返す。
+func (s *Server) mergedKubeconfig(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	proxy := q.Get("proxy")
+	b, err := s.clusters.KubeconfigFor(r.Context(), q["cluster"], cluster.KubeconfigOptions{ProxyURL: proxy})
+	if err != nil {
+		s.writeError(w, err)
+		return
+	}
+	filename := "niwakube.kubeconfig"
+	if proxy != "" {
+		filename = "niwakube-ssh.kubeconfig"
+	}
+	w.Header().Set("Content-Type", "application/yaml")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 	_, _ = w.Write(b)
 }
 
 func (s *Server) clientConfig(w http.ResponseWriter, r *http.Request) {
-	filename, b, err := s.clusters.ClientConfig(r.Context(), r.PathValue("name"))
+	filename, b, err := s.clusters.ClientConfig(r.Context(), r.PathValue("name"),
+		cluster.KubeconfigOptions{ProxyURL: r.URL.Query().Get("proxy")})
 	if err != nil {
 		s.writeError(w, err)
 		return

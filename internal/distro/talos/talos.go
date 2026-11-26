@@ -347,9 +347,22 @@ func (t Talos) talosconfig(c *distro.Cluster) ([]byte, error) {
 	return tc.Bytes()
 }
 
-func (t Talos) ClientConfig(c *distro.Cluster) (string, []byte, error) {
+// ClientConfig は talosconfig を返す。proxyURL を入れると各 context の proxy-url にする
+// (talosctl は socks5:// / http:// のプロキシを通して Talos API につなぐ)。
+func (t Talos) ClientConfig(c *distro.Cluster, proxyURL string) (string, []byte, error) {
 	b, err := t.talosconfig(c)
-	return c.Name + ".talosconfig", b, err
+	if err != nil || proxyURL == "" {
+		return c.Name + ".talosconfig", b, err
+	}
+	tc, err := clientconfig.FromBytes(b)
+	if err != nil {
+		return "", nil, err
+	}
+	for _, ctx := range tc.Contexts {
+		ctx.ProxyURL = proxyURL
+	}
+	b, err = tc.Bytes()
+	return c.Name + "-ssh.talosconfig", b, err
 }
 
 // Bootstrap は CP の Talos API で etcd を bootstrap する。初期化済みなら nil を返す。
