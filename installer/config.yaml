@@ -2,30 +2,36 @@
 # このファイルを変更して PR を出すと、GitHub Actions が ISO を作り、VM で実際にインストールを試してから
 # Artifacts (niwakube-installer) に置く。手順は docs/installer.md を参照。
 
-hostname: niwa
+hostname: niwak8s
 timezone: Asia/Tokyo
 keyboard: jp
 
 user:
-  name: sat0ken
+  name: niwadmin
   github_keys: sat0ken          # GitHub に登録した公開鍵を取り込む (パスワードではログインできない)
   # ssh_authorized_keys:        # 鍵を直接書くこともできる
   #   - ssh-ed25519 AAAA...
 
 # network を書かなければ DHCP
-# network:
-#   address: 192.168.1.50/24
-#   gateway: 192.168.1.1
-#   dns: [192.168.1.1]
+network:
+  address: 192.168.0.50/24
+  gateway: 192.168.0.1
+  dns: [1.1.1.1, 8.8.8.8]       # ルーター (192.168.0.1) は DNS に答えないので、公開の DNS を使う
+  ipv6: false                   # ルーターが配る IPv6 (アドレスと DNS) を使わない (IPv6 の経路が通らないため)
 
 storage:
-  disk: largest                 # 一番大きいディスク。無人インストールでは {model: "..."} か {serial: "..."} が必須
-  root_size: 100G               # 残りはすべて /var/lib/niwakube (XFS)
+  disk: internal                # 内蔵 (SATA / NVMe) のうち一番大きいディスク。USB のディスクは選ばない
+                                # 特定のディスクにするなら {model: "..."} か {serial: "..."} (lsblk の表示のとおり)
+  root_size: 50G                # 残りはすべて /var/lib/niwakube (XFS)
 
 install:
-  mode: confirm                 # confirm: 消去の前に確認する / unattended: 確認なし (GRUB の既定の項目)
+  mode: unattended              # confirm: 消去の前に確認する / unattended: 確認なし (GRUB の既定の項目)
+                                # unattended + internal の USB は、起動した PC の内蔵ディスクを確認なしで消す
   after: poweroff               # インストール後は電源を切る (USB を抜いてから起動する)
+  # Server ISO (約 3GB) を取るミラー。止まったら releases.ubuntu.com と交互に試す。中身は SHA256 で確かめる
+  # 他の例: https://ftp.riken.jp/Linux/ubuntu-releases、https://ftp.yz.yamagata-u.ac.jp/pub/linux/ubuntu-releases
+  iso_mirror: https://ftp.jaist.ac.jp/pub/Linux/ubuntu-releases
 
 niwakube:
   setup: true                   # 初回起動時に host-setup.sh を実行する
-  ref: main                     # v* のタグにすると niwakubed もリリースから入れる
+  ref: v0.1.0                   # v* のタグにすると niwakubed もリリースから入れる

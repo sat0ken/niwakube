@@ -3,7 +3,11 @@ package installer
 import (
 	"bytes"
 	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -171,6 +175,7 @@ func TestValidate(t *testing.T) {
 	bad := map[string]string{
 		"no ssh key":           "hostname: h\nuser: {name: u}\n",
 		"bad hostname":         "hostname: Bad_Host\nuser: {name: u, github_keys: u}\n",
+		"bad disk word":        "hostname: h\nuser: {name: u, github_keys: u}\nstorage: {disk: external}\n",
 		"unattended + largest": "hostname: h\nuser: {name: u, github_keys: u}\ninstall: {mode: unattended}\n",
 		"model and serial":     "hostname: h\nuser: {name: u, github_keys: u}\nstorage: {disk: {model: a, serial: b}}\n",
 		"bad disk scalar":      "hostname: h\nuser: {name: u, github_keys: u}\nstorage: {disk: smallest}\n",
@@ -182,6 +187,9 @@ func TestValidate(t *testing.T) {
 		"bad ref":              "hostname: h\nuser: {name: u, github_keys: u}\nniwakube: {ref: \"main; rm -rf /\"}\n",
 		"bad timezone":         "hostname: h\nuser: {name: u, github_keys: u}\ntimezone: \"Asia/Tokyo $(id)\"\n",
 		"glob in disk serial":  "hostname: h\nuser: {name: u, github_keys: u}\nstorage: {disk: {serial: \"*\"}}\n",
+		"mirror not a URL":     "hostname: h\nuser: {name: u, github_keys: u}\ninstall: {iso_mirror: ftp.jaist.ac.jp}\n",
+		"mirror with comma":    "hostname: h\nuser: {name: u, github_keys: u}\ninstall: {iso_mirror: \"https://a.example/x,https://b.example\"}\n",
+		"mirror with space":    "hostname: h\nuser: {name: u, github_keys: u}\ninstall: {iso_mirror: \"https://a.example/x y\"}\n",
 	}
 	for name, s := range bad {
 		if _, err := Parse([]byte(s)); err == nil {
@@ -269,5 +277,162 @@ func TestBuildPadsInitrd(t *testing.T) {
 	i := bytes.Index(initrd, []byte("070701"))
 	if i != 1024 || !bytes.Equal(initrd[1001:1024], make([]byte, 23)) {
 		t.Errorf("overlay must start at a 512-byte boundary after zero padding: got offset %d", i)
+	}
+}
+
+func TestISOMirror(t *testing.T) {
+	c := parse(t, "hostname: h\nuser: {name: u, github_keys: u}\ninstall: {iso_mirror: \"https://ftp.jaist.ac.jp/pub/Linux/ubuntu-releases/\"}\n")
+	if c.Install.ISOMirror != "https://ftp.jaist.ac.jp/pub/Linux/ubuntu-releases" {
+		t.Fatalf("mirror = %q", c.Install.ISOMirror)
+	}
+	u, err := MirrorURL(c.Install.ISOMirror, testISO.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "https://ftp.jaist.ac.jp/pub/Linux/ubuntu-releases/26.04/ubuntu-26.04.1-live-server-amd64.iso"; u != want {
+		t.Errorf("mirror URL = %q, want %q", u, want)
+	}
+	if _, err := MirrorURL(c.Install.ISOMirror, "https://example.com/26.04/x.iso"); err == nil {
+		t.Error("URL outside releases.ubuntu.com must be rejected")
+	}
+
+	iso := testISO
+	iso.Mirrors = []string{u}
+	g, err := c.GrubConfig(iso)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(g), "niwakube-iso-url="+u+","+testISO.URL+" ") {
+		t.Errorf("grub must list the mirror first, then releases.ubuntu.com:\n%s", g)
+	}
+	if !strings.Contains(c.Summary(), "iso:      https://ftp.jaist.ac.jp/pub/Linux/ubuntu-releases") {
+		t.Errorf("summary:\n%s", c.Summary())
+	}
+}
+
+func TestCheckMirror(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/26.04/ok.iso":
+			w.Header().Set("Content-Length", "1234")
+		case "/26.04/old.iso":
+			w.Header().Set("Content-Length", "999")
+		default:
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method != http.MethodHead {
+			t.Errorf("method = %s, want HEAD", r.Method)
+		}
+	}))
+	defer ts.Close()
+	ctx := context.Background()
+	if err := CheckMirror(ctx, ts.Client(), ts.URL+"/26.04/ok.iso", 1234); err != nil {
+		t.Errorf("ok: %v", err)
+	}
+	if err := CheckMirror(ctx, ts.Client(), ts.URL+"/26.04/old.iso", 1234); err == nil {
+		t.Error("size mismatch must fail")
+	}
+	if err := CheckMirror(ctx, ts.Client(), ts.URL+"/26.04/missing.iso", 1234); err == nil {
+		t.Error("404 must fail")
+	}
+}
+
+func TestDiskInternal(t *testing.T) {
+	c := parse(t, "hostname: h\nuser: {name: u, github_keys: u}\nstorage: {disk: internal}\ninstall: {mode: unattended}\n")
+	if !c.Storage.Disk.Internal || c.Storage.Disk.Largest {
+		t.Fatalf("disk = %+v", c.Storage.Disk)
+	}
+	ud, err := c.UserData()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(ud), "id_path: '*-[an][tv][am]*'") || !strings.Contains(string(ud), "size: largest") {
+		t.Errorf("match must select the largest SATA / NVMe disk:\n%s", ud)
+	}
+	g, err := c.GrubConfig(testISO)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(g), "ERASES THE LARGEST INTERNAL DISK (SATA / NVMe) WITHOUT ASKING") || !strings.Contains(string(g), "set default=1") {
+		t.Errorf("grub:\n%s", g)
+	}
+	// CI の VM でも internal のまま試す
+	c.ForTest()
+	if !c.Storage.Disk.Internal {
+		t.Errorf("ForTest must keep internal: %+v", c.Storage.Disk)
+	}
+
+	// subiquity は fnmatch で照合する。ID_PATH に "/" は入らないので path.Match と同じ結果になる
+	for idPath, want := range map[string]bool{
+		"pci-0000:00:17.0-ata-1":                    true,
+		"pci-0000:00:17.0-ata-1.0":                  true,
+		"pci-0000:01:00.0-nvme-1":                   true,
+		"pci-0000:00:14.0-usb-0:1:1.0-scsi-0:0:0:0": false,
+		"pci-0000:00:04.0":                          false,
+		"pci-0000:03:00.0-sas-phy0-lun-0":           false,
+		"pci-0000:00:12.0-mmc-0x1":                  false,
+	} {
+		got, err := path.Match(internalIDPath, idPath)
+		if err != nil || got != want {
+			t.Errorf("%s: match = %v (%v), want %v", idPath, got, err, want)
+		}
+	}
+}
+
+func TestNetworkIPv6Off(t *testing.T) {
+	c := parse(t, "hostname: h\nuser: {name: u, github_keys: u}\nnetwork: {address: 192.168.0.50/24, gateway: 192.168.0.1, dns: [1.1.1.1, 8.8.8.8], ipv6: false}\n")
+	ud, err := c.UserData()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"accept-ra: false", "- 1.1.1.1", "- 8.8.8.8", "dhcp4: false"} {
+		if !strings.Contains(string(ud), want) {
+			t.Errorf("user-data does not contain %q:\n%s", want, ud)
+		}
+	}
+	if !strings.Contains(c.Summary(), "DNS 1.1.1.1 8.8.8.8, IPv6 off") {
+		t.Errorf("summary:\n%s", c.Summary())
+	}
+	// 書かなければ RA を受け取る (既定)
+	c = parse(t, "hostname: h\nuser: {name: u, github_keys: u}\nnetwork: {address: 192.168.0.50/24, gateway: 192.168.0.1}\n")
+	ud, _ = c.UserData()
+	if strings.Contains(string(ud), "accept-ra") {
+		t.Errorf("accept-ra must not be set by default:\n%s", ud)
+	}
+}
+
+func TestEmbedGitHubKeys(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/sat0ken.keys":
+			_, _ = io.WriteString(w, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA one\nssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ two\n")
+		case "/nokeys.keys":
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+	old := githubKeysURL
+	githubKeysURL = ts.URL + "/%s.keys"
+	defer func() { githubKeysURL = old }()
+
+	c := parse(t, "hostname: h\nuser: {name: u, github_keys: sat0ken}\n")
+	n, err := c.EmbedGitHubKeys(context.Background(), ts.Client())
+	if err != nil || n != 2 {
+		t.Fatalf("embed: %d %v", n, err)
+	}
+	ud, err := c.UserData()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(ud), "ssh_import_id") || !strings.Contains(string(ud), "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA one") {
+		t.Errorf("keys must be embedded instead of ssh_import_id:\n%s", ud)
+	}
+	for _, user := range []string{"nokeys", "missing"} {
+		c := parse(t, "hostname: h\nuser: {name: u, github_keys: "+user+"}\n")
+		if _, err := c.EmbedGitHubKeys(context.Background(), ts.Client()); err == nil {
+			t.Errorf("%s: expected error", user)
+		}
 	}
 }

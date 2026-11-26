@@ -58,6 +58,8 @@ HOST_NAME=$(go run ./cmd/niwakube-iso get -config "$CONFIG" hostname)
 SETUP=$(go run ./cmd/niwakube-iso get -config "$CONFIG" niwakube.setup)
 
 qemu-img create -q -f qcow2 "$T/disk.qcow2" 60G
+# インストール先にしてはいけない、小さい SATA のディスク (disk: internal が一番大きい内蔵ディスクを選ぶことを確かめる)
+qemu-img create -q -f qcow2 "$T/decoy.qcow2" 20G
 cp "$OVMF_VARS" "$T/vars.fd"
 
 qemu() { # 追加の引数をそのまま渡す
@@ -66,6 +68,8 @@ qemu() { # 追加の引数をそのまま渡す
     -drive if=pflash,format=raw,unit=1,file="$T/vars.fd" \
     -drive if=none,id=disk0,file="$T/disk.qcow2",format=qcow2 \
     -device nvme,serial=$DISK_SERIAL,drive=disk0,bootindex=1 \
+    -drive if=none,id=decoy,file="$T/decoy.qcow2",format=qcow2 \
+    -device ide-hd,drive=decoy,bus=ide.0 \
     -netdev user,id=n0,hostfwd=tcp:127.0.0.1:$SSH_PORT-:22 -device virtio-net-pci,netdev=n0 \
     -display none -monitor none "$@"
 }
@@ -135,15 +139,21 @@ log "SSH でログインできました ($((SECONDS - start))s)"
 
 # インストーラーは初回起動で cloud-init を無効にする目印 (cloud-init.disabled) を置くので、
 # cloud-init status --wait はすぐ "disabled" を返してしまう。runcmd を実行する cloud-final.service の終了を待つ。
+# まだ始まっていない cloud-final.service も inactive なので、起動の処理がすべて終わっている
+# (is-system-running が starting / initializing でない) ことも確かめる。
 log "初回起動の処理 (cloud-final.service) の完了待ち"
 start=$SECONDS
 while :; do
   state=$(ssh_vm 'systemctl show -p ActiveState --value cloud-final.service' 2>/dev/null || echo unknown)
-  [[ $state == active || $state == failed || $state == inactive ]] && break
-  (( SECONDS - start < 1200 )) || die "1200s 待っても初回起動の処理が終わりません (cloud-final.service: $state)"
+  system=$(ssh_vm 'systemctl is-system-running' 2>/dev/null || true)
+  if [[ $system != starting && $system != initializing && -n $system ]] &&
+    [[ $state == active || $state == failed || $state == inactive ]]; then
+    break
+  fi
+  (( SECONDS - start < 1200 )) || die "1200s 待っても初回起動の処理が終わりません (cloud-final.service: $state、system: $system)"
   sleep 10
 done
-log "初回起動の処理が終わりました ($((SECONDS - start))s、cloud-final.service: $state)"
+log "初回起動の処理が終わりました ($((SECONDS - start))s、cloud-final.service: $state、system: $system)"
 [[ $state != failed ]] || { ssh_vm 'sudo tail -n 60 /var/log/cloud-init-output.log' || true; die "cloud-final.service が失敗しました"; }
 
 log "設定どおりか確かめる"
@@ -160,6 +170,10 @@ check "SSH のパスワード認証は無効" "passwordauthentication no" "$(ssh
 check "/var/lib/niwakube は XFS" "xfs" "$(ssh_vm 'findmnt -n -o FSTYPE /var/lib/niwakube')"
 check "ルートは LVM 上の ext4" "ext4" "$(ssh_vm 'findmnt -n -o FSTYPE /')"
 check "UEFI で起動している" "yes" "$(ssh_vm '[ -d /sys/firmware/efi ] && echo yes || echo no')"
+# ISO を作るときに埋め込んだ GitHub の鍵 (テスト用の鍵に加えて 1 つ以上)
+check "GitHub の SSH 鍵が入っている" "yes" "$(ssh_vm '[ "$(grep -c . ~/.ssh/authorized_keys)" -ge 2 ] && echo yes || echo no')"
+# 小さい SATA のディスク (sda) や USB ではなく、60G の NVMe に入っていること
+check "インストール先は NVMe" "nvme" "$(ssh_vm "sudo pvs --noheadings -o pv_name | tr -d ' ' | sed -E 's#^/dev/(nvme|sd).*#\\1#'")"
 if [[ $SETUP == true ]]; then
   if ! ssh_vm 'test -f /var/lib/niwakube/.firstboot-done'; then
     ssh_vm 'sudo tail -n 60 /var/log/niwakube-firstboot.log' || true
