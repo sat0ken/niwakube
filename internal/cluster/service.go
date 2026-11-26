@@ -297,6 +297,10 @@ func (s *Service) normalize(req *CreateRequest) (distro.Distro, error) {
 	def := s.cfg.Defaults
 	if req.CNI == "" {
 		req.CNI = def.CNI
+		// コンテナ型のバックエンドはホストのカーネルを共有するので、既定の CNI を flannel にする
+		if req.CNI == distro.CNICilium && !caps.OwnKernel {
+			req.CNI = distro.CNIFlannel
+		}
 	}
 	if req.Hubble == nil {
 		h := req.CNI == distro.CNICilium
@@ -416,10 +420,12 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (*Cluster, erro
 }
 
 func (s *Service) createNodes(ctx context.Context, d distro.Distro, rec *store.Cluster, secrets *distro.Secrets) error {
+	_, caps, _ := s.machines.ResolveBackend(rec.Spec.Backend)
 	dc := &distro.Cluster{
 		Name: rec.Name, Version: rec.Spec.Version, Secrets: secrets,
-		APIAddr: s.hostIP(rec.Index, cpHostBase+1),
-		Addons:  addonsOf(cniOf(rec), rec.Spec.Hubble, rec.Spec.Runtime),
+		APIAddr:   s.hostIP(rec.Index, cpHostBase+1),
+		Addons:    addonsOf(cniOf(rec), rec.Spec.Hubble, rec.Spec.Runtime),
+		Container: caps.Isolation == backend.IsolationContainer,
 	}
 	type node struct {
 		n    distro.Node
@@ -807,10 +813,12 @@ func (s *Service) distroCluster(rec *store.Cluster) (*distro.Cluster, distro.Dis
 	if err != nil {
 		return nil, nil, err
 	}
+	_, caps, _ := s.machines.ResolveBackend(rec.Spec.Backend)
 	return &distro.Cluster{
 		Name: rec.Name, Version: rec.Spec.Version, Secrets: sec,
-		APIAddr: s.hostIP(rec.Index, cpHostBase+1),
-		Addons:  addonsOf(cniOf(rec), rec.Spec.Hubble, rec.Spec.Runtime),
+		APIAddr:   s.hostIP(rec.Index, cpHostBase+1),
+		Addons:    addonsOf(cniOf(rec), rec.Spec.Hubble, rec.Spec.Runtime),
+		Container: caps.Isolation == backend.IsolationContainer,
 	}, d, nil
 }
 

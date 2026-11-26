@@ -112,6 +112,19 @@ func NetworkConfig(n Network) ([]byte, error) {
 	return yaml.Marshal(netplan{Version: 2, Ethernets: map[string]netplanEthernet{"eth0": e}})
 }
 
+// Nameservers は network-config に書いた DNS サーバーを返す。
+func Nameservers(networkConfig []byte) ([]string, error) {
+	var cfg netplan
+	if err := yaml.Unmarshal(networkConfig, &cfg); err != nil {
+		return nil, fmt.Errorf("parse network-config: %w", err)
+	}
+	var out []string
+	for _, e := range cfg.Ethernets {
+		out = append(out, e.Nameservers.Addresses...)
+	}
+	return out, nil
+}
+
 // WriteFiles は dir に user-data / meta-data / network-config を書き出す。
 func WriteFiles(dir string, d Data) error {
 	files := map[string][]byte{

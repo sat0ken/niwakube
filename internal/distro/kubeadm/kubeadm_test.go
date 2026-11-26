@@ -188,3 +188,45 @@ func TestUserDataCiliumAndRuntimes(t *testing.T) {
 		t.Error("flannel path changed unexpectedly")
 	}
 }
+
+func TestUserDataContainer(t *testing.T) {
+	k := New()
+	sec, err := k.GenerateSecrets("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &distro.Cluster{Name: "demo", Version: "v1.37", APIAddr: netip.MustParseAddr("172.30.1.11"), Secrets: sec, Container: true,
+		Addons: distro.Addons{CNI: distro.CNIFlannel, DefaultRuntime: distro.RuntimeRunc}}
+	cp, err := k.UserData(c, &distro.Node{Name: "demo-cp-1", Role: distro.RoleControlPlane, Index: 1, IP: netip.MustParseAddr("172.30.1.11")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs := files(t, cp)
+	for path, wants := range map[string][]string{
+		configPath:  {"kind: KubeProxyConfiguration", "maxPerCore: 0", "kind: KubeletConfiguration", "nodefs.available: 0%"},
+		initPath:    {"--ignore-preflight-errors=all"},
+		installPath: {"modprobe br_netfilter || true", "sysctl --system >/dev/null || true", "swapoff -a || true"},
+	} {
+		for _, w := range wants {
+			if !strings.Contains(fs[path].Content, w) {
+				t.Errorf("%s does not contain %q:\n%s", path, w, fs[path].Content)
+			}
+		}
+	}
+	w, err := k.UserData(c, &distro.Node{Name: "demo-worker-1", Role: distro.RoleWorker, Index: 1, IP: netip.MustParseAddr("172.30.1.21")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(files(t, w)[initPath].Content, "kubeadm join --config \"$CONFIG\" --ignore-preflight-errors=all") {
+		t.Errorf("join must ignore preflight errors in a container:\n%s", files(t, w)[initPath].Content)
+	}
+
+	// VM のときは入れない
+	c.Container = false
+	cp, _ = k.UserData(c, &distro.Node{Name: "demo-cp-1", Role: distro.RoleControlPlane, Index: 1, IP: netip.MustParseAddr("172.30.1.11")})
+	fs = files(t, cp)
+	if strings.Contains(fs[configPath].Content, "KubeProxyConfiguration") || strings.Contains(fs[initPath].Content, "ignore-preflight") ||
+		strings.Contains(fs[installPath].Content, "|| true") {
+		t.Error("VM config must not have container settings")
+	}
+}

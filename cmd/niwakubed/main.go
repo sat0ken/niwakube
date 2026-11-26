@@ -20,6 +20,7 @@ import (
 	"github.com/sat0ken/niwakube/internal/backend"
 	"github.com/sat0ken/niwakube/internal/backend/ch"
 	"github.com/sat0ken/niwakube/internal/backend/fake"
+	"github.com/sat0ken/niwakube/internal/backend/nspawn"
 	"github.com/sat0ken/niwakube/internal/cluster"
 	"github.com/sat0ken/niwakube/internal/distro/k3s"
 	"github.com/sat0ken/niwakube/internal/distro/kubeadm"
@@ -45,22 +46,23 @@ func main() {
 
 func run() error {
 	var (
-		showVer  = flag.Bool("version", false, "バージョンを表示して終了する")
-		listen   = flag.String("listen", "127.0.0.1:8080", "HTTP の待ち受けアドレス")
-		dataDir  = flag.String("data-dir", "/var/lib/niwakube", "データディレクトリ")
-		runDir   = flag.String("run-dir", "/run/niwakube", "API socket を置くディレクトリ")
-		bridge   = flag.String("bridge", "nkbr0", "VM をつなぐブリッジ")
-		subnet   = flag.String("subnet", "172.30.0.0/16", "VM のサブネット")
-		gateway  = flag.String("gateway", "172.30.0.1", "VM のデフォルトゲートウェイ (ブリッジのアドレス)")
-		pool     = flag.String("pool", "172.30.0.10-172.30.0.254", "単体 VM に払い出すアドレス範囲")
-		dns      = flag.String("dns", "1.1.1.1,8.8.8.8", "VM に設定する DNS サーバー (カンマ区切り)")
-		chBinary = flag.String("ch-binary", "/usr/local/bin/cloud-hypervisor", "cloud-hypervisor のパス")
-		sshKey   = flag.String("ssh-key", "", "全 VM に入れる公開鍵 (既定: <data-dir>/ssh/id_ed25519.pub)")
-		defCNI   = flag.String("default-cni", "cilium", "クラスタの既定の CNI (cilium | flannel)")
-		defRT    = flag.String("default-runtime", "runc", "クラスタの既定のコンテナランタイム (runc | crun | youki)")
-		defRTs   = flag.String("default-runtimes", "", "クラスタに既定で追加するランタイム (カンマ区切り。例: crun,youki)")
-		nfsRoot  = flag.String("nfs-root", "", "NFS で export しているディレクトリ (既定: <data-dir>/nfs。無ければ NFS の StorageClass は作らない)")
-		devFake  = flag.Bool("dev-fake-backend", false, "VM を実際には作らない (KVM の無い PC で Web UI を開発するため)")
+		showVer     = flag.Bool("version", false, "バージョンを表示して終了する")
+		listen      = flag.String("listen", "127.0.0.1:8080", "HTTP の待ち受けアドレス")
+		dataDir     = flag.String("data-dir", "/var/lib/niwakube", "データディレクトリ")
+		runDir      = flag.String("run-dir", "/run/niwakube", "API socket を置くディレクトリ")
+		bridge      = flag.String("bridge", "nkbr0", "VM をつなぐブリッジ")
+		subnet      = flag.String("subnet", "172.30.0.0/16", "VM のサブネット")
+		gateway     = flag.String("gateway", "172.30.0.1", "VM のデフォルトゲートウェイ (ブリッジのアドレス)")
+		pool        = flag.String("pool", "172.30.0.10-172.30.0.254", "単体 VM に払い出すアドレス範囲")
+		dns         = flag.String("dns", "1.1.1.1,8.8.8.8", "VM に設定する DNS サーバー (カンマ区切り)")
+		chBinary    = flag.String("ch-binary", "/usr/local/bin/cloud-hypervisor", "cloud-hypervisor のパス")
+		sshKey      = flag.String("ssh-key", "", "全 VM に入れる公開鍵 (既定: <data-dir>/ssh/id_ed25519.pub)")
+		defCNI      = flag.String("default-cni", "cilium", "クラスタの既定の CNI (cilium | flannel)")
+		defRT       = flag.String("default-runtime", "runc", "クラスタの既定のコンテナランタイム (runc | crun | youki)")
+		defRTs      = flag.String("default-runtimes", "", "クラスタに既定で追加するランタイム (カンマ区切り。例: crun,youki)")
+		nfsRoot     = flag.String("nfs-root", "", "NFS で export しているディレクトリ (既定: <data-dir>/nfs。無ければ NFS の StorageClass は作らない)")
+		backendName = flag.String("backend", "cloud-hypervisor", "ノードを作るバックエンド (cloud-hypervisor: VM / nspawn: systemd-nspawn のコンテナ)")
+		devFake     = flag.Bool("dev-fake-backend", false, "VM を実際には作らない (KVM の無い PC で Web UI を開発するため)")
 	)
 	flag.Parse()
 	if *showVer {
@@ -110,7 +112,16 @@ func run() error {
 	}
 	defer st.Close()
 
-	var be backend.Backend = ch.New(ch.Config{Binary: *chBinary, DataDir: *dataDir, RunDir: *runDir}, sys.ExecRunner{})
+	var be backend.Backend
+	switch *backendName {
+	case ch.Name:
+		be = ch.New(ch.Config{Binary: *chBinary, DataDir: *dataDir, RunDir: *runDir}, sys.ExecRunner{})
+	case nspawn.Name:
+		// コンテナ型: ホストのカーネルを共有するので、クラスタの既定の CNI は flannel になる
+		be = nspawn.New(nspawn.Config{DataDir: *dataDir}, sys.ExecRunner{})
+	default:
+		return fmt.Errorf("-backend: unknown backend %q (cloud-hypervisor or nspawn)", *backendName)
+	}
 	if *devFake {
 		log.Warn("using the fake backend: VMs are not actually created (for UI development)")
 		be = fake.New()

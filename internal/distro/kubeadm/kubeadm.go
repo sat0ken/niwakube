@@ -100,7 +100,7 @@ func (k Kubeadm) UserData(c *distro.Cluster, n *distro.Node) (map[string]any, er
 	if err := c.Addons.Validate(); err != nil {
 		return nil, err
 	}
-	install, err := render(installScript, map[string]string{"Version": c.Version, "Containerd": containerdRuntimes(c.Addons)})
+	install, err := render(installScript, map[string]any{"Version": c.Version, "Containerd": containerdRuntimes(c.Addons), "Container": c.Container})
 	if err != nil {
 		return nil, err
 	}
@@ -163,7 +163,7 @@ func (k Kubeadm) UserData(c *distro.Cluster, n *distro.Node) (map[string]any, er
 		}
 	}
 	script, err := render(bootstrapScript, map[string]any{
-		"Role": string(n.Role), "Config": configPath, "Endpoint": endpoint, "Flannel": flannelURL,
+		"Role": string(n.Role), "Config": configPath, "Endpoint": endpoint, "Flannel": flannelURL, "Container": c.Container,
 		"CNI": c.Addons.CNI, "Cilium": ciliumPath, "RuntimeClasses": len(c.Addons.Runtimes) > 0, "RuntimeClassPath": runtimeClassPath,
 	})
 	if err != nil {
@@ -206,7 +206,7 @@ func marshalDocs(docs ...any) (string, error) {
 // 合わせるため、ブートストラップスクリプトが __KUBERNETES_VERSION__ を置き換える。
 func initConfig(c *distro.Cluster, n *distro.Node, endpoint string) (string, error) {
 	vip := c.APIAddr.Prev() // .10 (将来の VIP 用。証明書の SAN にだけ入れておく)
-	return marshalDocs(
+	docs := []any{
 		map[string]any{
 			"apiVersion": "kubeadm.k8s.io/v1beta4",
 			"kind":       "InitConfiguration",
@@ -229,7 +229,30 @@ func initConfig(c *distro.Cluster, n *distro.Node, endpoint string) (string, err
 			"apiServer":            map[string]any{"certSANs": []string{n.IP.String(), c.APIAddr.String(), vip.String()}},
 			"networking":           map[string]any{"podSubnet": podSubnet, "serviceSubnet": svcSubnet},
 		},
-	)
+	}
+	return marshalDocs(append(docs, containerDocs(c)...)...)
+}
+
+// containerDocs はコンテナの中で動かすときの kube-proxy と kubelet の設定 (kind と同じ調整)。
+func containerDocs(c *distro.Cluster) []any {
+	if !c.Container {
+		return nil
+	}
+	return []any{
+		map[string]any{
+			"apiVersion": "kubeproxy.config.k8s.io/v1alpha1",
+			"kind":       "KubeProxyConfiguration",
+			// conntrack の上限はホスト全体の設定なので変えない
+			"conntrack": map[string]any{"maxPerCore": 0},
+		},
+		map[string]any{
+			"apiVersion": "kubelet.config.k8s.io/v1beta1",
+			"kind":       "KubeletConfiguration",
+			// ディスクはホストと共有なので、ディスク不足による追い出しを止める
+			"evictionHard": map[string]string{"imagefs.available": "0%", "nodefs.available": "0%", "nodefs.inodesFree": "0%"},
+			"failSwapOn":   false,
+		},
+	}
 }
 
 func joinConfig(c *distro.Cluster, n *distro.Node, endpoint, caHash string) (string, error) {
@@ -271,15 +294,16 @@ cat >/etc/modules-load.d/k8s.conf <<EOF
 overlay
 br_netfilter
 EOF
-modprobe overlay
-modprobe br_netfilter
+modprobe overlay{{if .Container}} || true{{end}}
+modprobe br_netfilter{{if .Container}} || true{{end}}
 cat >/etc/sysctl.d/90-k8s.conf <<EOF
 net.bridge.bridge-nf-call-iptables  = 1
 net.bridge.bridge-nf-call-ip6tables = 1
 net.ipv4.ip_forward                 = 1
 EOF
-sysctl --system >/dev/null
-swapoff -a
+sysctl --system >/dev/null{{if .Container}} || true # コンテナの中では書けない項目がある (ホストで設定済み){{end}}
+{{if .Container}}# コンテナの中にはホストのスワップが見えるが止められない (kubelet は failSwapOn: false)
+swapoff -a || true{{else}}swapoff -a{{end}}
 
 apt-get update -q
 apt-get install -y -q containerd apt-transport-https ca-certificates curl gpg
@@ -314,7 +338,7 @@ CONFIG="{{.Config}}"
 
 if [ "$ROLE" = "control-plane" ]; then
   sed -i "s/__KUBERNETES_VERSION__/$(kubeadm version -o short)/" "$CONFIG"
-  kubeadm init --config "$CONFIG"
+  kubeadm init --config "$CONFIG"{{if .Container}} --ignore-preflight-errors=all{{end}}
   export KUBECONFIG=/etc/kubernetes/admin.conf
 {{- if .RuntimeClasses}}
   kubectl apply -f "{{.RuntimeClassPath}}"
@@ -330,7 +354,7 @@ if [ "$ROLE" = "control-plane" ]; then
 else
   # CP の API が上がるまで待ってから join する (CP 側もパッケージのインストール中)
   until curl -ks --max-time 5 -o /dev/null "https://{{.Endpoint}}/livez"; do sleep 5; done
-  kubeadm join --config "$CONFIG"
+  kubeadm join --config "$CONFIG"{{if .Container}} --ignore-preflight-errors=all{{end}}
 fi
 `
 

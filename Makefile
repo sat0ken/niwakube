@@ -21,8 +21,11 @@ install: build
 	systemctl daemon-reload
 
 # 実機 (または KVM の使える CI) で niwakubed の API を通しで試す。host-setup.sh を済ませておくこと
+# バックエンド: cloud-hypervisor (VM) か nspawn。例: make e2e BACKEND=nspawn
+BACKEND ?= cloud-hypervisor
+
 e2e: build
-	sudo ./scripts/e2e.sh $(BIN)
+	sudo BACKEND=$(BACKEND) ./scripts/e2e.sh $(BIN)
 
 # クラスタを作る E2E。例: make e2e-cluster DISTRO=kubeadm CNI=cilium RUNTIME=crun RUNTIMES="crun youki"
 DISTRO ?= k3s
@@ -30,4 +33,4 @@ CNI ?= cilium
 RUNTIME ?= runc
 RUNTIMES ?=
 e2e-cluster: build
-	sudo DISTRO=$(DISTRO) CNI=$(CNI) RUNTIME=$(RUNTIME) RUNTIMES="$(RUNTIMES)" ./scripts/e2e-cluster.sh $(BIN)
+	sudo BACKEND=$(BACKEND) DISTRO=$(DISTRO) CNI=$(CNI) RUNTIME=$(RUNTIME) RUNTIMES="$(RUNTIMES)" ./scripts/e2e-cluster.sh $(BIN)
