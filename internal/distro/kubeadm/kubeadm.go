@@ -302,7 +302,8 @@ net.bridge.bridge-nf-call-ip6tables = 1
 net.ipv4.ip_forward                 = 1
 EOF
 sysctl --system >/dev/null{{if .Container}} || true # コンテナの中では書けない項目がある (ホストで設定済み){{end}}
-swapoff -a
+{{if .Container}}# コンテナの中にはホストのスワップが見えるが止められない (kubelet は failSwapOn: false)
+swapoff -a || true{{else}}swapoff -a{{end}}
 
 apt-get update -q
 apt-get install -y -q containerd apt-transport-https ca-certificates curl gpg

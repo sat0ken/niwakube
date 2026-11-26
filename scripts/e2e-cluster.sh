@@ -65,6 +65,9 @@ cleanup() {
       [[ -s $f ]] || continue
       echo "----- errors in $f"
       grep -n -i -E 'error|fail|not found|exit [1-9]' "$f" | grep -v -E 'level=info' | tail -n 40 || true
+      # set -x のスクリプトが最後に実行したコマンド (メッセージを出さずに失敗したときの手がかり)
+      echo "----- last commands in $f"
+      grep -a -E '^\+ ' "$f" | tail -n 15 || true
     done
     if [[ -s $KUBECONFIG_FILE ]]; then
       echo "----- pods / events"

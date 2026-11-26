@@ -205,7 +205,7 @@ func TestUserDataContainer(t *testing.T) {
 	for path, wants := range map[string][]string{
 		configPath:  {"kind: KubeProxyConfiguration", "maxPerCore: 0", "kind: KubeletConfiguration", "nodefs.available: 0%"},
 		initPath:    {"--ignore-preflight-errors=all"},
-		installPath: {"modprobe br_netfilter || true", "sysctl --system >/dev/null || true"},
+		installPath: {"modprobe br_netfilter || true", "sysctl --system >/dev/null || true", "swapoff -a || true"},
 	} {
 		for _, w := range wants {
 			if !strings.Contains(fs[path].Content, w) {
