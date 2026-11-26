@@ -175,3 +175,10 @@ niwakubed が `/` で配信する。React などのフレームワークやビ�
     (curl などこれらを付けないクライアントはそのまま通す)
   - CSP (`default-src 'self'`) で外部のスクリプトとインラインのスクリプト・スタイル、フレームへの埋め込みを禁止
 - KVM の無い PC で UI を触るには `niwakubed --dev-fake-backend` (VM を実際には作らない) を使う
+- ターミナル (`internal/terminal`): ブラウザの xterm.js と WebSocket でつなぎ、niwakubed が PTY を作って
+  `systemd-run --pty -p DynamicUser=yes ...` でシェルを起動する。クラスタの kubeconfig / talosconfig は
+  `LoadCredential` で渡し、データディレクトリと API socket のディレクトリは `InaccessiblePaths` で隠す。
+  クラスタへの権限は kubeconfig のダウンロードと同じで、増えるのは「ホストの権限の無い一時ユーザーのシェル」だけ。
+  WebSocket の Origin は Host と同じであること (Cross-Site WebSocket Hijacking の対策)。
+  xterm.js は `internal/webui/static/vendor/xterm/` に置いて埋め込む (MIT。CDN は使わない)。
+  xterm.js が `<style>` を作るので CSP は `style-src 'self' 'unsafe-inline'` (スクリプトは `'self'` のみ)

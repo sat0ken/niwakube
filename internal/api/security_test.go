@@ -1,12 +1,19 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/coder/websocket"
+
+	"github.com/sat0ken/niwakube/internal/terminal"
 )
 
 func TestProtect(t *testing.T) {
@@ -112,5 +119,47 @@ func TestUIRouting(t *testing.T) {
 	// POST は UI に渡さない
 	if resp, _ := do(t, "POST", ts.URL+"/", ""); resp.StatusCode != http.StatusMethodNotAllowed && resp.StatusCode != http.StatusNotFound {
 		t.Errorf("POST /: %d", resp.StatusCode)
+	}
+}
+
+func TestTerminal(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is not installed")
+	}
+	term := terminal.New(terminal.Config{Dir: t.TempDir()}, nil) // サンドボックス無し (開発用)
+	ts := newTestServer(t, Options{Terminal: term})
+	if resp, body := do(t, "POST", ts.URL+"/api/clusters", `{"name":"demo","workers":0}`); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create: %d %s", resp.StatusCode, body)
+	}
+	if resp, _ := do(t, "GET", ts.URL+"/api/clusters/nope/terminal", ""); resp.StatusCode != http.StatusNotFound {
+		t.Errorf("unknown cluster: %d", resp.StatusCode)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	c, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(ts.URL, "http")+"/api/clusters/demo/terminal", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.CloseNow()
+	if err := c.Write(ctx, websocket.MessageBinary, []byte("grep current-context \"$KUBECONFIG\"; exit\n")); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	for !strings.Contains(out.String(), "current-context: demo") {
+		_, data, err := c.Read(ctx)
+		if err != nil {
+			t.Fatalf("read: %v (output: %q)", err, out.String())
+		}
+		out.Write(data)
+	}
+
+	// ターミナルを有効にしていなければ 501
+	ts2 := newTestServer(t)
+	if resp, body := do(t, "POST", ts2.URL+"/api/clusters", `{"name":"demo","workers":0}`); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create: %d %s", resp.StatusCode, body)
+	}
+	if resp, _ := do(t, "GET", ts2.URL+"/api/clusters/demo/terminal", ""); resp.StatusCode != http.StatusNotImplemented {
+		t.Errorf("terminal disabled: %d", resp.StatusCode)
 	}
 }

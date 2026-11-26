@@ -6,6 +6,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/niwakubed
+	CGO_ENABLED=0 go build -trimpath -o $(dir $(BIN))termcheck ./scripts/termcheck
 
 test:
 	go test -race ./...
