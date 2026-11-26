@@ -38,6 +38,10 @@ func startFakeVMM(t *testing.T, sock string) *fakeVMM {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// vmm.shutdown のあと非同期に閉じるので、閉じるときにソケットのファイルを消さない。
+	// (消すと、再起動で同じパスに作った次の fakeVMM のソケットを消してしまうことがある。
+	// 本物の cloud-hypervisor もプロセスが終わるだけで、残ったソケットは Start が消す)
+	ln.(*net.UnixListener).SetUnlinkOnClose(false)
 	f := &fakeVMM{}
 	mux := http.NewServeMux()
 	handle := func(pattern string, fn func(w http.ResponseWriter, r *http.Request)) {
