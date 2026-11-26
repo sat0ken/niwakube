@@ -205,6 +205,8 @@ kubectl --kubeconfig demo.kubeconfig -n kube-system port-forward svc/hubble-ui 1
 | GET | `/api/clusters/{name}/kubeconfig` | admin の kubeconfig |
 | GET | `/api/clusters/{name}/talosconfig` | Talos の talosconfig (Talos のみ) |
 | GET / POST / DELETE | `/api/clusters/{name}/forwards` | ホストのポートからクラスタへの転送 (下記) |
+| GET | `/api/practice/problems` | 練習問題の一覧 (下記) |
+| POST | `/api/practice/problems/{id}/setup` / `check` | `{"cluster":"demo"}` 出題する / 採点する |
 
 `POST /api/clusters` の項目 (省略時の既定値): `name` (必須、20 文字以内)、`distro` (k3s)、
 `version` (既定は `stable`。k3s は `latest` や `v1.37.2+k3s1`、kubeadm は `v1.37` (その minor の最新) や `v1.37.2` も可)、`controlPlanes` (1。いまは 1 のみ)、`workers` (2)、
@@ -264,6 +266,15 @@ curl -s -X POST localhost:8080/api/clusters/demo/scale -d '{"workers":3}'
   Kubernetes の API に届かないときは、Node を残さないようにマシンを消さずに止まる (`failed: ...`)
 - 消したワーカーのディスクのデータ (hostPath や local-path の PV) は残らない。NFS の PV は残る
 - 進み具合はクラスタの `operation` に出る。クラスタが動いているときだけ変えられる
+
+### 練習問題 (CKA / CKAD)
+
+Web UI の「練習」で、本物のクラスタを使って CKA / CKAD の練習ができる。問題を開くと左に問題文、右にクラスタのターミナルが出る。
+「出題する」で問題の Namespace を作り直し、kubectl で解いたら「採点」を押すと、項目ごとの合否と点数が出る。
+
+- 問題は公開されている出題範囲に沿ったオリジナル (本物の試験問題ではない)。今は CKAD の 3 問
+- 練習用のクラスタを 1 つ作っておくとよい (試験と同じ kubeadm、ワーカー 1 台以上がおすすめ)
+- 問題の書き方と仕組みは [docs/practice.md](docs/practice.md)
 
 ### Web UI のターミナル
 

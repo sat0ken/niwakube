@@ -461,6 +461,36 @@ k get node "$NAME-worker-2" >/dev/null 2>&1 && die "消したワーカーの Nod
 k get node "$NAME-worker-1" >/dev/null || die "$NAME-worker-1 が消えています"
 k rollout status deployment/hello --timeout=300s || die "ワーカーを減らしたあと Deployment が戻りません"
 
+# --- 練習問題 (CKA / CKAD): 出題 → 解答を当てる → 採点が満点 ---
+log "練習問題: 出題直後は満点でなく、解答を当てると満点になること"
+practice() { curl -s -o "$LOG_DIR/practice.json" -w '%{http_code}' -X POST "$API/practice/problems/$1/$2" -d "{\"cluster\":\"$NAME\"}"; }
+mapfile -t problem_ids < <(curl -fs "$API/practice/problems" | jq -r '.[].id')
+(( ${#problem_ids[@]} > 0 )) || die "練習問題がありません"
+for id in "${problem_ids[@]}"; do
+  code=$(practice "$id" setup)
+  [[ $code == 204 ]] || die "$id: 出題できません: $code $(cat "$LOG_DIR/practice.json")"
+  code=$(practice "$id" check)
+  [[ $code == 200 ]] || die "$id: 採点できません: $code $(cat "$LOG_DIR/practice.json")"
+  [[ $(jq -r '.passed < .total' "$LOG_DIR/practice.json") == true ]] || die "$id: 出題直後なのに満点です"
+  curl -fs "$API/practice/problems/$id" | jq -r .answer | k apply -f - >/dev/null
+  start=$SECONDS
+  while :; do
+    code=$(practice "$id" check)
+    [[ $code == 200 && $(jq -r '.passed == .total' "$LOG_DIR/practice.json") == true ]] && break
+    if (( SECONDS - start > 300 )); then
+      jq . "$LOG_DIR/practice.json" || true
+      die "$id: 解答を当てても 300s のうちに満点になりません"
+    fi
+    sleep 5
+  done
+  echo "    $id: $(jq -r '"\(.score)/\(.weight) 点 (\(.passed)/\(.total) 項目)"' "$LOG_DIR/practice.json"), $((SECONDS - start))s"
+done
+# もう一度出題すると、解いた状態は消えて出題直後に戻る
+id=${problem_ids[0]}
+[[ $(practice "$id" setup) == 204 ]] || die "$id: やり直せません: $(cat "$LOG_DIR/practice.json")"
+practice "$id" check >/dev/null
+[[ $(jq -r '.passed < .total' "$LOG_DIR/practice.json") == true ]] || die "$id: やり直したのに解いた状態が残っています"
+
 log "クラスタを削除"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$API/clusters/$NAME")
 [[ $code == 204 ]] || die "削除に失敗しました: HTTP $code"

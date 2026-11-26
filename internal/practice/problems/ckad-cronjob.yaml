@@ -1,0 +1,100 @@
+id: ckad-cronjob
+exam: CKAD
+domain: アプリの設計とビルド
+title: 決まった時刻に動く CronJob を作る
+weight: 5
+namespaces: [batch-jobs]
+setup: |
+  apiVersion: v1
+  kind: Namespace
+  metadata:
+    name: batch-jobs
+task: |
+  Namespace batch-jobs に CronJob report を作ってください。
+
+  - 5 分ごとに実行する
+  - コンテナ名 report、イメージ busybox:1.36、コマンド date
+  - 前のジョブが終わっていなければ、次のジョブは始めない
+  - 成功したジョブは 3 つまで残す
+  - 1 回のジョブは 60 秒で打ち切る
+checks:
+  - description: スケジュールが 5 分ごと (*/5 * * * *)
+    apiVersion: batch/v1
+    kind: CronJob
+    namespace: batch-jobs
+    name: report
+    jsonpath: '{.spec.schedule}'
+    equals: '*/5 * * * *'
+  - description: 同時実行しない (concurrencyPolicy が Forbid)
+    apiVersion: batch/v1
+    kind: CronJob
+    namespace: batch-jobs
+    name: report
+    jsonpath: '{.spec.concurrencyPolicy}'
+    equals: Forbid
+  - description: 成功したジョブを 3 つ残す (successfulJobsHistoryLimit)
+    apiVersion: batch/v1
+    kind: CronJob
+    namespace: batch-jobs
+    name: report
+    jsonpath: '{.spec.successfulJobsHistoryLimit}'
+    equals: "3"
+  - description: ジョブを 60 秒で打ち切る (activeDeadlineSeconds)
+    apiVersion: batch/v1
+    kind: CronJob
+    namespace: batch-jobs
+    name: report
+    jsonpath: '{.spec.jobTemplate.spec.activeDeadlineSeconds}'
+    equals: "60"
+  - description: コンテナ report のイメージが busybox:1.36
+    apiVersion: batch/v1
+    kind: CronJob
+    namespace: batch-jobs
+    name: report
+    jsonpath: '{.spec.jobTemplate.spec.template.spec.containers[?(@.name=="report")].image}'
+    equals: busybox:1.36
+  - description: コマンドが date
+    apiVersion: batch/v1
+    kind: CronJob
+    namespace: batch-jobs
+    name: report
+    jsonpath: '{.spec.jobTemplate.spec.template.spec.containers[?(@.name=="report")].command[0]}'
+    equals: date
+hint: |
+  kubectl create cronjob で下書きを作り、足りない項目を YAML で書き足します。
+  打ち切りは Job の項目 (jobTemplate.spec) です。kubectl explain cronjob.spec.jobTemplate.spec で探せます。
+solution: |
+  kubectl -n batch-jobs create cronjob report --image=busybox:1.36 --schedule='*/5 * * * *' \
+    --dry-run=client -o yaml -- date > cj.yaml
+
+  cj.yaml を開き、次のように直してから kubectl apply -f cj.yaml します。
+
+    spec:
+      concurrencyPolicy: Forbid
+      successfulJobsHistoryLimit: 3
+      jobTemplate:
+        spec:
+          activeDeadlineSeconds: 60
+
+  kubectl create cronjob はコンテナ名を CronJob の名前 (report) にし、-- の後ろを command にします。
+  concurrencyPolicy は Allow (既定)・Forbid・Replace の 3 つ。打ち切りの activeDeadlineSeconds は CronJob ではなく Job の項目です。
+answer: |
+  apiVersion: batch/v1
+  kind: CronJob
+  metadata:
+    name: report
+    namespace: batch-jobs
+  spec:
+    schedule: '*/5 * * * *'
+    concurrencyPolicy: Forbid
+    successfulJobsHistoryLimit: 3
+    jobTemplate:
+      spec:
+        activeDeadlineSeconds: 60
+        template:
+          spec:
+            restartPolicy: OnFailure
+            containers:
+              - name: report
+                image: busybox:1.36
+                command: ["date"]
