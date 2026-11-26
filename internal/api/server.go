@@ -15,6 +15,7 @@ import (
 	"github.com/sat0ken/niwakube/internal/cluster"
 	"github.com/sat0ken/niwakube/internal/ipam"
 	"github.com/sat0ken/niwakube/internal/machine"
+	"github.com/sat0ken/niwakube/internal/practice"
 	"github.com/sat0ken/niwakube/internal/store"
 	"github.com/sat0ken/niwakube/internal/terminal"
 )
@@ -36,6 +37,8 @@ type Options struct {
 	UI http.Handler
 	// Terminal は Web UI のターミナル。nil ならターミナルは使えない (501)
 	Terminal *terminal.Manager
+	// Practice は CKA / CKAD の練習問題。nil なら使えない (501)
+	Practice *practice.Service
 }
 
 func New(svc *machine.Service, clusters *cluster.Service, log *slog.Logger, opts ...Options) *Server {
@@ -71,6 +74,10 @@ func New(svc *machine.Service, clusters *cluster.Service, log *slog.Logger, opts
 //	DELETE /api/clusters/{name}
 //	POST   /api/clusters/{name}/start
 //	POST   /api/clusters/{name}/stop
+//	GET    /api/practice/problems               CKA / CKAD の練習問題の一覧
+//	GET    /api/practice/problems/{id}          問題文・ヒント・解説
+//	POST   /api/practice/problems/{id}/setup    {"cluster":"demo"} 問題の Namespace を作り直して出題する
+//	POST   /api/practice/problems/{id}/check    {"cluster":"demo"} クラスタの状態で採点する
 //	POST   /api/clusters/{name}/resize   {"role":"worker","size":{"cpus":4,"memoryMiB":8192,"diskGiB":50}} 1 台ずつ drain して再起動 (202)
 //	POST   /api/clusters/{name}/scale    {"workers":3} ワーカーの台数を変える (減らすときは drain してから消す) (202)
 //	GET    /api/clusters/{name}/kubeconfig     ?proxy=socks5://localhost:1080 で proxy-url を入れる
@@ -112,6 +119,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/clusters/{name}/stop", s.stopCluster)
 	mux.HandleFunc("POST /api/clusters/{name}/resize", s.resizeCluster)
 	mux.HandleFunc("POST /api/clusters/{name}/scale", s.scaleCluster)
+	mux.HandleFunc("GET /api/practice/problems", s.listProblems)
+	mux.HandleFunc("GET /api/practice/problems/{id}", s.getProblem)
+	mux.HandleFunc("POST /api/practice/problems/{id}/setup", s.setupProblem)
+	mux.HandleFunc("POST /api/practice/problems/{id}/check", s.checkProblem)
 	mux.HandleFunc("GET /api/clusters/{name}/kubeconfig", s.kubeconfig)
 	mux.HandleFunc("GET /api/kubeconfig", s.mergedKubeconfig)
 	mux.HandleFunc("GET /api/clusters/{name}/terminal", s.terminal)
@@ -433,7 +444,7 @@ func statusFor(err error) int {
 	switch {
 	case errors.Is(err, machine.ErrInvalid), errors.Is(err, backend.ErrImageNotFound):
 		return http.StatusBadRequest
-	case errors.Is(err, store.ErrNotFound), errors.Is(err, backend.ErrNotFound):
+	case errors.Is(err, store.ErrNotFound), errors.Is(err, backend.ErrNotFound), errors.Is(err, practice.ErrNotFound):
 		return http.StatusNotFound
 	case errors.Is(err, store.ErrExists), errors.Is(err, backend.ErrAlreadyExists), errors.Is(err, ipam.ErrExhausted),
 		errors.Is(err, machine.ErrPartOfCluster), errors.Is(err, cluster.ErrBusy):
