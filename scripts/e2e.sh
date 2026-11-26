@@ -11,6 +11,8 @@ set -euo pipefail
 
 BIN=${1:?usage: $0 path/to/niwakubed}
 NAME=${NAME:-e2e}
+# cloud-hypervisor (VM) か nspawn (systemd-nspawn のコンテナ)
+BACKEND=${BACKEND:-cloud-hypervisor}
 MEMORY_MIB=${MEMORY_MIB:-2048}
 BOOT_TIMEOUT=${BOOT_TIMEOUT:-300}
 LISTEN=${LISTEN:-127.0.0.1:18080}
@@ -27,7 +29,7 @@ die()  { printf '\e[1;31mxx\e[0m %s\n' "$*" >&2; exit 1; }
 mkdir -p "$LOG_DIR"
 
 # --- niwakubed を起動 ---
-"$BIN" --listen "$LISTEN" --data-dir "$NIWAKUBE_DIR" >"$LOG_DIR/niwakubed.log" 2>&1 &
+"$BIN" --listen "$LISTEN" --data-dir "$NIWAKUBE_DIR" --backend "$BACKEND" >"$LOG_DIR/niwakubed.log" 2>&1 &
 DAEMON_PID=$!
 
 cleanup() {
@@ -128,7 +130,14 @@ ssh_vm 'cloud-init status --wait >/dev/null; rc=$?; cloud-init status --long; [ 
 log "VM の中身を確認"
 ssh_vm 'echo "    hostname=$(hostname) vcpu=$(nproc) ip=$(ip -4 -br addr show eth0 | awk "{print \$3}")"'
 [[ $(ssh_vm hostname) == "$NAME" ]] || die "ホスト名が違います"
-[[ $(ssh_vm nproc) == 2 ]] || die "vCPU 数が違います"
+# コンテナの中の nproc にはホストの CPU が見えるので、nspawn は unit の CPU の上限で確かめる
+unit_prop() { systemctl show -p "$1" --value "niwakube-vm-$NAME"; }
+if [[ $BACKEND == nspawn ]]; then
+  [[ $(unit_prop CPUQuotaPerSecUSec) == 2s ]] || die "CPU の上限が違います: $(unit_prop CPUQuotaPerSecUSec)"
+  echo "    nspawn: $(machinectl list --no-legend | grep -w "$NAME" || true)"
+else
+  [[ $(ssh_vm nproc) == 2 ]] || die "vCPU 数が違います"
+fi
 
 log "VM から外部への疎通 (NAT)"
 ssh_vm 'curl -fsS -o /dev/null -w "    HTTP %{http_code}\n" --max-time 20 https://cloud-images.ubuntu.com/'
@@ -158,13 +167,20 @@ wait_state running 30
 wait_ssh
 # パーティションとファイルシステムは cloud-init (growpart / resizefs) が起動時に広げる
 ssh_vm 'cloud-init status --wait >/dev/null; true'
-vcpu=$(ssh_vm nproc)
-mem=$(ssh_vm "awk '/MemTotal/ {print int(\$2/1024)}' /proc/meminfo")
-root1=$(ssh_vm "df -BM --output=size / | tail -n1 | tr -dc 0-9")
-echo "    vcpu=$vcpu memTotal=${mem}MiB root=${root0}MiB -> ${root1}MiB"
-[[ $vcpu == 3 ]] || die "vCPU 数が変わっていません ($vcpu)"
-(( mem > MEMORY_MIB + 512 )) || die "メモリが増えていません (${mem}MiB)"
-(( root1 > root0 + 3000 )) || die "ルートのファイルシステムが広がっていません (${root0}MiB -> ${root1}MiB)"
+if [[ $BACKEND == nspawn ]]; then
+  # コンテナはホストの CPU・メモリ・ディスクが見えるので、unit の上限で確かめる (ディスクはホストと共有)
+  echo "    CPUQuota=$(unit_prop CPUQuotaPerSecUSec) MemoryMax=$(unit_prop MemoryMax)"
+  [[ $(unit_prop CPUQuotaPerSecUSec) == 3s ]] || die "CPU の上限が変わっていません"
+  [[ $(unit_prop MemoryMax) == $(( (MEMORY_MIB + 1024) * 1024 * 1024 )) ]] || die "メモリの上限が変わっていません"
+else
+  vcpu=$(ssh_vm nproc)
+  mem=$(ssh_vm "awk '/MemTotal/ {print int(\$2/1024)}' /proc/meminfo")
+  root1=$(ssh_vm "df -BM --output=size / | tail -n1 | tr -dc 0-9")
+  echo "    vcpu=$vcpu memTotal=${mem}MiB root=${root0}MiB -> ${root1}MiB"
+  [[ $vcpu == 3 ]] || die "vCPU 数が変わっていません ($vcpu)"
+  (( mem > MEMORY_MIB + 512 )) || die "メモリが増えていません (${mem}MiB)"
+  (( root1 > root0 + 3000 )) || die "ルートのファイルシステムが広がっていません (${root0}MiB -> ${root1}MiB)"
+fi
 api POST "/vms/$NAME/resize" '{"diskGiB":10}'
 expect 400
 

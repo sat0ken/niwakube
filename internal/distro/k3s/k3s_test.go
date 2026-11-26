@@ -146,3 +146,41 @@ func TestUserDataCiliumAndRuntimes(t *testing.T) {
 		t.Errorf("agent config: %v", wcfg)
 	}
 }
+
+func TestUserDataContainer(t *testing.T) {
+	k := New()
+	sec, err := k.GenerateSecrets("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &distro.Cluster{Name: "demo", APIAddr: netip.MustParseAddr("172.30.1.11"), Secrets: sec, Container: true,
+		Addons: distro.Addons{CNI: distro.CNIFlannel, DefaultRuntime: distro.RuntimeRunc}}
+	for _, n := range []*distro.Node{
+		{Name: "demo-cp-1", Role: distro.RoleControlPlane, Index: 1, IP: netip.MustParseAddr("172.30.1.11")},
+		{Name: "demo-worker-1", Role: distro.RoleWorker, Index: 1, IP: netip.MustParseAddr("172.30.1.21")},
+	} {
+		ud, err := k.UserData(c, n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var cfg string
+		for _, f := range ud["write_files"].([]writeFile) {
+			if f.Path == "/etc/rancher/k3s/config.yaml" {
+				cfg = f.Content
+			}
+		}
+		for _, want := range []string{"conntrack-max-per-core=0", "eviction-hard="} {
+			if !strings.Contains(cfg, want) {
+				t.Errorf("%s: config.yaml does not contain %q:\n%s", n.Name, want, cfg)
+			}
+		}
+	}
+	// VM のときは入れない
+	c.Container = false
+	ud, _ := k.UserData(c, &distro.Node{Name: "demo-cp-1", Role: distro.RoleControlPlane, Index: 1, IP: netip.MustParseAddr("172.30.1.11")})
+	for _, f := range ud["write_files"].([]writeFile) {
+		if f.Path == "/etc/rancher/k3s/config.yaml" && strings.Contains(f.Content, "conntrack") {
+			t.Errorf("VM config must not have container settings:\n%s", f.Content)
+		}
+	}
+}

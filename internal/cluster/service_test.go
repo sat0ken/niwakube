@@ -16,6 +16,7 @@ import (
 
 	"github.com/sat0ken/niwakube/internal/backend"
 	"github.com/sat0ken/niwakube/internal/backend/fake"
+	"github.com/sat0ken/niwakube/internal/distro"
 	"github.com/sat0ken/niwakube/internal/distro/k3s"
 	"github.com/sat0ken/niwakube/internal/distro/kubeadm"
 	"github.com/sat0ken/niwakube/internal/distro/talos"
@@ -669,5 +670,49 @@ func TestKubeconfigFor(t *testing.T) {
 	}
 	if _, err := cs.KubeconfigFor(ctx, []string{"a", "nope"}); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("unknown cluster: want ErrNotFound, got %v", err)
+	}
+}
+
+func TestContainerBackend(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	fb := fake.New()
+	fb.Caps = &backend.Capabilities{Isolation: backend.IsolationContainer, NICAttach: backend.NICVeth, Privileged: true}
+	ms, err := machine.NewService(machine.Config{
+		Bridge: "nkbr0", Subnet: netip.MustParsePrefix("172.30.0.0/16"), Gateway: netip.MustParseAddr("172.30.0.1"),
+		Pool: ipam.Pool{Start: netip.MustParseAddr("172.30.0.10"), End: netip.MustParseAddr("172.30.0.254")},
+	}, st, nil, fb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs, err := NewService(Config{Subnet: netip.MustParsePrefix("172.30.0.0/16"), NewApplier: func([]byte) (Applier, error) { return &fakeApplier{}, nil }},
+		st, ms, &fakeProber{err: errors.New("connection refused")}, nil, k3s.New(), kubeadm.New(), talos.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(cs.Close)
+
+	// 既定の CNI (Cilium) はホストのカーネルを共有するので flannel になる
+	one := 1
+	c, err := cs.Create(ctx, CreateRequest{Name: "demo", Workers: &one})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.CNI != distro.CNIFlannel || c.Hubble || c.LoadBalancerPool != "" {
+		t.Errorf("container cluster: cni %s hubble %v lb %q", c.CNI, c.Hubble, c.LoadBalancerPool)
+	}
+	spec, _ := fb.Spec("demo-worker-1")
+	if !strings.Contains(string(spec.Seed.UserData), "conntrack-max-per-core=0") {
+		t.Errorf("k3s on a container backend must get the container settings:\n%s", spec.Seed.UserData)
+	}
+	if _, err := cs.Create(ctx, CreateRequest{Name: "cil", CNI: distro.CNICilium}); !errors.Is(err, machine.ErrInvalid) {
+		t.Errorf("cilium must be rejected on a container backend: %v", err)
+	}
+	if _, err := cs.Create(ctx, CreateRequest{Name: "tal", Distro: "talos"}); !errors.Is(err, machine.ErrInvalid) {
+		t.Errorf("talos must be rejected on a container backend (for now): %v", err)
 	}
 }

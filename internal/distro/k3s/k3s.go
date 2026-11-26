@@ -105,6 +105,12 @@ func (k K3s) UserData(c *distro.Cluster, n *distro.Node) (map[string]any, error)
 	if rt := c.Addons.DefaultRuntime; rt != "" && rt != distro.RuntimeRunc {
 		cfg["default-runtime"] = rt
 	}
+	if c.Container {
+		// コンテナの中: conntrack の上限はホスト全体の設定なので kube-proxy に変えさせない。
+		// ディスクはホストと共有なので、kubelet のディスク不足による追い出しを止める (k3d / kind と同じ)
+		cfg["kube-proxy-arg"] = []string{"conntrack-max-per-core=0"}
+		cfg["kubelet-arg"] = []string{"eviction-hard=imagefs.available<1%,nodefs.available<1%", "eviction-minimum-reclaim=imagefs.available=1%,nodefs.available=1%"}
+	}
 	var files []writeFile
 	var runcmd []any
 	if len(c.Addons.Runtimes) > 0 {

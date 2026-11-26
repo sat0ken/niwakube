@@ -12,6 +12,8 @@ set -euo pipefail
 BIN=${1:?usage: $0 path/to/niwakubed}
 DISTRO=${DISTRO:-k3s}
 CNI=${CNI:-cilium}
+# cloud-hypervisor (VM) か nspawn (systemd-nspawn のコンテナ。CNI は flannel)
+BACKEND=${BACKEND:-cloud-hypervisor}
 RUNTIME=${RUNTIME:-runc}
 RUNTIMES=${RUNTIMES:-}
 NAME=${NAME:-e2ek}
@@ -39,7 +41,7 @@ ssh_to() {
       -o LogLevel=ERROR -o ConnectTimeout=5 "ubuntu@$ip" "$@"
 }
 
-"$BIN" --listen "$LISTEN" --data-dir "$NIWAKUBE_DIR" >"$LOG_DIR/niwakubed-cluster.log" 2>&1 &
+"$BIN" --listen "$LISTEN" --data-dir "$NIWAKUBE_DIR" --backend "$BACKEND" >"$LOG_DIR/niwakubed-cluster.log" 2>&1 &
 DAEMON_PID=$!
 
 cleanup() {
@@ -387,9 +389,16 @@ k wait --for=condition=Ready "node/$worker" --timeout=300s >/dev/null
 mem1=$(to_kib "$(k get node "$worker" -o jsonpath='{.status.capacity.memory}')")
 eph1=$(to_kib "$(k get node "$worker" -o jsonpath='{.status.capacity.ephemeral-storage}')")
 unsched=$(k get node "$worker" -o jsonpath='{.spec.unschedulable}')
-echo "    memory: $((mem0 / 1024))MiB -> $((mem1 / 1024))MiB, ephemeral-storage: $((eph0 / 1024 / 1024))GiB -> $((eph1 / 1024 / 1024))GiB, unschedulable: ${unsched:-false}"
-(( mem1 > mem0 + 800 * 1024 )) || die "ノードのメモリが増えていません"
-(( eph1 > eph0 + 3 * 1024 * 1024 )) || die "ノードのディスク (ephemeral-storage) が広がっていません"
+if [[ $BACKEND == nspawn ]]; then
+  # コンテナの kubelet にはホストのメモリとディスクが見えるので、unit のメモリの上限で確かめる
+  memmax=$(systemctl show -p MemoryMax --value "niwakube-vm-$worker")
+  echo "    MemoryMax: $memmax, unschedulable: ${unsched:-false}"
+  [[ $memmax == $((4096 * 1024 * 1024)) ]] || die "コンテナのメモリの上限が変わっていません: $memmax"
+else
+  echo "    memory: $((mem0 / 1024))MiB -> $((mem1 / 1024))MiB, ephemeral-storage: $((eph0 / 1024 / 1024))GiB -> $((eph1 / 1024 / 1024))GiB, unschedulable: ${unsched:-false}"
+  (( mem1 > mem0 + 800 * 1024 )) || die "ノードのメモリが増えていません"
+  (( eph1 > eph0 + 3 * 1024 * 1024 )) || die "ノードのディスク (ephemeral-storage) が広がっていません"
+fi
 [[ -z $unsched || $unsched == false ]] || die "ノードが cordon されたままです"
 [[ $(curl -fs "$API/clusters/$NAME" | jq -r '.worker.memoryMiB') == 4096 ]] || die "クラスタの設定 (worker の大きさ) が更新されていません"
 

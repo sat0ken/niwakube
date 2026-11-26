@@ -15,6 +15,8 @@ type Backend struct {
 	// CreateErr / StartErr を設定すると、その操作が失敗する。
 	CreateErr error
 	StartErr  error
+	// Caps を設定すると Capabilities がそれを返す (コンテナ型のバックエンドのまね)。
+	Caps *backend.Capabilities
 
 	mu       sync.Mutex
 	machines map[string]*entry
@@ -32,6 +34,9 @@ func New() *Backend { return &Backend{machines: map[string]*entry{}} }
 func (b *Backend) Name() string { return Name }
 
 func (b *Backend) Capabilities() backend.Capabilities {
+	if b.Caps != nil {
+		return *b.Caps
+	}
 	return backend.Capabilities{Isolation: backend.IsolationVM, OwnKernel: true, NICAttach: backend.NICTap}
 }
 

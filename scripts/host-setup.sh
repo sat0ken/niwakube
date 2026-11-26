@@ -2,11 +2,14 @@
 # niwakube ホストセットアップ (Ubuntu Server 26.04 LTS 想定。24.04 でも動く)
 #
 #   sudo ./scripts/host-setup.sh
+#   sudo BACKEND=nspawn ./scripts/host-setup.sh   # VM ではなく systemd-nspawn のコンテナでノードを作る
 #
 # 何度実行しても同じ結果になるように書いている (冪等)。
 set -euo pipefail
 
 NIWAKUBE_DIR=${NIWAKUBE_DIR:-/var/lib/niwakube}
+# ノードを作るバックエンド: cloud-hypervisor (VM。Intel VT-x / AMD-V が要る) か nspawn (systemd-nspawn のコンテナ)
+BACKEND=${BACKEND:-cloud-hypervisor}
 BRIDGE=${BRIDGE:-nkbr0}
 BRIDGE_ADDR=${BRIDGE_ADDR:-172.30.0.1/16}
 VM_SUBNET=${VM_SUBNET:-172.30.0.0/16}
@@ -63,6 +66,9 @@ install_packages() {
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
     qemu-utils cloud-image-utils nftables curl jq xz-utils iproute2 openssh-client netcat-openbsd nfs-kernel-server \
     bash-completion
+  if [[ $BACKEND == nspawn ]]; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends systemd-container
+  fi
 }
 
 install_cloud_hypervisor() {
@@ -231,6 +237,64 @@ fetch_ubuntu_images() {
   done
 }
 
+# fetch_ubuntu_rootfs は nspawn のノードの土台にする Ubuntu のルートファイルシステムを用意する
+# (ノードごとに overlayfs で重ねるので、ここは読み取り専用の共有の層になる)
+fetch_ubuntu_rootfs() {
+  local ver codename arch dir base file tmp sum
+  arch=$(dpkg --print-architecture)
+  for ver in $UBUNTU_IMAGES; do
+    codename=$(ubuntu_codename "$ver")
+    dir=$NIWAKUBE_DIR/images/ubuntu-$ver.rootfs
+    if [[ -d $dir/etc ]]; then
+      log "Ubuntu $ver のルートファイルシステムは用意済み: $dir"
+      continue
+    fi
+    base=https://cloud-images.ubuntu.com/releases/$codename/release
+    file=ubuntu-$ver-server-cloudimg-$arch-root.tar.xz
+    log "Ubuntu $ver ($codename, $arch) のルートファイルシステムの取得と展開"
+    tmp=$(mktemp -d)
+    curl -fL --progress-bar -o "$tmp/$file" "$base/$file"
+    sum=$(curl -fsSL "$base/SHA256SUMS" | awk -v f="$file" '$2 == f || $2 == "*"f {print $1}')
+    [[ -n $sum ]] || die "$file の SHA256 が見つかりません"
+    echo "$sum  $tmp/$file" | sha256sum -c --quiet - || die "$file の SHA256 が一致しません"
+    rm -rf "$dir.tmp"
+    mkdir -p "$dir.tmp"
+    tar --numeric-owner --xattrs --xattrs-include='*' -xJf "$tmp/$file" -C "$dir.tmp"
+    mv "$dir.tmp" "$dir"
+    rm -rf "$tmp"
+  done
+}
+
+# setup_container_kernel はコンテナの中で Kubernetes を動かすためのホストのカーネルの設定をする
+# (コンテナはホストのカーネルを共有するので、モジュールの読み込みと一部の sysctl はホストで行う)
+setup_container_kernel() {
+  log "コンテナで Kubernetes を動かすためのカーネルの設定"
+  local m mods=(overlay br_netfilter vxlan nf_conntrack ip_tables iptable_nat iptable_filter)
+  printf '%s\n' "${mods[@]}" >/etc/modules-load.d/niwakube.conf
+  for m in "${mods[@]}"; do
+    modprobe "$m" 2>/dev/null || warn "カーネルモジュール $m を読み込めません"
+  done
+  cat >/etc/sysctl.d/90-niwakube-containers.conf <<'EOF'
+# niwakube (nspawn): コンテナの中の Kubernetes のため
+net.ipv4.ip_forward = 1
+net.bridge.bridge-nf-call-iptables = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+# kubelet や containerd がコンテナの数だけ inotify を使う (ホストの root で共有)
+fs.inotify.max_user_instances = 8192
+fs.inotify.max_user_watches = 524288
+EOF
+  sysctl --system >/dev/null
+}
+
+# write_niwakubed_defaults は niwakubed の起動オプション (バックエンド) を書く
+write_niwakubed_defaults() {
+  log "niwakubed の設定 (/etc/default/niwakubed): --backend=$BACKEND"
+  cat >/etc/default/niwakubed <<EOF
+# niwakube: scripts/host-setup.sh が書く。niwakubed の起動オプション
+NIWAKUBED_OPTS="--backend=$BACKEND"
+EOF
+}
+
 setup_nfs() {
   log "NFS サーバー ($NIWAKUBE_DIR/nfs を $VM_SUBNET に公開)"
   # クラスタごとに $NIWAKUBE_DIR/nfs/<クラスタ名> を niwakubed が作り、csi-driver-nfs の StorageClass (niwakube-nfs) で使う
@@ -258,15 +322,33 @@ fetch_talos_images() {
 }
 
 check_os
-check_kvm
-install_packages
-install_cloud_hypervisor
+case $BACKEND in
+  cloud-hypervisor)
+    check_kvm
+    install_packages
+    install_cloud_hypervisor
+    ;;
+  nspawn)
+    install_packages
+    setup_container_kernel
+    ;;
+  *) die "BACKEND は cloud-hypervisor か nspawn です: $BACKEND" ;;
+esac
 install_clients
 setup_dirs
 setup_bridge
 setup_nat
-fetch_ubuntu_images
-fetch_talos_images
+if [[ $BACKEND == nspawn ]]; then
+  fetch_ubuntu_rootfs
+else
+  fetch_ubuntu_images
+  fetch_talos_images
+fi
 setup_nfs
+write_niwakubed_defaults
 
-log "完了。次は: sudo ./scripts/test-vm.sh up test"
+if [[ $BACKEND == nspawn ]]; then
+  log "完了 (nspawn)。niwakubed を (再) 起動すると、コンテナでノードを作ります: sudo systemctl restart niwakubed"
+else
+  log "完了。次は: sudo ./scripts/test-vm.sh up test"
+fi

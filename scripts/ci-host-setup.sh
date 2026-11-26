@@ -17,7 +17,7 @@ ls -l /dev/kvm
 
 # Talos のイメージは niwakubed に組み込んだ machinery と同じバージョンにする
 TALOS_VERSIONS=$(go list -m -f '{{.Version}}' github.com/siderolabs/talos/pkg/machinery)
-sudo TALOS_VERSIONS="$TALOS_VERSIONS" ./scripts/host-setup.sh
+sudo BACKEND="${BACKEND:-cloud-hypervisor}" TALOS_VERSIONS="$TALOS_VERSIONS" ./scripts/host-setup.sh
 
 if sudo iptables -nL DOCKER-USER >/dev/null 2>&1; then
   sudo iptables -I DOCKER-USER -i nkbr0 -j ACCEPT
