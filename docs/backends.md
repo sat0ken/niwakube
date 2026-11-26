@@ -71,7 +71,7 @@ kind / k3d / Talos の docker provisioner が実際にこの形で k8s ノード
 - 初期設定の渡し方: `/var/lib/cloud/seed/nocloud/` に bind mount すれば、cloud-init の NoCloud がそのまま読む
 - k8s を動かすための調整: `Capability=all`、cgroup の書き込み権限、`/dev/kmsg` の bind、`/lib/modules` の読み取り専用 bind、
   システムコールフィルタの緩和。cgroup v2 との相性は良い (systemd 同士なので)
-- 評価: k3s ○ / kubeadm ○ / Talos ✕。追加で入れるものがほぼ無く (`systemd-container` パッケージのみ)、仕組みを学ぶにはとても良い
+- 評価: k3s ○ / kubeadm ○ / Talos ○ (コンテナモード)。追加で入れるものがほぼ無く (`systemd-container` パッケージのみ)、仕組みを学ぶにはとても良い
 
 #### 実装 (`internal/backend/nspawn`)
 
@@ -98,6 +98,16 @@ Docker のような管理の層 (イメージ・ネットワーク・ボリュ�
   kubelet のディスク不足による追い出しを止める、kubeadm の事前チェックを無視する
 - **ホストの準備** (`BACKEND=nspawn ./scripts/host-setup.sh`): `systemd-container`、カーネルモジュール (overlay / br_netfilter /
   vxlan / nf_conntrack / iptables)、sysctl (ip_forward、bridge-nf-call、inotify の上限) をホストで設定する
+
+- **Talos** (イメージ名が `talos-<バージョン>`): Talos 公式のコンテナイメージ `ghcr.io/siderolabs/talos:<バージョン>` を
+  niwakubed が初めて使うときにレジストリから取得し (`internal/oci`。go-containerregistry でレイヤーを重ねて展開する。
+  ルートの外に出るエントリやシンボリックリンクをたどる書き込みは拒否する)、下の層にする。`--boot` ではなく Talos の
+  `/sbin/init` を PID 1 で起動する。Talos の Docker 用の作り (`talosctl cluster create --provisioner docker`) と同じく、
+  `PLATFORM=container`・`USERDATA` (base64 のマシンの設定)、`/system` と `/tmp` は tmpfs、`/var`・`/system/state`・`/opt` は
+  ホストのディレクトリ、`/etc/hostname`・`/etc/resolv.conf`・`/etc/hosts` はファイルを渡す。IP はコンテナのときの Talos が自分では
+  付けないので、ホストで付けておく作りがそのまま役に立つ。マシンの設定 (クラスタの秘密鍵を含む) は unit の `Environment=`
+  (一般ユーザーからも見える) ではなく root だけが読める `EnvironmentFile=` で渡し、nspawn には `--setenv=USERDATA` (値なし) で
+  引き継がせる。停止は PID 1 への SIGTERM
 
 コンテナ型の共通の制約: ホストのカーネルを共有するので **CNI は flannel のみ** (既定の CNI も flannel になる)、
 kubelet にはホスト全体の CPU・メモリが見える (上限はスケジューラーに伝わらない)。
