@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -576,23 +577,83 @@ func (s *Service) adminCredentials(rec *store.Cluster) (string, pki.KeyPair, err
 	return serverCA.CertPEM, kp, nil
 }
 
+// KubeconfigOptions は kubeconfig の発行のオプション。
+type KubeconfigOptions struct {
+	// ProxyURL を入れると、クラスタの proxy-url にする (例: socks5://localhost:1080)。
+	// クラスタはホストの中の NAT にあるので、SSH の SOCKS プロキシ (ssh -D 1080) 経由で
+	// 別の PC から kubectl を使うときに指定する。server と証明書はそのまま使える。
+	ProxyURL string
+}
+
+// ValidateProxyURL は kubeconfig の proxy-url に使える URL か確かめる (socks5 / http / https とホスト:ポート)。
+func ValidateProxyURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return invalid("proxy: %v", err)
+	}
+	switch u.Scheme {
+	case "socks5", "http", "https":
+	default:
+		return invalid("proxy: scheme must be socks5, http or https: %q", raw)
+	}
+	if u.Hostname() == "" || u.Port() == "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.User != nil {
+		return invalid("proxy: want scheme://host:port, got %q", raw)
+	}
+	return nil
+}
+
 // Kubeconfig は admin の kubeconfig を発行する。
-func (s *Service) Kubeconfig(ctx context.Context, name string) ([]byte, error) {
+func (s *Service) Kubeconfig(ctx context.Context, name string, opts ...KubeconfigOptions) ([]byte, error) {
+	return s.KubeconfigFor(ctx, []string{name}, opts...)
+}
+
+// KubeconfigFor は複数のクラスタの admin の kubeconfig を 1 つにまとめて発行する
+// (クラスタごとに cluster / user / context が入り、current-context は最初のクラスタ)。
+func (s *Service) KubeconfigFor(ctx context.Context, names []string, opts ...KubeconfigOptions) ([]byte, error) {
+	var o KubeconfigOptions
+	if len(opts) > 0 {
+		o = opts[0]
+	}
+	if o.ProxyURL != "" {
+		if err := ValidateProxyURL(o.ProxyURL); err != nil {
+			return nil, err
+		}
+	}
+	if len(names) == 0 {
+		return nil, invalid("no cluster selected")
+	}
+	seen := map[string]bool{}
+	var entries []kubeconfigEntry
+	for _, name := range names {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		e, err := s.kubeconfigEntry(ctx, name, o.ProxyURL)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, e)
+	}
+	return marshalKubeconfig(entries)
+}
+
+func (s *Service) kubeconfigEntry(ctx context.Context, name, proxyURL string) (kubeconfigEntry, error) {
 	rec, err := s.store.GetCluster(ctx, name)
 	if err != nil {
-		return nil, err
+		return kubeconfigEntry{}, err
 	}
 	sec, d, err := s.secrets(rec)
 	if err != nil {
-		return nil, err
+		return kubeconfigEntry{}, err
 	}
 	serverName, clientName := d.AdminCAs()
 	clientCA := sec.CAs[clientName]
 	admin, err := clientCA.SignClient("niwakube-admin", []string{"system:masters"}, 365*24*time.Hour)
 	if err != nil {
-		return nil, err
+		return kubeconfigEntry{}, err
 	}
-	return buildKubeconfig(rec.Name, s.endpoint(rec), sec.CAs[serverName].CertPEM, admin)
+	return newKubeconfigEntry(rec.Name, s.endpoint(rec), sec.CAs[serverName].CertPEM, proxyURL, admin), nil
 }
 
 // Delete はクラスタのノードをすべて削除し、登録を消す。
@@ -913,7 +974,16 @@ func (s *Service) Reconcile(ctx context.Context) {
 }
 
 // ClientConfig は Kubernetes 以外のクライアントの設定 (Talos の talosconfig) を返す。
-func (s *Service) ClientConfig(ctx context.Context, name string) (string, []byte, error) {
+func (s *Service) ClientConfig(ctx context.Context, name string, opts ...KubeconfigOptions) (string, []byte, error) {
+	var o KubeconfigOptions
+	if len(opts) > 0 {
+		o = opts[0]
+	}
+	if o.ProxyURL != "" {
+		if err := ValidateProxyURL(o.ProxyURL); err != nil {
+			return "", nil, err
+		}
+	}
 	rec, err := s.store.GetCluster(ctx, name)
 	if err != nil {
 		return "", nil, err
@@ -926,5 +996,5 @@ func (s *Service) ClientConfig(ctx context.Context, name string) (string, []byte
 	if !ok {
 		return "", nil, fmt.Errorf("distro %s has no client config: %w", d.Name(), backend.ErrNotSupported)
 	}
-	return p.ClientConfig(dc)
+	return p.ClientConfig(dc, o.ProxyURL)
 }

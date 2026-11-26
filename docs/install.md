@@ -272,10 +272,10 @@ niwakubed は認証が無いので `127.0.0.1:8080` だけで待ち受けてい�
 (`niwa` はミニPC のホスト名か IP アドレス):
 
 ```bash
-ssh -L 8080:localhost:8080 niwa
+ssh -L 18080:localhost:8080 niwa
 ```
 
-PC のブラウザで `http://localhost:8080/` を開く。
+PC のブラウザで `http://localhost:18080/` を開く (PC 側のポートは 18080。ほかのアプリの 8080 とぶつからないように)。
 
 使い方は [README](../README.md) を参照。
 

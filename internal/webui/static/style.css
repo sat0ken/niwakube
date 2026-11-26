@@ -80,6 +80,7 @@ table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
 th { color: var(--muted); font-weight: 600; font-size: 13px; white-space: nowrap; }
 td a, td code { white-space: nowrap; }
+th.check, td.check { width: 32px; padding-right: 0; }
 tr:last-child td { border-bottom: none; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .table-wrap { overflow-x: auto; }
