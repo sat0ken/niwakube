@@ -1,0 +1,136 @@
+id: ckad-networkpolicy
+exam: CKAD
+domain: サービスとネットワーク
+title: NetworkPolicy で DB への通信を絞る
+weight: 7
+namespaces: [netpol]
+setup: |
+  apiVersion: v1
+  kind: Namespace
+  metadata:
+    name: netpol
+  ---
+  apiVersion: v1
+  kind: Pod
+  metadata:
+    name: db
+    namespace: netpol
+    labels:
+      app: db
+  spec:
+    containers:
+      - name: db
+        image: registry.k8s.io/e2e-test-images/agnhost:2.39
+        args: ["netexec", "--http-port=8080"]
+  ---
+  apiVersion: v1
+  kind: Pod
+  metadata:
+    name: api
+    namespace: netpol
+    labels:
+      app: api
+  spec:
+    containers:
+      - name: api
+        image: registry.k8s.io/e2e-test-images/agnhost:2.39
+        args: ["netexec", "--http-port=8080"]
+task: |
+  Namespace netpol に NetworkPolicy db-allow-api を作ってください。
+
+  - 対象は、ラベル app=db の Pod
+  - 受信 (Ingress) は、同じ Namespace のラベル app=api の Pod からの TCP 8080 だけを許可する
+  - それ以外の受信はすべて拒否する
+
+  (CNI が flannel のクラスタでは NetworkPolicy は効きませんが、採点は NetworkPolicy の内容で行います)
+checks:
+  - description: NetworkPolicy db-allow-api がある
+    apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    namespace: netpol
+    name: db-allow-api
+  - description: 対象が app=db の Pod
+    apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    namespace: netpol
+    name: db-allow-api
+    jsonpath: '{.spec.podSelector.matchLabels.app}'
+    equals: db
+  - description: Ingress を制限する (policyTypes に Ingress)
+    apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    namespace: netpol
+    name: db-allow-api
+    jsonpath: '{.spec.policyTypes}'
+    contains: Ingress
+  - description: 送信元が app=api の Pod
+    apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    namespace: netpol
+    name: db-allow-api
+    jsonpath: '{.spec.ingress[0].from[0].podSelector.matchLabels.app}'
+    equals: api
+  - description: 許可するポートが 8080
+    apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    namespace: netpol
+    name: db-allow-api
+    jsonpath: '{.spec.ingress[0].ports[0].port}'
+    equals: "8080"
+  - description: 許可するプロトコルが TCP
+    apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    namespace: netpol
+    name: db-allow-api
+    jsonpath: '{.spec.ingress[0].ports[0].protocol}'
+    equals: TCP
+hint: |
+  kubectl に NetworkPolicy を作るサブコマンドは無いので、YAML を書きます。
+  公式ドキュメントの NetworkPolicy のページにある例を下書きにすると早いです (試験中も kubernetes.io は見られます)。
+  kubectl -n netpol get pods --show-labels でラベルを確かめます。
+solution: |
+  次の YAML を kubectl apply -f します。
+
+    apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: db-allow-api
+      namespace: netpol
+    spec:
+      podSelector:
+        matchLabels:
+          app: db
+      policyTypes:
+        - Ingress
+      ingress:
+        - from:
+            - podSelector:
+                matchLabels:
+                  app: api
+          ports:
+            - protocol: TCP
+              port: 8080
+
+  podSelector に合う Pod は、policyTypes に Ingress があると「ingress に書いた通信以外の受信は拒否」になります。
+  from に namespaceSelector を書かない podSelector は、同じ Namespace の Pod だけを指します。
+  Cilium のクラスタなら、kubectl -n netpol exec api -- /agnhost connect db の IP:8080 で通り、ほかの Pod からは通らないことを確かめられます。
+answer: |
+  apiVersion: networking.k8s.io/v1
+  kind: NetworkPolicy
+  metadata:
+    name: db-allow-api
+    namespace: netpol
+  spec:
+    podSelector:
+      matchLabels:
+        app: db
+    policyTypes:
+      - Ingress
+    ingress:
+      - from:
+          - podSelector:
+              matchLabels:
+                app: api
+        ports:
+          - protocol: TCP
+            port: 8080

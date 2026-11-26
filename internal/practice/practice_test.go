@@ -94,8 +94,8 @@ func TestLoadEmbedded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ps) < 3 {
-		t.Fatalf("want at least 3 problems, got %d", len(ps))
+	if len(ps) < 10 {
+		t.Fatalf("want at least 10 problems, got %d", len(ps))
 	}
 	for _, p := range ps {
 		if p.Answer == "" || p.Solution == "" {
@@ -107,8 +107,8 @@ func TestLoadEmbedded(t *testing.T) {
 	}
 }
 
-// 解答を当てると、状態 (.status) を見ない項目はすべて合格し、出題直後は合格しない項目があること。
-// (.status を見る項目は、本物のクラスタで E2E が確かめる)
+// 解答を当てると、状態 (.status) やコントローラーが作るオブジェクトを見ない項目はすべて合格し、
+// 出題直後は合格しない項目があること。(残りの項目は、本物のクラスタで E2E が確かめる)
 func TestAnswersSatisfyChecks(t *testing.T) {
 	ctx := context.Background()
 	fc := newFake()
@@ -133,7 +133,8 @@ func TestAnswersSatisfyChecks(t *testing.T) {
 			t.Fatal(err)
 		}
 		for i, c := range after.Checks {
-			if strings.Contains(p.Checks[i].JSONPath, ".status") {
+			// 状態 (.status) や、コントローラーが作るオブジェクト (selector で選ぶ EndpointSlice など) は本物のクラスタでしか確かめられない
+			if strings.Contains(p.Checks[i].JSONPath, ".status") || p.Checks[i].Selector != "" {
 				continue
 			}
 			if !c.Passed {

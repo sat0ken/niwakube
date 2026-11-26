@@ -1,0 +1,109 @@
+id: ckad-rolling-update
+exam: CKAD
+domain: アプリのデプロイ
+title: 止めずにイメージを更新する (ローリングアップデート)
+weight: 6
+namespaces: [rollout]
+setup: |
+  apiVersion: v1
+  kind: Namespace
+  metadata:
+    name: rollout
+  ---
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: ticker
+    namespace: rollout
+  spec:
+    replicas: 3
+    selector:
+      matchLabels:
+        app: ticker
+    template:
+      metadata:
+        labels:
+          app: ticker
+      spec:
+        containers:
+          - name: ticker
+            image: registry.k8s.io/pause:3.9
+task: |
+  Namespace rollout の Deployment ticker を、Pod が 3 つより減らないように更新してください。
+
+  - 更新の方針: 一時的に増やしてよい Pod は 1 つまで、使えなくなってよい Pod は 0
+  - コンテナ ticker のイメージを registry.k8s.io/pause:3.10 に変える
+
+  更新が終わり、新しいイメージの Pod 3 つが Ready になっていること。
+checks:
+  - description: maxSurge が 1
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: rollout
+    name: ticker
+    jsonpath: '{.spec.strategy.rollingUpdate.maxSurge}'
+    equals: "1"
+  - description: maxUnavailable が 0
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: rollout
+    name: ticker
+    jsonpath: '{.spec.strategy.rollingUpdate.maxUnavailable}'
+    equals: "0"
+  - description: イメージが pause:3.10
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: rollout
+    name: ticker
+    jsonpath: '{.spec.template.spec.containers[?(@.name=="ticker")].image}'
+    equals: registry.k8s.io/pause:3.10
+  - description: 更新が終わっている (新しい ReplicaSet が使える)
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: rollout
+    name: ticker
+    jsonpath: '{.status.conditions[?(@.type=="Progressing")].reason}'
+    equals: NewReplicaSetAvailable
+  - description: 新しい Pod 3 つが Ready
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: rollout
+    name: ticker
+    jsonpath: '{.status.updatedReplicas}/{.status.readyReplicas}'
+    equals: 3/3
+hint: |
+  イメージは kubectl set image で変えられます。更新の方針 (spec.strategy) は kubectl edit か kubectl patch で書きます。
+  先に方針を変えてからイメージを変えると、その方針で更新されます。
+solution: |
+  kubectl -n rollout patch deployment ticker -p \
+    '{"spec":{"strategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":1,"maxUnavailable":0}}}}'
+  kubectl -n rollout set image deployment/ticker ticker=registry.k8s.io/pause:3.10
+  kubectl -n rollout rollout status deployment ticker
+
+  maxUnavailable: 0 なので、新しい Pod が Ready になってから古い Pod を 1 つずつ止めます (常に 3 つ以上)。
+  kubectl -n rollout rollout history deployment ticker で履歴を見られ、
+  kubectl -n rollout rollout undo deployment ticker で前のイメージに戻せます。
+answer: |
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: ticker
+    namespace: rollout
+  spec:
+    replicas: 3
+    strategy:
+      type: RollingUpdate
+      rollingUpdate:
+        maxSurge: 1
+        maxUnavailable: 0
+    selector:
+      matchLabels:
+        app: ticker
+    template:
+      metadata:
+        labels:
+          app: ticker
+      spec:
+        containers:
+          - name: ticker
+            image: registry.k8s.io/pause:3.10
