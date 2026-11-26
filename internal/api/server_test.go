@@ -38,6 +38,7 @@ func newTestServer(t *testing.T, opts ...Options) *httptest.Server {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(cs.Close) // 裏の処理 (ノードの大きさの変更など) を止める
 	ts := httptest.NewServer(New(svc, cs, nil, opts...).Handler())
 	t.Cleanup(ts.Close)
 	return ts
@@ -196,5 +197,37 @@ func TestClusterAPI(t *testing.T) {
 	}
 	if resp, _ := do(t, http.MethodGet, ts.URL+"/api/vms/demo-cp-1", ""); resp.StatusCode != http.StatusNotFound {
 		t.Errorf("vm should be gone: %d", resp.StatusCode)
+	}
+}
+
+func TestResizeAPI(t *testing.T) {
+	ts := newTestServer(t)
+	if resp, body := do(t, http.MethodPost, ts.URL+"/api/vms", `{"name":"vm1","cpus":1,"memoryMiB":1024,"diskGiB":10}`); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create: %d %s", resp.StatusCode, body)
+	}
+	resp, body := do(t, http.MethodPost, ts.URL+"/api/vms/vm1/resize", `{"cpus":2,"diskGiB":20}`)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, `"cpus":2`) || !strings.Contains(body, `"diskGiB":20`) {
+		t.Errorf("resize vm: %d %s", resp.StatusCode, body)
+	}
+	if resp, body := do(t, http.MethodPost, ts.URL+"/api/vms/vm1/resize", `{"diskGiB":10}`); resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("shrink: %d %s", resp.StatusCode, body)
+	}
+
+	if resp, body := do(t, http.MethodPost, ts.URL+"/api/clusters", `{"name":"demo","workers":1}`); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create cluster: %d %s", resp.StatusCode, body)
+	}
+	// クラスタのノードは単体の API では変えられない
+	if resp, body := do(t, http.MethodPost, ts.URL+"/api/vms/demo-worker-1/resize", `{"cpus":4}`); resp.StatusCode != http.StatusConflict {
+		t.Errorf("cluster node via vm API: %d %s", resp.StatusCode, body)
+	}
+	resp, body = do(t, http.MethodPost, ts.URL+"/api/clusters/demo/resize", `{"role":"worker","size":{"memoryMiB":2048}}`)
+	if resp.StatusCode != http.StatusAccepted || !strings.Contains(body, `"operation":"resizing`) {
+		t.Errorf("resize cluster: %d %s", resp.StatusCode, body)
+	}
+	if resp, body := do(t, http.MethodPost, ts.URL+"/api/clusters/demo/resize", `{"role":"worker","size":{"cpus":4}}`); resp.StatusCode != http.StatusConflict {
+		t.Errorf("resize while busy: %d %s", resp.StatusCode, body)
+	}
+	if resp, body := do(t, http.MethodPost, ts.URL+"/api/clusters/demo/resize", `{"role":"etcd"}`); resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("bad role: %d %s", resp.StatusCode, body)
 	}
 }

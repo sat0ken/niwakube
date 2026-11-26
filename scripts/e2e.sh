@@ -149,6 +149,25 @@ expect 200
 wait_state running 30
 wait_ssh
 
+log "サイズの変更 (動いている VM を止めて、vCPU・メモリ・ディスクを増やして起動し直す)"
+root0=$(ssh_vm "df -BM --output=size / | tail -n1 | tr -dc 0-9")
+api POST "/vms/$NAME/resize" "{\"cpus\":3,\"memoryMiB\":$((MEMORY_MIB + 1024)),\"diskGiB\":14}"
+expect 200
+echo "    $BODY"
+wait_state running 30
+wait_ssh
+# パーティションとファイルシステムは cloud-init (growpart / resizefs) が起動時に広げる
+ssh_vm 'cloud-init status --wait >/dev/null; true'
+vcpu=$(ssh_vm nproc)
+mem=$(ssh_vm "awk '/MemTotal/ {print int(\$2/1024)}' /proc/meminfo")
+root1=$(ssh_vm "df -BM --output=size / | tail -n1 | tr -dc 0-9")
+echo "    vcpu=$vcpu memTotal=${mem}MiB root=${root0}MiB -> ${root1}MiB"
+[[ $vcpu == 3 ]] || die "vCPU 数が変わっていません ($vcpu)"
+(( mem > MEMORY_MIB + 512 )) || die "メモリが増えていません (${mem}MiB)"
+(( root1 > root0 + 3000 )) || die "ルートのファイルシステムが広がっていません (${root0}MiB -> ${root1}MiB)"
+api POST "/vms/$NAME/resize" '{"diskGiB":10}'
+expect 400
+
 log "強制停止"
 api POST "/vms/$NAME/stop?force=true"
 expect 200

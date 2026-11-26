@@ -193,6 +193,16 @@ func (s *Store) SetDesiredState(ctx context.Context, name, state string) error {
 	return mustAffect(res, name)
 }
 
+// SetMachineSize はマシンの vCPU・メモリ・ディスクの大きさを更新する。
+func (s *Store) SetMachineSize(ctx context.Context, name string, cpus, memoryMiB, diskGiB int) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE machines SET cpus = ?, memory_mib = ?, disk_gib = ? WHERE name = ?`,
+		cpus, memoryMiB, diskGiB, name)
+	if err != nil {
+		return err
+	}
+	return mustAffect(res, name)
+}
+
 func (s *Store) DeleteMachine(ctx context.Context, name string) error {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM machines WHERE name = ?`, name)
 	if err != nil {

@@ -367,6 +367,85 @@ func (s *Service) Stop(ctx context.Context, name string, force bool) (*Machine, 
 	return s.view(ctx, m), nil
 }
 
+// ResizeRequest はマシンの大きさの変更。0 の項目は変えない。ディスクは広げるだけ。
+type ResizeRequest struct {
+	CPUs      int `json:"cpus,omitempty"`
+	MemoryMiB int `json:"memoryMiB,omitempty"`
+	DiskGiB   int `json:"diskGiB,omitempty"`
+}
+
+// Resize は単体の VM の大きさを変える。動いていれば止めてから変え、起動し直す。
+// クラスタに属するマシンはクラスタの Resize で変える (drain してから順番に再起動する)。
+func (s *Service) Resize(ctx context.Context, name string, req ResizeRequest) (*Machine, error) {
+	return s.resize(ctx, name, req, false)
+}
+
+// ResizeClusterMachine はクラスタに属するマシンの大きさを変える (cluster.Service から使う)。
+func (s *Service) ResizeClusterMachine(ctx context.Context, name string, req ResizeRequest) (*Machine, error) {
+	return s.resize(ctx, name, req, true)
+}
+
+func (s *Service) resize(ctx context.Context, name string, req ResizeRequest, allowCluster bool) (*Machine, error) {
+	unlock := s.locks.Lock(name)
+	defer unlock()
+	m, b, err := s.backendFor(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if m.Cluster != "" && !allowCluster {
+		return nil, fmt.Errorf("%s (cluster %s): resize the cluster's nodes instead: %w", name, m.Cluster, ErrPartOfCluster)
+	}
+	rz, ok := b.(backend.Resizer)
+	if !ok {
+		return nil, fmt.Errorf("backend %s cannot resize machines: %w", m.Backend, backend.ErrNotSupported)
+	}
+	want := backend.Resources{CPUs: m.CPUs, MemoryMiB: m.MemoryMiB, DiskGiB: m.DiskGiB}
+	setIf := func(dst *int, v int) {
+		if v != 0 {
+			*dst = v
+		}
+	}
+	setIf(&want.CPUs, req.CPUs)
+	setIf(&want.MemoryMiB, req.MemoryMiB)
+	setIf(&want.DiskGiB, req.DiskGiB)
+	if err := inRange("cpus", want.CPUs, 1, 32); err != nil {
+		return nil, err
+	}
+	if err := inRange("memoryMiB", want.MemoryMiB, 512, 64*1024); err != nil {
+		return nil, err
+	}
+	if err := inRange("diskGiB", want.DiskGiB, 5, 1024); err != nil {
+		return nil, err
+	}
+	if want.DiskGiB < m.DiskGiB {
+		return nil, fmt.Errorf("%w: diskGiB cannot shrink (%d -> %d)", ErrInvalid, m.DiskGiB, want.DiskGiB)
+	}
+	if want.CPUs == m.CPUs && want.MemoryMiB == m.MemoryMiB && want.DiskGiB == m.DiskGiB {
+		return s.view(ctx, m), nil
+	}
+
+	// 動いていれば正常終了させてから変える。望ましい状態は変えない (running なら起動し直す)
+	if st, _ := b.Status(ctx, name); st.State != backend.StateStopped && st.State != backend.StateNotFound {
+		if err := b.Stop(ctx, name, false); err != nil {
+			return nil, fmt.Errorf("stop %s: %w", name, err)
+		}
+	}
+	if err := rz.Resize(ctx, name, want); err != nil {
+		return nil, err
+	}
+	if err := s.store.SetMachineSize(ctx, name, want.CPUs, want.MemoryMiB, want.DiskGiB); err != nil {
+		return nil, err
+	}
+	s.log.Info("machine resized", "machine", name, "cpus", want.CPUs, "memoryMiB", want.MemoryMiB, "diskGiB", want.DiskGiB)
+	m.CPUs, m.MemoryMiB, m.DiskGiB = want.CPUs, want.MemoryMiB, want.DiskGiB
+	if m.DesiredState == DesiredRunning {
+		if err := b.Start(ctx, name); err != nil {
+			return nil, fmt.Errorf("start %s after resizing: %w", name, err)
+		}
+	}
+	return s.view(ctx, m), nil
+}
+
 // Delete は単体の VM を削除する。クラスタに属するマシンは消せない (クラスタごと消す)。
 func (s *Service) Delete(ctx context.Context, name string) error {
 	return s.delete(ctx, name, false)

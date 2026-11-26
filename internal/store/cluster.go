@@ -121,6 +121,19 @@ func (s *Store) SetClusterDesiredState(ctx context.Context, name, state string) 
 	return mustAffectKind(res, "cluster", name)
 }
 
+// SetClusterSpec はクラスタの構成 (ノードの大きさなど) を更新する。
+func (s *Store) SetClusterSpec(ctx context.Context, name string, spec ClusterSpec) error {
+	raw, err := json.Marshal(spec)
+	if err != nil {
+		return err
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE clusters SET spec = ? WHERE name = ?`, string(raw), name)
+	if err != nil {
+		return err
+	}
+	return mustAffectKind(res, "cluster", name)
+}
+
 func (s *Store) DeleteCluster(ctx context.Context, name string) error {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM clusters WHERE name = ?`, name)
 	if err != nil {
