@@ -62,6 +62,7 @@ func New(svc *machine.Service, clusters *cluster.Service, log *slog.Logger, opts
 //	POST   /api/vms/{name}/start
 //	POST   /api/vms/{name}/stop      ?force=true で強制停止
 //	GET    /api/vms/{name}/serial    ?bytes=N でシリアルログの末尾 N バイト (既定 64KiB)
+//	POST   /api/vms/{name}/resize    {"cpus":4,"memoryMiB":8192,"diskGiB":50} 止めて変えて起動し直す (単体の VM)
 //	GET    /api/distros
 //	GET    /api/cluster-defaults        省略したときの CNI とランタイム
 //	GET    /api/clusters
@@ -70,6 +71,7 @@ func New(svc *machine.Service, clusters *cluster.Service, log *slog.Logger, opts
 //	DELETE /api/clusters/{name}
 //	POST   /api/clusters/{name}/start
 //	POST   /api/clusters/{name}/stop
+//	POST   /api/clusters/{name}/resize   {"role":"worker","size":{"cpus":4,"memoryMiB":8192,"diskGiB":50}} 1 台ずつ drain して再起動 (202)
 //	GET    /api/clusters/{name}/kubeconfig     ?proxy=socks5://localhost:1080 で proxy-url を入れる
 //	GET    /api/kubeconfig?cluster=a&cluster=b  複数のクラスタを 1 つにまとめた kubeconfig (?proxy= も使える)
 //	GET    /api/clusters/{name}/terminal       WebSocket。クラスタの kubeconfig を設定したシェル (Web UI のターミナル)
@@ -93,6 +95,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/vms/{name}/start", s.startVM)
 	mux.HandleFunc("POST /api/vms/{name}/stop", s.stopVM)
 	mux.HandleFunc("GET /api/vms/{name}/serial", s.serialLog)
+	mux.HandleFunc("POST /api/vms/{name}/resize", s.resizeVM)
 
 	mux.HandleFunc("GET /api/distros", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, s.clusters.Distros())
@@ -106,6 +109,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/clusters/{name}", s.deleteCluster)
 	mux.HandleFunc("POST /api/clusters/{name}/start", s.startCluster)
 	mux.HandleFunc("POST /api/clusters/{name}/stop", s.stopCluster)
+	mux.HandleFunc("POST /api/clusters/{name}/resize", s.resizeCluster)
 	mux.HandleFunc("GET /api/clusters/{name}/kubeconfig", s.kubeconfig)
 	mux.HandleFunc("GET /api/kubeconfig", s.mergedKubeconfig)
 	mux.HandleFunc("GET /api/clusters/{name}/terminal", s.terminal)
@@ -175,6 +179,21 @@ func (s *Server) startVM(w http.ResponseWriter, r *http.Request) {
 func (s *Server) stopVM(w http.ResponseWriter, r *http.Request) {
 	force, _ := strconv.ParseBool(r.URL.Query().Get("force"))
 	vm, err := s.svc.Stop(r.Context(), r.PathValue("name"), force)
+	if err != nil {
+		s.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, vm)
+}
+
+// resizeVM は単体の VM の vCPU・メモリ・ディスクを変える ({"cpus":4,"memoryMiB":8192,"diskGiB":50})。
+// 動いていれば止めてから変えて起動し直す (終わるまで待つ)。ディスクは広げるだけ。
+func (s *Server) resizeVM(w http.ResponseWriter, r *http.Request) {
+	var req machine.ResizeRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	vm, err := s.svc.Resize(r.Context(), r.PathValue("name"), req)
 	if err != nil {
 		s.writeError(w, err)
 		return
@@ -257,6 +276,21 @@ func (s *Server) startCluster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, c)
+}
+
+// resizeCluster はロールのノードの大きさを変える ({"role":"worker","size":{"memoryMiB":8192}})。
+// ノードは裏で 1 台ずつ drain して再起動するので、すぐに 202 を返す (進み具合は operation)。
+func (s *Server) resizeCluster(w http.ResponseWriter, r *http.Request) {
+	var req cluster.ResizeRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	c, err := s.clusters.Resize(r.Context(), r.PathValue("name"), req)
+	if err != nil {
+		s.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, c)
 }
 
 func (s *Server) stopCluster(w http.ResponseWriter, r *http.Request) {
@@ -386,7 +420,7 @@ func statusFor(err error) int {
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, backend.ErrNotFound):
 		return http.StatusNotFound
 	case errors.Is(err, store.ErrExists), errors.Is(err, backend.ErrAlreadyExists), errors.Is(err, ipam.ErrExhausted),
-		errors.Is(err, machine.ErrPartOfCluster):
+		errors.Is(err, machine.ErrPartOfCluster), errors.Is(err, cluster.ErrBusy):
 		return http.StatusConflict
 	case errors.Is(err, backend.ErrNotSupported):
 		return http.StatusNotImplemented

@@ -80,6 +80,7 @@ go run ./cmd/niwakubed --dev-fake-backend --data-dir /tmp/niwakube-dev --run-dir
 | POST | `/api/vms/{name}/start` | 起動 |
 | POST | `/api/vms/{name}/stop` | 停止 (`?force=true` で強制停止) |
 | GET | `/api/vms/{name}/serial` | シリアルコンソールのログ (`?bytes=N` で末尾 N バイト) |
+| POST | `/api/vms/{name}/resize` | vCPU・メモリ・ディスクを変える (`{"cpus":4,"memoryMiB":8192,"diskGiB":50}`)。動いていれば止めて変えて起動し直す。ディスクは広げるだけ |
 
 ```bash
 curl -s -X POST localhost:8080/api/vms -d '{"name":"vm1","cpus":2,"memoryMiB":4096,"diskGiB":20}'
@@ -208,6 +209,22 @@ kubectl --kubeconfig demo.kubeconfig -n kube-system port-forward svc/hubble-ui 1
 `controlPlane` / `worker` (`{"cpus":2,"memoryMiB":4096,"diskGiB":30}`)、`sshAuthorizedKeys`、
 `cni` (`cilium` / `flannel`)、`hubble` (Cilium なら `true`)、`runtime.default` (`runc` / `crun` / `youki`)、
 `runtime.install` (追加で入れるランタイム。既定にしたものは自動で入る)。
+
+### ノードのサイズを変える
+
+クラスタの画面の「ノードのサイズを変える」(API では `POST /api/clusters/{name}/resize`) で、
+ロール (コントロールプレーン / ワーカー) ごとに vCPU・メモリ・ディスクを変えられる。
+
+```bash
+curl -s -X POST localhost:8080/api/clusters/demo/resize -d '{"role":"worker","size":{"memoryMiB":8192,"diskGiB":50}}'
+```
+
+- ノードを 1 台ずつ、cordon → drain (DaemonSet 以外の Pod を eviction で移す) → 止めてサイズを変えて起動 →
+  Ready に戻るのを待つ → uncordon の順に変える。進み具合はクラスタの `operation` に出る (`failed: ...` は失敗)
+- ワーカーが 2 台以上ならサービスは止まらない。コントロールプレーンは 1 台なので、再起動中は API が使えない
+- ディスクは広げるだけ。パーティションとファイルシステムは起動時に広がる (Ubuntu は cloud-init、Talos は自動)
+- クラスタの構成も更新するので、これから足すノードも新しいサイズになる
+- クラスタのノードは単体の VM の API (`/api/vms/{name}/resize`) では変えられない (drain しないため)
 
 ### Web UI のターミナル
 

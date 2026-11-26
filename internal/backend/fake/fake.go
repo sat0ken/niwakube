@@ -103,6 +103,34 @@ func (b *Backend) Status(_ context.Context, name string) (backend.Status, error)
 }
 
 // Spec はテスト用に、Create で渡された MachineSpec を返す。
+var _ backend.Resizer = (*Backend)(nil)
+
+// Resize は止まっているマシンの大きさを変える。
+func (b *Backend) Resize(_ context.Context, name string, r backend.Resources) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	e, err := b.get(name)
+	if err != nil {
+		return err
+	}
+	if e.running {
+		return fmt.Errorf("%s: %w", name, backend.ErrRunning)
+	}
+	if r.DiskGiB > 0 && r.DiskGiB < e.spec.DiskGiB {
+		return fmt.Errorf("%s: disk cannot shrink", name)
+	}
+	if r.CPUs > 0 {
+		e.spec.CPUs = r.CPUs
+	}
+	if r.MemoryMiB > 0 {
+		e.spec.MemoryMiB = r.MemoryMiB
+	}
+	if r.DiskGiB > 0 {
+		e.spec.DiskGiB = r.DiskGiB
+	}
+	return nil
+}
+
 func (b *Backend) Spec(name string) (backend.MachineSpec, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()

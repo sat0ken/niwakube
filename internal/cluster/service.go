@@ -52,6 +52,8 @@ type Config struct {
 	NewApplier func(kubeconfig []byte) (Applier, error)
 	// NFS はホストの NFS サーバー。Root が空なら NFS の StorageClass は作らない
 	NFS NFSConfig
+	// NodeOps はノードの大きさを変えるときの cordon / drain / Ready の確認。nil なら Kubernetes の API を使う
+	NodeOps NodeOps
 }
 
 // NFSConfig はホストの NFS サーバーの設定。クラスタごとに Root/<クラスタ名> を共有する。
@@ -112,6 +114,13 @@ type Service struct {
 	addonMu    sync.Mutex
 	addonState map[string]string // クラスタごとのアドオンの適用状況 (pending / applied / エラー)
 
+	opMu    sync.Mutex
+	opState map[string]string // クラスタごとの進行中の操作 (ノードの大きさの変更など)。"failed: ..." は失敗
+	nodeOps NodeOps
+
+	drainTimeout     time.Duration
+	nodeReadyTimeout time.Duration
+
 	// 裏で動く処理 (bootstrap、アドオンの適用) の設定と、止めるための context
 	postCreateTimeout  time.Duration
 	postCreateInterval time.Duration
@@ -133,6 +142,9 @@ func NewService(cfg Config, st *store.Store, ms *machine.Service, prober Prober,
 	if prober == nil {
 		prober = HTTPProber{}
 	}
+	if cfg.NodeOps == nil {
+		cfg.NodeOps = kubeNodeOps{}
+	}
 	if log == nil {
 		log = slog.Default()
 	}
@@ -147,6 +159,7 @@ func NewService(cfg Config, st *store.Store, ms *machine.Service, prober Prober,
 	return &Service{
 		cfg: cfg, store: st, machines: ms, distros: m, defDist: distros[0].Name(),
 		prober: prober, log: log, adminCert: map[string]pki.KeyPair{}, addonState: map[string]string{},
+		opState: map[string]string{}, nodeOps: cfg.NodeOps, drainTimeout: 5 * time.Minute, nodeReadyTimeout: 10 * time.Minute,
 		postCreateTimeout: 30 * time.Minute, postCreateInterval: 10 * time.Second, bg: bg, stop: stop,
 	}, nil
 }
@@ -213,11 +226,13 @@ type Cluster struct {
 	// Addons は niwakubed がクラスタに入れるもの (LB の IP プールなど) の適用状況
 	Addons string `json:"addons,omitempty"`
 	// StorageClasses は使える StorageClass (既定のものが先頭)
-	StorageClasses []string           `json:"storageClasses"`
-	DesiredState   string             `json:"desiredState"`
-	Status         Status             `json:"status"`
-	Machines       []*machine.Machine `json:"machines"`
-	CreatedAt      time.Time          `json:"createdAt"`
+	StorageClasses []string `json:"storageClasses"`
+	// Operation は進行中の操作 (例: "resizing demo-worker-1 (1/2)")。"failed: ..." は失敗した操作
+	Operation    string             `json:"operation,omitempty"`
+	DesiredState string             `json:"desiredState"`
+	Status       Status             `json:"status"`
+	Machines     []*machine.Machine `json:"machines"`
+	CreatedAt    time.Time          `json:"createdAt"`
 }
 
 var nameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,18}[a-z0-9])?$`)
@@ -491,7 +506,7 @@ func (s *Service) view(ctx context.Context, rec *store.Cluster) (*Cluster, error
 		ControlPlane: rec.Spec.ControlPlane, Worker: rec.Spec.Worker,
 		CNI: cniOf(rec), Hubble: rec.Spec.Hubble, Runtime: runtimeOf(rec),
 		Subnet: s.subnetOf(rec.Index).String(), Endpoint: s.endpoint(rec), LoadBalancerPool: s.lbPoolString(rec),
-		Addons: s.addonStatus(rec.Name), StorageClasses: s.storageClasses(rec),
+		Addons: s.addonStatus(rec.Name), StorageClasses: s.storageClasses(rec), Operation: s.operation(rec.Name),
 		DesiredState: rec.DesiredState, Machines: ms, CreatedAt: rec.CreatedAt,
 	}
 	v.Status = s.status(ctx, rec, ms)
@@ -697,6 +712,7 @@ func (s *Service) deleteLocked(ctx context.Context, name string) error {
 		return err
 	}
 	s.setAddonState(name, "")
+	s.setOperation(name, "")
 	s.log.Info("cluster deleted", "cluster", name)
 	return nil
 }

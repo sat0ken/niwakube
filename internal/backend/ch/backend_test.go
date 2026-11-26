@@ -264,6 +264,32 @@ func TestLifecycle(t *testing.T) {
 		t.Fatalf("status after restart = %+v", s)
 	}
 
+	// Resize: 動いている間はできない。止めてから変えると、次の Start で新しい大きさの VM を作る
+	if err := b.Resize(ctx, "vm1", backend.Resources{CPUs: 4}); !errors.Is(err, backend.ErrRunning) {
+		t.Fatalf("resize while running: want ErrRunning, got %v", err)
+	}
+	if err := b.Stop(ctx, "vm1", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Resize(ctx, "vm1", backend.Resources{CPUs: 4, MemoryMiB: 2048, DiskGiB: 8}); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(filepath.Join(dataDir, "vms", "vm1", "disk.raw")); err != nil || fi.Size() != 8<<30 {
+		t.Fatalf("disk not grown: %v %v", fi, err)
+	}
+	if err := b.Resize(ctx, "vm1", backend.Resources{DiskGiB: 6}); err == nil {
+		t.Fatal("shrinking the disk must fail")
+	}
+	if err := b.Start(ctx, "vm1"); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	cfg = vmm.cfg
+	mu.Unlock()
+	if cfg.Cpus.BootVcpus != 4 || cfg.Cpus.MaxVcpus != 4 || cfg.Memory.Size != 2048<<20 {
+		t.Errorf("vm config after resize: cpus %+v memory %d", cfg.Cpus, cfg.Memory.Size)
+	}
+
 	// Serial log
 	mustWrite(t, filepath.Join(dataDir, "vms", "vm1", "serial.log"), "hello world")
 	if out, err := b.SerialLog(ctx, "vm1", 5); err != nil || string(out) != "world" {

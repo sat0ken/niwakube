@@ -356,6 +356,43 @@ if [[ -n $RUNTIMES || $RUNTIME != runc ]]; then
   done
 fi
 
+# --- ノードのサイズの変更 (drain → 止めて変える → 起動 → Ready → uncordon) ---
+log "ワーカーのサイズを変える (メモリ 3GiB → 4GiB、ディスク 15GiB → 20GiB)"
+# 量 (例: 3016908Ki、16Gi、12345) を KiB にする
+to_kib() {
+  local q=$1
+  case $q in
+    *Ki) echo "${q%Ki}" ;;
+    *Mi) echo $(( ${q%Mi} * 1024 )) ;;
+    *Gi) echo $(( ${q%Gi} * 1024 * 1024 )) ;;
+    *) echo $(( q / 1024 )) ;;
+  esac
+}
+worker=$NAME-worker-1
+mem0=$(to_kib "$(k get node "$worker" -o jsonpath='{.status.capacity.memory}')")
+eph0=$(to_kib "$(k get node "$worker" -o jsonpath='{.status.capacity.ephemeral-storage}')")
+code=$(curl -s -o "$LOG_DIR/resize.json" -w '%{http_code}' -X POST "$API/clusters/$NAME/resize" \
+  -d '{"role":"worker","size":{"memoryMiB":4096,"diskGiB":20}}')
+[[ $code == 202 ]] || die "サイズの変更を受け付けません: $code $(cat "$LOG_DIR/resize.json")"
+start=$SECONDS
+while :; do
+  op=$(curl -fs "$API/clusters/$NAME" | jq -r '.operation // ""')
+  [[ -z $op ]] && break
+  [[ $op == failed:* ]] && die "サイズの変更に失敗しました: $op"
+  (( SECONDS - start < 900 )) || die "900s 待ってもサイズの変更が終わりません: $op"
+  sleep 10
+done
+log "サイズの変更が終わりました ($((SECONDS - start))s)"
+k wait --for=condition=Ready "node/$worker" --timeout=300s >/dev/null
+mem1=$(to_kib "$(k get node "$worker" -o jsonpath='{.status.capacity.memory}')")
+eph1=$(to_kib "$(k get node "$worker" -o jsonpath='{.status.capacity.ephemeral-storage}')")
+unsched=$(k get node "$worker" -o jsonpath='{.spec.unschedulable}')
+echo "    memory: $((mem0 / 1024))MiB -> $((mem1 / 1024))MiB, ephemeral-storage: $((eph0 / 1024 / 1024))GiB -> $((eph1 / 1024 / 1024))GiB, unschedulable: ${unsched:-false}"
+(( mem1 > mem0 + 800 * 1024 )) || die "ノードのメモリが増えていません"
+(( eph1 > eph0 + 3 * 1024 * 1024 )) || die "ノードのディスク (ephemeral-storage) が広がっていません"
+[[ -z $unsched || $unsched == false ]] || die "ノードが cordon されたままです"
+[[ $(curl -fs "$API/clusters/$NAME" | jq -r '.worker.memoryMiB') == 4096 ]] || die "クラスタの設定 (worker の大きさ) が更新されていません"
+
 log "クラスタを削除"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$API/clusters/$NAME")
 [[ $code == 204 ]] || die "削除に失敗しました: HTTP $code"
