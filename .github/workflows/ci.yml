@@ -68,4 +68,5 @@ jobs:
         run: |
           cd dist
           sha256sum niwakubed-* > SHA256SUMS
-          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --generate-notes ./*
+          # niwakubed と SHA256SUMS だけを載せる (make build が作るテスト用の termcheck は載せない)
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --generate-notes niwakubed-* SHA256SUMS
