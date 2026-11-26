@@ -7,7 +7,7 @@ timezone: Asia/Tokyo
 keyboard: jp
 
 user:
-  name: sat0ken
+  name: niwadmin
   github_keys: sat0ken          # GitHub に登録した公開鍵を取り込む (パスワードではログインできない)
   # ssh_authorized_keys:        # 鍵を直接書くこともできる
   #   - ssh-ed25519 AAAA...
