@@ -31,6 +31,7 @@ import (
 
 	"github.com/sat0ken/niwakube/internal/backend"
 	"github.com/sat0ken/niwakube/internal/netx"
+	"github.com/sat0ken/niwakube/internal/seed"
 	"github.com/sat0ken/niwakube/internal/sys"
 )
 
@@ -168,8 +169,13 @@ func (b *Backend) Create(_ context.Context, spec *backend.MachineSpec) (err erro
 	if err := os.WriteFile(filepath.Join(cfgDir, "90-niwakube-nspawn.cfg"), []byte(cloudCfg), 0o644); err != nil {
 		return err
 	}
+	// 中の eth0 はホスト側で MAC・アドレスまで付けるので、cloud-init には名前で合わせさせる
+	netcfg, err := seed.MatchByName(spec.Seed.NetworkConfig, "eth0")
+	if err != nil {
+		return err
+	}
 	for name, data := range map[string][]byte{
-		"user-data": spec.Seed.UserData, "meta-data": spec.Seed.MetaData, "network-config": spec.Seed.NetworkConfig,
+		"user-data": spec.Seed.UserData, "meta-data": spec.Seed.MetaData, "network-config": netcfg,
 	} {
 		if err := os.WriteFile(filepath.Join(dir, "seed", name), data, 0o600); err != nil {
 			return err

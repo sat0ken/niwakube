@@ -90,8 +90,14 @@ func TestLifecycle(t *testing.T) {
 		Name: "c1", CPUs: 2, MemoryMiB: 2048, DiskGiB: 20, Image: "ubuntu-26.04",
 		NIC: backend.NIC{Bridge: "nkbr0", MAC: "52:54:00:12:34:56",
 			Address: netip.MustParsePrefix("172.30.0.10/16"), Gateway: netip.MustParseAddr("172.30.0.1")},
-		Seed: seed.Data{UserData: []byte("#cloud-config\n"), MetaData: []byte("instance-id: x\n"), NetworkConfig: []byte("version: 2\n")},
+		Seed: seed.Data{UserData: []byte("#cloud-config\n"), MetaData: []byte("instance-id: x\n")},
 	}
+	nc, err := seed.NetworkConfig(seed.Network{MAC: spec.NIC.MAC, Address: spec.NIC.Address, Gateway: spec.NIC.Gateway,
+		DNS: []netip.Addr{netip.MustParseAddr("1.1.1.1")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec.Seed.NetworkConfig = nc
 
 	if err := b.Create(ctx, &backend.MachineSpec{Name: "x", Image: "nope"}); !errors.Is(err, backend.ErrImageNotFound) {
 		t.Fatalf("missing image: %v", err)
@@ -110,6 +116,12 @@ func TestLifecycle(t *testing.T) {
 	}
 	if s, _ := b.Status(ctx, "c1"); s.State != backend.StateStopped {
 		t.Fatalf("status after create: %+v", s)
+	}
+	// cloud-init にはインターフェース名で合わせさせる (MAC と set-name は使わない)
+	netcfg, _ := os.ReadFile(filepath.Join(dir, "seed", "network-config"))
+	if s := string(netcfg); !strings.Contains(s, "name: eth0") || strings.Contains(s, "macaddress") || strings.Contains(s, "set-name") ||
+		!strings.Contains(s, "172.30.0.10/16") || !strings.Contains(s, "1.1.1.1") {
+		t.Errorf("seed network-config:\n%s", s)
 	}
 
 	// Start: ネットワーク名前空間 → overlayfs → systemd-run
