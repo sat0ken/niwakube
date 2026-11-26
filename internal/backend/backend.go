@@ -95,6 +95,22 @@ type Backend interface {
 	Status(ctx context.Context, name string) (Status, error)
 }
 
+// Resources はノードの大きさ。
+type Resources struct {
+	CPUs      int
+	MemoryMiB int
+	DiskGiB   int
+}
+
+// Resizer は止まっているノードの大きさを変えられるバックエンドが実装する (任意)。
+// ディスクは広げるだけ (小さくはできない)。止まっていなければエラーにする。
+type Resizer interface {
+	Resize(ctx context.Context, name string, r Resources) error
+}
+
+// ErrRunning は動いているノードに対してできない操作をしたときのエラー。
+var ErrRunning = errors.New("machine is running")
+
 // SerialLogReader はシリアルコンソールのログを読めるバックエンドが実装する (任意)。
 type SerialLogReader interface {
 	SerialLog(ctx context.Context, name string, maxBytes int64) ([]byte, error)

@@ -153,3 +153,66 @@ func TestStopStartAndReconcile(t *testing.T) {
 		t.Errorf("reconcile did not start the machine: %+v", s)
 	}
 }
+
+func TestResize(t *testing.T) {
+	ctx := context.Background()
+	svc, fb := newTestService(t)
+	if _, err := svc.Create(ctx, CreateRequest{Name: "vm1", CPUs: 1, MemoryMiB: 1024, DiskGiB: 10}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 動いている VM: 止めて変えて起動し直す。0 の項目 (メモリ) は変えない
+	vm, err := svc.Resize(ctx, "vm1", ResizeRequest{CPUs: 4, DiskGiB: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vm.CPUs != 4 || vm.MemoryMiB != 1024 || vm.DiskGiB != 20 || vm.Status.State != backend.StateRunning {
+		t.Errorf("after resize: %+v", vm)
+	}
+	if spec, _ := fb.Spec("vm1"); spec.CPUs != 4 || spec.MemoryMiB != 1024 || spec.DiskGiB != 20 {
+		t.Errorf("backend spec: %+v", spec)
+	}
+	if got, _ := svc.Get(ctx, "vm1"); got.CPUs != 4 || got.DiskGiB != 20 {
+		t.Errorf("stored: %+v", got)
+	}
+
+	// 止めてある VM は止めたまま
+	if _, err := svc.Stop(ctx, "vm1", false); err != nil {
+		t.Fatal(err)
+	}
+	vm, err = svc.Resize(ctx, "vm1", ResizeRequest{MemoryMiB: 2048})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vm.MemoryMiB != 2048 || vm.Status.State != backend.StateStopped {
+		t.Errorf("stopped vm after resize: %+v", vm)
+	}
+
+	for name, req := range map[string]ResizeRequest{
+		"shrink disk":  {DiskGiB: 10},
+		"too many cpu": {CPUs: 64},
+		"tiny memory":  {MemoryMiB: 128},
+	} {
+		if _, err := svc.Resize(ctx, "vm1", req); !errors.Is(err, ErrInvalid) {
+			t.Errorf("%s: want ErrInvalid, got %v", name, err)
+		}
+	}
+	if _, err := svc.Resize(ctx, "nope", ResizeRequest{CPUs: 2}); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("unknown vm: %v", err)
+	}
+}
+
+func TestResizeClusterMachine(t *testing.T) {
+	ctx := context.Background()
+	svc, _ := newTestService(t)
+	if _, err := svc.Create(ctx, CreateRequest{Name: "demo-worker-1", Cluster: "demo", Role: "worker"}); err != nil {
+		t.Fatal(err)
+	}
+	// クラスタのノードは単体の API では変えられない (drain するクラスタの Resize を使う)
+	if _, err := svc.Resize(ctx, "demo-worker-1", ResizeRequest{CPUs: 4}); !errors.Is(err, ErrPartOfCluster) {
+		t.Errorf("want ErrPartOfCluster, got %v", err)
+	}
+	if vm, err := svc.ResizeClusterMachine(ctx, "demo-worker-1", ResizeRequest{CPUs: 4}); err != nil || vm.CPUs != 4 {
+		t.Errorf("ResizeClusterMachine: %+v %v", vm, err)
+	}
+}

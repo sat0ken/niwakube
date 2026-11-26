@@ -295,6 +295,41 @@ func (b *Backend) Status(ctx context.Context, name string) (backend.Status, erro
 	}
 }
 
+var _ backend.Resizer = (*Backend)(nil)
+
+// Resize は止まっている VM の vCPU・メモリを変え、ディスクを広げる。次の Start で新しい大きさの VM を作る
+// (Stop は VMM のプロセスごと止めるので、Start は保存した設定から vm.create し直す)。
+// ディスクのパーティションとファイルシステムは、ゲストが起動時に広げる (cloud-init の growpart / Talos)。
+func (b *Backend) Resize(ctx context.Context, name string, r backend.Resources) error {
+	st, err := b.loadState(name)
+	if err != nil {
+		return err
+	}
+	if b.unitActive(ctx, name) {
+		return fmt.Errorf("%s: stop it before resizing: %w", name, backend.ErrRunning)
+	}
+	if r.DiskGiB > 0 && len(st.VM.Disks) > 0 {
+		if err := diskutil.Grow(st.VM.Disks[0].Path, int64(r.DiskGiB)<<30); err != nil {
+			return err
+		}
+	}
+	if r.CPUs > 0 {
+		st.VM.Cpus = CpusConfig{BootVcpus: r.CPUs, MaxVcpus: r.CPUs}
+	}
+	if r.MemoryMiB > 0 {
+		st.VM.Memory.Size = int64(r.MemoryMiB) << 20
+	}
+	raw, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := b.statePath(name) + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, b.statePath(name))
+}
+
 // SerialLog はシリアルコンソールのログの末尾 maxBytes を返す。
 func (b *Backend) SerialLog(_ context.Context, name string, maxBytes int64) ([]byte, error) {
 	f, err := os.Open(filepath.Join(b.vmDir(name), "serial.log"))

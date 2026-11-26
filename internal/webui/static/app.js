@@ -62,6 +62,17 @@ function stateBadge(state) {
   return html`<span class="badge ${cls}">${label}</span>`;
 }
 
+// クラスタの進行中の操作 (operation) を表示用の文にする
+function operationLabel(op) {
+  if (!op) return "";
+  if (op.startsWith("failed:")) return `失敗: ${op.slice(7).trim()}`;
+  const m = op.match(/^resizing (.+)$/);
+  return m ? `サイズを変更中: ${m[1]}` : op;
+}
+
+// クラスタの画面で操作が進んでいる間は、画面全体を 5 秒ごとに更新する
+let clusterOpActive = false;
+
 function setNav(name) {
   document.querySelectorAll("nav a").forEach((a) => a.classList.toggle("active", a.dataset.nav === name));
 }
@@ -299,7 +310,8 @@ async function viewCluster(name) {
   const enc = encodeURIComponent(c.name);
   app.innerHTML = html`
     <h1>${c.name} ${phaseBadge(c.status.phase)}
-      <span class="hint">${c.status.readyNodes} / ${c.status.nodes} ノード Ready${c.status.message ? ` · ${c.status.message}` : ""}</span></h1>
+      <span class="hint">${c.status.readyNodes} / ${c.status.nodes} ノード Ready${c.status.message ? ` · ${c.status.message}` : ""}</span>
+      ${c.operation ? html`<span class="badge ${c.operation.startsWith("failed:") ? "danger" : "info"}">${operationLabel(c.operation)}</span>` : ""}</h1>
     <div class="card">
       <div class="actions">
         <a class="button primary" href="#/clusters/${enc}/terminal">ターミナル</a>
@@ -338,6 +350,23 @@ async function viewCluster(name) {
           <td><a href="#/vms/${encodeURIComponent(m.name)}">${m.name}</a></td><td>${m.role}</td><td>${stateBadge(m.status.state)}</td>
           <td><code>${m.ip}</code></td><td class="num">${m.cpus}</td><td class="num">${gib(m.memoryMiB)} GiB</td><td class="num">${m.diskGiB} GiB</td></tr>`)}</tbody>
       </table></div>
+    </div>
+    <div class="card">
+      <h2>ノードのサイズを変える</h2>
+      <p class="hint">選んだ役割のノードを 1 台ずつ、drain (Pod をほかのノードへ移す) → 止めてサイズを変えて起動 → Ready に戻ったら次へ、の順に変えます。
+        ワーカーが 2 台以上ならサービスは止まりません。コントロールプレーンは 1 台なので、再起動中の 1〜2 分は API が使えません。
+        ディスクは広げるだけで、パーティションは起動時に広がります。これから足すノードも新しいサイズになります。</p>
+      <form id="resize-form" class="inline" autocomplete="off">
+        <select name="role">
+          <option value="worker">ワーカー (${c.machines.filter((m) => m.role === "worker").length} 台)</option>
+          <option value="control-plane">コントロールプレーン (${c.machines.filter((m) => m.role === "control-plane").length} 台)</option>
+        </select>
+        <label class="inline">vCPU <input name="cpus" type="number" min="1" max="32" required></label>
+        <label class="inline">メモリ GiB <input name="mem" type="number" min="0.5" max="64" step="0.5" required></label>
+        <label class="inline">ディスク GiB <input name="disk" type="number" max="1024" required></label>
+        <button class="primary" type="submit" ${c.operation && !c.operation.startsWith("failed:") ? raw("disabled") : ""}>適用</button>
+      </form>
+      <div class="actions spaced-top">${Object.entries(SIZES).map(([k, s]) => html`<button type="button" data-size-preset="${k}">${s.label} (${s.cpus} vCPU · ${gib(s.memoryMiB)} GiB)</button>`)}</div>
     </div>
     <div class="card">
       <h2>ポートの転送 (LAN からの入口)</h2>
@@ -384,6 +413,36 @@ async function viewCluster(name) {
   app.querySelectorAll("[data-del-forward]").forEach((b) => b.addEventListener("click", async () => {
     try { await api("DELETE", `/api/clusters/${enc}/forwards/${b.dataset.delForward}`); toast("転送を削除しました"); render(); } catch (err) { toast(err.message, true); }
   }));
+  clusterOpActive = !!c.operation && !c.operation.startsWith("failed:");
+  const rf = document.getElementById("resize-form");
+  const fillResize = () => {
+    const sz = rf.role.value === "worker" ? c.worker : c.controlPlane;
+    rf.cpus.value = sz.cpus;
+    rf.mem.value = sz.memoryMiB / 1024;
+    rf.disk.value = sz.diskGiB;
+    rf.disk.min = sz.diskGiB; // ディスクは広げるだけ
+  };
+  fillResize();
+  rf.role.addEventListener("change", fillResize);
+  app.querySelectorAll("[data-size-preset]").forEach((b) => b.addEventListener("click", () => {
+    const s = SIZES[b.dataset.sizePreset];
+    rf.cpus.value = s.cpus;
+    rf.mem.value = s.memoryMiB / 1024;
+  }));
+  rf.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const role = rf.role.value;
+    const n = c.machines.filter((m) => m.role === role).length;
+    const size = { cpus: Number(rf.cpus.value), memoryMiB: Math.round(Number(rf.mem.value) * 1024), diskGiB: Number(rf.disk.value) };
+    const label = role === "worker" ? "ワーカー" : "コントロールプレーン";
+    if (!confirm(`${label} ${n} 台を 1 台ずつ再起動して、${size.cpus} vCPU · ${gib(size.memoryMiB)} GiB · ディスク ${size.diskGiB} GiB にします。よろしいですか?`)) return;
+    try {
+      await api("POST", `/api/clusters/${enc}/resize`, { role, size });
+      toast(`${label}のサイズの変更を始めました。1 台ずつ再起動します`);
+      document.activeElement.blur();
+      render();
+    } catch (err) { toast(err.message, true); }
+  });
   document.getElementById("forward-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const f = e.target;
@@ -477,11 +536,44 @@ async function viewVM(name) {
       </dl>
     </div>
     <div class="card">
+      <h2>サイズを変える</h2>
+      ${v.cluster
+        ? html`<p class="hint">クラスタのノードは、<a href="#/clusters/${encodeURIComponent(v.cluster)}">クラスタの画面</a>の「ノードのサイズを変える」から変えます
+            (drain してから 1 台ずつ再起動します)。</p>`
+        : html`<p class="hint">${v.status.state === "running" ? "VM を止めてサイズを変え、起動し直します。" : "止まっている VM のサイズを変えます。"}
+            ディスクは広げるだけで、パーティションは起動時に広がります。</p>
+          <form id="vm-resize-form" class="inline" autocomplete="off">
+            <label class="inline">vCPU <input name="cpus" type="number" min="1" max="32" value="${v.cpus}" required></label>
+            <label class="inline">メモリ GiB <input name="mem" type="number" min="0.5" max="64" step="0.5" value="${v.memoryMiB / 1024}" required></label>
+            <label class="inline">ディスク GiB <input name="disk" type="number" min="${v.diskGiB}" max="1024" value="${v.diskGiB}" required></label>
+            <button class="primary" type="submit">適用</button>
+          </form>`}
+    </div>
+    <div class="card">
       <h2>シリアルコンソールのログ</h2>
       <label class="inline spaced-bottom"><input type="checkbox" id="serial-auto" ${serialState.auto ? raw("checked") : ""}> 自動更新</label>
       <pre class="log" id="serial">読み込み中…</pre>
     </div>`;
   document.getElementById("serial-auto").addEventListener("change", (e) => { serialState.auto = e.target.checked; });
+  const vf = document.getElementById("vm-resize-form");
+  if (vf) vf.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const req = { cpus: Number(vf.cpus.value), memoryMiB: Math.round(Number(vf.mem.value) * 1024), diskGiB: Number(vf.disk.value) };
+    if (v.status.state === "running" && !confirm(`${v.name} を再起動して、${req.cpus} vCPU · ${gib(req.memoryMiB)} GiB · ディスク ${req.diskGiB} GiB にします。よろしいですか?`)) return;
+    const btn = vf.querySelector("button[type=submit]");
+    btn.disabled = true;
+    btn.textContent = "変更中…";
+    try {
+      await api("POST", `/api/vms/${encodeURIComponent(v.name)}/resize`, req);
+      toast(`${v.name} のサイズを変えました`);
+      document.activeElement.blur();
+      render();
+    } catch (err) {
+      toast(err.message, true);
+      btn.disabled = false;
+      btn.textContent = "適用";
+    }
+  });
   loadSerial(v.name);
 }
 
@@ -604,6 +696,7 @@ async function render() {
 
 window.addEventListener("hashchange", () => {
   if (teardown) { teardown(); teardown = null; }
+  clusterOpActive = false;
   current = route();
   window.scrollTo(0, 0);
   render();
@@ -612,7 +705,9 @@ window.addEventListener("hashchange", () => {
 setInterval(() => {
   if (document.hidden || !current.live) return;
   if (current.serial) {
-    // 詳細画面は、表の更新でスクロール位置が飛ばないようにシリアルログだけを更新する
+    // 詳細画面は、表の更新でスクロール位置が飛ばないようにシリアルログだけを更新する。
+    // ただしクラスタの操作 (サイズの変更) が進んでいる間は、進み具合が見えるよう画面全体を更新する
+    if (clusterOpActive && !isEditing()) { render(); return; }
     if (serialState.auto) loadSerial(serialState.machine);
     return;
   }
