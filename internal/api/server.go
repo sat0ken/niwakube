@@ -81,6 +81,10 @@ func New(svc *machine.Service, clusters *cluster.Service, log *slog.Logger, opts
 //	POST   /api/practice/problems/{id}/check    {"cluster":"demo"} クラスタの状態で採点する
 //	POST   /api/practice/problems/{id}/solve    {"cluster":"demo"} 模範解答を当てる
 //	POST   /api/clusters/{name}/resize   {"role":"worker","size":{"cpus":4,"memoryMiB":8192,"diskGiB":50}} 1 台ずつ drain して再起動 (202)
+//	GET    /api/clusters/{name}/snapshots   スナップショットの一覧 (新しい順)
+//	POST   /api/clusters/{name}/snapshots   {"name":"before-upgrade"} クラスタを止めてスナップショットを取り、起動し直す (202)
+//	POST   /api/clusters/{name}/snapshots/{snap}/restore  スナップショットの状態に戻す (202)
+//	DELETE /api/clusters/{name}/snapshots/{snap}          スナップショットを消す
 //	POST   /api/clusters/{name}/scale    {"workers":3} ワーカーの台数を変える (減らすときは drain してから消す) (202)
 //	GET    /api/clusters/{name}/kubeconfig     ?proxy=socks5://localhost:1080 で proxy-url を入れる
 //	GET    /api/kubeconfig?cluster=a&cluster=b  複数のクラスタを 1 つにまとめた kubeconfig (?proxy= も使える)
@@ -121,6 +125,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/clusters/{name}/stop", s.stopCluster)
 	mux.HandleFunc("POST /api/clusters/{name}/resize", s.resizeCluster)
 	mux.HandleFunc("POST /api/clusters/{name}/scale", s.scaleCluster)
+	mux.HandleFunc("GET /api/clusters/{name}/snapshots", s.listSnapshots)
+	mux.HandleFunc("POST /api/clusters/{name}/snapshots", s.createSnapshot)
+	mux.HandleFunc("POST /api/clusters/{name}/snapshots/{snap}/restore", s.restoreSnapshot)
+	mux.HandleFunc("DELETE /api/clusters/{name}/snapshots/{snap}", s.deleteSnapshot)
 	mux.HandleFunc("GET /api/practice/problems", s.listProblems)
 	mux.HandleFunc("GET /api/practice/problems/{id}", s.getProblem)
 	mux.HandleFunc("POST /api/practice/problems/{id}/setup", s.setupProblem)

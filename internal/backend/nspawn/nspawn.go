@@ -472,6 +472,23 @@ func (b *Backend) waitInactive(ctx context.Context, name string) {
 }
 
 // Delete は止めて、ノードのディレクトリを消す (下の層の共有のルートは残る)。
+// Snapshot は止まっているコンテナのディレクトリ (rootfs の差分、ボリューム、seed、設定) を dest に複製する。
+// ベースの rootfs (images/) は共有なので含めない。
+func (b *Backend) Snapshot(ctx context.Context, name, dest string) error {
+	if b.unitActive(ctx, name) || b.mounted(ctx, name) {
+		return fmt.Errorf("%s: stop it before taking a snapshot: %w", name, backend.ErrRunning)
+	}
+	return backend.SnapshotDir(b.vmDir(name), dest)
+}
+
+// Restore はコンテナのディレクトリを src の状態に戻す (無ければ作る)。netns と veth は次の Start で作る。
+func (b *Backend) Restore(ctx context.Context, name, src string) error {
+	if b.unitActive(ctx, name) || b.mounted(ctx, name) {
+		return fmt.Errorf("%s: stop it before restoring: %w", name, backend.ErrRunning)
+	}
+	return backend.RestoreDir(b.vmDir(name), src)
+}
+
 func (b *Backend) Delete(ctx context.Context, name string) error {
 	if err := b.Stop(ctx, name, true); err != nil && !errors.Is(err, backend.ErrNotFound) {
 		return err

@@ -202,6 +202,8 @@ kubectl --kubeconfig demo.kubeconfig -n kube-system port-forward svc/hubble-ui 1
 | POST | `/api/clusters/{name}/stop` | すべてのノードを正常停止 (ワーカーから) |
 | POST | `/api/clusters/{name}/resize` | ロールのノードのサイズを変える (下記、202) |
 | POST | `/api/clusters/{name}/scale` | ワーカーの台数を変える (`{"workers":3}`、下記、202) |
+| GET / POST | `/api/clusters/{name}/snapshots` | スナップショットの一覧 / 取る (`{"name":"..."}`、下記、202) |
+| POST / DELETE | `/api/clusters/{name}/snapshots/{snap}[/restore]` | スナップショットに戻す (202) / 消す |
 | GET | `/api/clusters/{name}/kubeconfig` | admin の kubeconfig |
 | GET | `/api/clusters/{name}/talosconfig` | Talos の talosconfig (Talos のみ) |
 | GET / POST / DELETE | `/api/clusters/{name}/forwards` | ホストのポートからクラスタへの転送 (下記) |
@@ -266,6 +268,27 @@ curl -s -X POST localhost:8080/api/clusters/demo/scale -d '{"workers":3}'
   Kubernetes の API に届かないときは、Node を残さないようにマシンを消さずに止まる (`failed: ...`)
 - 消したワーカーのディスクのデータ (hostPath や local-path の PV) は残らない。NFS の PV は残る
 - 進み具合はクラスタの `operation` に出る。クラスタが動いているときだけ変えられる
+
+### スナップショット
+
+クラスタの画面の「スナップショット」(API では `POST /api/clusters/{name}/snapshots`) で、クラスタをまるごと保存し、
+あとでその状態に戻せる。壊してみる練習 (etcd、kubelet、アップグレード) や、検証の前の保存に使う。
+
+```bash
+curl -s -X POST localhost:8080/api/clusters/demo/snapshots -d '{"name":"before-upgrade"}'
+```
+
+```bash
+curl -s -X POST localhost:8080/api/clusters/demo/snapshots/before-upgrade/restore
+```
+
+- 取るときはクラスタをいったん止め (ワーカーから)、全ノードのデータと NFS の PV のディレクトリを複製して、また起動する。
+  止めてから取るので、etcd を含めて整合した状態になる。止めている間 (1〜2 分) はクラスタを使えない
+- 保存先は `/var/lib/niwakube/snapshots/<クラスタ>/<名前>/`。VM はディスク、コンテナは rootfs の差分とボリュームを複製する。
+  XFS なら reflink で一瞬で終わり、容量はその後に変わった分しか使わない
+- 戻すと、Kubernetes の中身・ノードの台数とサイズ・NFS のデータがその時点に戻る (あとで足したノードは消え、消したノードは戻る)
+- 進み具合はクラスタの `operation` に出る。クラスタを消すと、そのスナップショットも消える
+- 別の名前のクラスタとして複製することはできない (ノードの IP やホスト名が証明書と etcd に入っているため)
 
 ### 練習問題 (CKA / CKAD)
 

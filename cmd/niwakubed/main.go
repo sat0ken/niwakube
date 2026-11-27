@@ -146,7 +146,8 @@ func run() error {
 		log.Warn("NFS is disabled (run host-setup.sh to set up the NFS server)", "root", nfs.Root)
 		nfs.Root = ""
 	}
-	clusters, err := cluster.NewService(cluster.Config{Subnet: cfg.Subnet, Defaults: defaults, Forwarder: fwd, NFS: nfs},
+	clusters, err := cluster.NewService(cluster.Config{Subnet: cfg.Subnet, Defaults: defaults, Forwarder: fwd, NFS: nfs,
+		SnapshotDir: filepath.Join(*dataDir, "snapshots")},
 		st, svc, nil, log, k3s.New(), kubeadm.New(), talos.New())
 	if err != nil {
 		return err
