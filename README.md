@@ -202,6 +202,7 @@ kubectl --kubeconfig demo.kubeconfig -n kube-system port-forward svc/hubble-ui 1
 | POST | `/api/clusters/{name}/stop` | すべてのノードを正常停止 (ワーカーから) |
 | POST | `/api/clusters/{name}/resize` | ロールのノードのサイズを変える (下記、202) |
 | POST | `/api/clusters/{name}/scale` | ワーカーの台数を変える (`{"workers":3}`、下記、202) |
+| GET / DELETE | `/api/cache` | コンテナイメージのキャッシュの大きさと使われ方 / 空にする (下記) |
 | GET / POST | `/api/clusters/{name}/snapshots` | スナップショットの一覧 / 取る (`{"name":"..."}`、下記、202) |
 | POST / DELETE | `/api/clusters/{name}/snapshots/{snap}[/restore]` | スナップショットに戻す (202) / 消す |
 | GET | `/api/clusters/{name}/kubeconfig` | admin の kubeconfig |
@@ -268,6 +269,23 @@ curl -s -X POST localhost:8080/api/clusters/demo/scale -d '{"workers":3}'
   Kubernetes の API に届かないときは、Node を残さないようにマシンを消さずに止まる (`failed: ...`)
 - 消したワーカーのディスクのデータ (hostPath や local-path の PV) は残らない。NFS の PV は残る
 - 進み具合はクラスタの `operation` に出る。クラスタが動いているときだけ変えられる
+
+### コンテナイメージのキャッシュ
+
+niwakubed はコンテナイメージのプルスルーキャッシュ (レジストリのミラー) を `172.30.0.1:5000` (ブリッジのアドレス。LAN には出ない) で動かす。
+クラスタのノードの containerd は、docker.io・registry.k8s.io・ghcr.io・quay.io・gcr.io をこのキャッシュを通して取るので、
+2 つ目からのクラスタの作成が速くなり、Docker Hub の取得回数の制限にもかかりにくい。
+
+- レイヤーとマニフェストは中身のダイジェストで `/var/lib/niwakube/registry-cache/` に保存し、一度取ったものは上流に聞かない
+- タグ (`latest` など) は 10 分使い回し、過ぎたら HEAD で確かめる (Docker Hub は HEAD を回数の制限に数えない)。
+  上流に届かなければ、保存してあるものを返す (インターネットが切れても、取ったことのあるイメージでクラスタを作れる)
+- 同じレイヤーを複数のノードが同時に取りにきても、上流からは 1 回だけ取る
+- キャッシュが止まっていても、ノードは元のレジストリから取る。この機能より前に作ったクラスタは使わない
+- 大きさと使われ方は `GET /api/cache`、空にするのは `DELETE /api/cache`。止めるときは `--registry-cache=false`
+
+```bash
+curl -s localhost:8080/api/cache | jq .
+```
 
 ### スナップショット
 

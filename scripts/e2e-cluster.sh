@@ -161,6 +161,12 @@ while :; do
 done
 log "クラスタの準備完了 ($((SECONDS - start))s)"
 
+# ノードの containerd は niwakubed のイメージのキャッシュをミラーとして使う (届かなければ元のレジストリから取る)。
+# 黙って元のレジストリに逃げていないことを、キャッシュに入ったレイヤーの数で確かめる
+cache=$(curl -fs "$API/cache")
+echo "    イメージのキャッシュ: $(jq -c '{blobs, manifests, bytes, blobHits, blobMisses, manifestHits, manifestMisses}' <<<"$cache")"
+(( $(jq '.blobs' <<<"$cache") > 0 )) || die "ノードがイメージのキャッシュを使っていません"
+
 # --- kubeconfig で操作する ---
 curl -fs "$API/clusters/$NAME/kubeconfig" >"$KUBECONFIG_FILE"
 k get nodes -o wide

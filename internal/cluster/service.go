@@ -57,6 +57,8 @@ type Config struct {
 	NodeOps NodeOps
 	// SnapshotDir はクラスタのスナップショットの置き場所。空ならスナップショットは使えない
 	SnapshotDir string
+	// RegistryMirror はノードがイメージを取るときに使うキャッシュの URL (例: http://172.30.0.1:5000)。空なら使わない
+	RegistryMirror string
 }
 
 // NFSConfig はホストの NFS サーバーの設定。クラスタごとに Root/<クラスタ名> を共有する。
@@ -430,9 +432,10 @@ func (s *Service) createNodes(ctx context.Context, d distro.Distro, rec *store.C
 	_, caps, _ := s.machines.ResolveBackend(rec.Spec.Backend)
 	dc := &distro.Cluster{
 		Name: rec.Name, Version: rec.Spec.Version, Secrets: secrets,
-		APIAddr:   s.hostIP(rec.Index, cpHostBase+1),
-		Addons:    addonsOf(cniOf(rec), rec.Spec.Hubble, rec.Spec.Runtime),
-		Container: caps.Isolation == backend.IsolationContainer,
+		APIAddr:        s.hostIP(rec.Index, cpHostBase+1),
+		Addons:         addonsOf(cniOf(rec), rec.Spec.Hubble, rec.Spec.Runtime),
+		Container:      caps.Isolation == backend.IsolationContainer,
+		RegistryMirror: s.cfg.RegistryMirror,
 	}
 	for i := 1; i <= rec.Spec.ControlPlanes; i++ {
 		if err := s.createNode(ctx, d, dc, rec, s.cpNode(rec, i), rec.Spec.ControlPlane); err != nil {
@@ -864,9 +867,10 @@ func (s *Service) distroCluster(rec *store.Cluster) (*distro.Cluster, distro.Dis
 	_, caps, _ := s.machines.ResolveBackend(rec.Spec.Backend)
 	return &distro.Cluster{
 		Name: rec.Name, Version: rec.Spec.Version, Secrets: sec,
-		APIAddr:   s.hostIP(rec.Index, cpHostBase+1),
-		Addons:    addonsOf(cniOf(rec), rec.Spec.Hubble, rec.Spec.Runtime),
-		Container: caps.Isolation == backend.IsolationContainer,
+		APIAddr:        s.hostIP(rec.Index, cpHostBase+1),
+		Addons:         addonsOf(cniOf(rec), rec.Spec.Hubble, rec.Spec.Runtime),
+		Container:      caps.Isolation == backend.IsolationContainer,
+		RegistryMirror: s.cfg.RegistryMirror,
 	}, d, nil
 }
 

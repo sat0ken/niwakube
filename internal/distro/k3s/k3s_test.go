@@ -184,3 +184,32 @@ func TestUserDataContainer(t *testing.T) {
 		}
 	}
 }
+
+func TestUserDataRegistryMirror(t *testing.T) {
+	k := New()
+	sec, _ := k.GenerateSecrets("demo")
+	c := &distro.Cluster{Name: "demo", APIAddr: netip.MustParseAddr("172.30.1.11"), Secrets: sec, RegistryMirror: "http://172.30.0.1:5000",
+		Addons: distro.Addons{CNI: distro.CNIFlannel, DefaultRuntime: distro.RuntimeRunc}}
+	ud, err := k.UserData(c, &distro.Node{Name: "demo-worker-1", Role: distro.RoleWorker, Index: 1, IP: netip.MustParseAddr("172.30.1.21")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reg string
+	for _, f := range ud["write_files"].([]writeFile) {
+		if f.Path == "/etc/rancher/k3s/registries.yaml" {
+			reg = f.Content
+		}
+	}
+	for _, want := range []string{"docker.io:", "registry.k8s.io:", "http://172.30.0.1:5000"} {
+		if !strings.Contains(reg, want) {
+			t.Errorf("registries.yaml does not contain %q:\n%s", want, reg)
+		}
+	}
+	c.RegistryMirror = ""
+	ud, _ = k.UserData(c, &distro.Node{Name: "demo-worker-1", Role: distro.RoleWorker, Index: 1, IP: netip.MustParseAddr("172.30.1.21")})
+	for _, f := range ud["write_files"].([]writeFile) {
+		if f.Path == "/etc/rancher/k3s/registries.yaml" {
+			t.Error("no registries.yaml without a mirror")
+		}
+	}
+}

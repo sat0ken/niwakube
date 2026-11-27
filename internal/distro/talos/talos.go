@@ -142,7 +142,7 @@ func (t Talos) input(c *distro.Cluster) (*generate.Input, error) {
 	if err != nil {
 		return nil, err
 	}
-	return generate.NewInput(c.Name, fmt.Sprintf("https://%s:%d", c.APIAddr, apiPort), constants.DefaultKubernetesVersion,
+	opts := []generate.Option{
 		generate.WithSecretsBundle(bundle),
 		generate.WithVersionContract(contract),
 		generate.WithInstallDisk(installDisk),
@@ -151,7 +151,14 @@ func (t Talos) input(c *distro.Cluster) (*generate.Input, error) {
 		generate.WithEndpointList([]string{c.APIAddr.String()}),
 		// .10 は将来の VIP 用。証明書の SAN にだけ入れておく
 		generate.WithAdditionalSubjectAltNames([]string{c.APIAddr.String(), c.APIAddr.Prev().String()}),
-	)
+	}
+	if c.RegistryMirror != "" {
+		// イメージは niwakubed のキャッシュを通して取る (届かなければ Talos は元のレジストリから取る)
+		for _, r := range distro.MirroredRegistries {
+			opts = append(opts, generate.WithRegistryMirror(r, c.RegistryMirror))
+		}
+	}
+	return generate.NewInput(c.Name, fmt.Sprintf("https://%s:%d", c.APIAddr, apiPort), constants.DefaultKubernetesVersion, opts...)
 }
 
 // RawUserData はノードの machine config を返す。

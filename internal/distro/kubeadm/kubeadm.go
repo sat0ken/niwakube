@@ -105,6 +105,13 @@ func (k Kubeadm) UserData(c *distro.Cluster, n *distro.Node) (map[string]any, er
 		return nil, err
 	}
 	files := []writeFile{{Path: installPath, Permissions: "0755", Content: install}}
+	if c.RegistryMirror != "" {
+		// イメージは niwakubed のキャッシュを通して取る。届かなければ containerd は server (元のレジストリ) から取る
+		for _, r := range distro.MirroredRegistries {
+			files = append(files, writeFile{Path: "/etc/containerd/certs.d/" + r + "/hosts.toml", Permissions: "0644",
+				Content: fmt.Sprintf("server = %q\n\n[host.%q]\n  capabilities = [\"pull\", \"resolve\"]\n", distro.RegistryServer(r), c.RegistryMirror)})
+		}
+	}
 	runcmd := []any{}
 	if len(c.Addons.Runtimes) > 0 {
 		// containerd に登録する前にランタイムを入れておく
@@ -320,6 +327,8 @@ retry $APT update
 retry $APT install -y containerd apt-transport-https ca-certificates curl gpg
 mkdir -p /etc/containerd
 containerd config default >/etc/containerd/config.toml
+# レジストリのミラーの設定 (/etc/containerd/certs.d) を読ませる。既定の設定では空 (1.x は "", 2.x は '') なので入れる
+sed -i -E "s#config_path = (\"\"|'')#config_path = '/etc/containerd/certs.d'#" /etc/containerd/config.toml
 sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
 {{.Containerd}}systemctl restart containerd
 systemctl enable containerd

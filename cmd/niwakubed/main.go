@@ -7,11 +7,13 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -22,6 +24,7 @@ import (
 	"github.com/sat0ken/niwakube/internal/backend/fake"
 	"github.com/sat0ken/niwakube/internal/backend/nspawn"
 	"github.com/sat0ken/niwakube/internal/cluster"
+	"github.com/sat0ken/niwakube/internal/distro"
 	"github.com/sat0ken/niwakube/internal/distro/k3s"
 	"github.com/sat0ken/niwakube/internal/distro/kubeadm"
 	"github.com/sat0ken/niwakube/internal/distro/talos"
@@ -31,6 +34,7 @@ import (
 	"github.com/sat0ken/niwakube/internal/netx"
 	"github.com/sat0ken/niwakube/internal/nodeexec"
 	"github.com/sat0ken/niwakube/internal/practice"
+	"github.com/sat0ken/niwakube/internal/regcache"
 	"github.com/sat0ken/niwakube/internal/store"
 	"github.com/sat0ken/niwakube/internal/sys"
 	"github.com/sat0ken/niwakube/internal/terminal"
@@ -39,6 +43,28 @@ import (
 
 // version はビルド時に -ldflags "-X main.version=..." で埋め込む。
 var version = "dev"
+
+// serveRegistryCache はイメージのキャッシュを addr で待ち受ける。ブリッジがまだ無ければ、できるまで待つ。
+func serveRegistryCache(addr string, c *regcache.Cache, log *slog.Logger) {
+	srv := &http.Server{Handler: c, ReadHeaderTimeout: 10 * time.Second}
+	warned := false
+	for {
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			if !warned {
+				log.Warn("registry cache: cannot listen yet (waiting for the bridge)", "addr", addr, "err", err)
+				warned = true
+			}
+			time.Sleep(10 * time.Second)
+			continue
+		}
+		log.Info("registry cache listening", "addr", addr)
+		if err := srv.Serve(ln); err != nil {
+			log.Error("registry cache stopped", "err", err)
+		}
+		return
+	}
+}
 
 // practiceSnapshots は練習問題が使う、クラスタ 1 つのスナップショットの操作。
 type practiceSnapshots struct {
@@ -84,6 +110,8 @@ func run() error {
 		nfsRoot     = flag.String("nfs-root", "", "NFS で export しているディレクトリ (既定: <data-dir>/nfs。無ければ NFS の StorageClass は作らない)")
 		backendName = flag.String("backend", "cloud-hypervisor", "ノードを作るバックエンド (cloud-hypervisor: VM / nspawn: systemd-nspawn のコンテナ)")
 		devFake     = flag.Bool("dev-fake-backend", false, "VM を実際には作らない (KVM の無い PC で Web UI を開発するため)")
+		regCache    = flag.Bool("registry-cache", true, "コンテナイメージのキャッシュ (ノードの containerd のミラー) を動かす")
+		regPort     = flag.Int("registry-cache-port", 5000, "イメージのキャッシュの待ち受けポート (ブリッジのアドレスで待ち受ける)")
 	)
 	flag.Parse()
 	if *showVer {
@@ -164,8 +192,20 @@ func run() error {
 		log.Warn("NFS is disabled (run host-setup.sh to set up the NFS server)", "root", nfs.Root)
 		nfs.Root = ""
 	}
+	// コンテナイメージのキャッシュ。ブリッジのアドレス (VM とコンテナから見えるが、LAN には出ない) で待ち受ける
+	var cache *regcache.Cache
+	mirror := ""
+	if *regCache && !*devFake {
+		cache, err = regcache.New(regcache.Config{Dir: filepath.Join(*dataDir, "registry-cache"), Upstreams: distro.MirroredRegistries, Log: log})
+		if err != nil {
+			return err
+		}
+		addr := net.JoinHostPort(cfg.Gateway.String(), strconv.Itoa(*regPort))
+		mirror = "http://" + addr
+		go serveRegistryCache(addr, cache, log)
+	}
 	clusters, err := cluster.NewService(cluster.Config{Subnet: cfg.Subnet, Defaults: defaults, Forwarder: fwd, NFS: nfs,
-		SnapshotDir: filepath.Join(*dataDir, "snapshots")},
+		SnapshotDir: filepath.Join(*dataDir, "snapshots"), RegistryMirror: mirror},
 		st, svc, nil, log, k3s.New(), kubeadm.New(), talos.New())
 	if err != nil {
 		return err
@@ -240,6 +280,7 @@ func run() error {
 			UI:           webui.Handler(),
 			Terminal:     term,
 			Practice:     drills,
+			Cache:        cache,
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
