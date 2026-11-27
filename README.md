@@ -313,24 +313,26 @@ curl -s -X POST localhost:8080/api/clusters/demo/snapshots/before-upgrade/restor
 Web UI の「練習」で、本物のクラスタを使って CKA / CKAD の練習ができる。問題を開くと左に問題文、右にクラスタのターミナルが出る。
 「出題する」で問題の Namespace を作り直し、kubectl で解いたら「採点」を押すと、項目ごとの合否と点数が出る。
 
-- 問題は公開されている出題範囲に沿ったオリジナル (本物の試験問題ではない)。今は CKA の 8 問と CKAD の 10 問
+- 問題は公開されている出題範囲に沿ったオリジナル (本物の試験問題ではない)。今は CKA の 8 問と CKAD の 12 問
 - CKA の問題の多くはノードに入って解く (etcd のバックアップと復元、kubelet の故障、static Pod、taint、drain、アップグレード)。kubeadm のクラスタで、
   ターミナルから `ssh cp` / `ssh worker` で入れる。ノードの鍵はクラスタを作るときに作るので、この機能より前に作ったクラスタでは使えない
 - kubeadm のアップグレードの問題は、最新より 1 つ古いマイナーバージョン (`"version":"v1.36"` など) で作ったクラスタで出せる。
   最初の出題でスナップショットを取り、やり直すときはそれに戻す
+- Helm の問題は、ターミナルの helm で `helm create` した chart を使う (外部の chart のリポジトリは使わない)。
+  模範解答はノードで helm を動かすので、ノードに SSH できるクラスタ (k3s / kubeadm) で出せる
 - 練習用のクラスタを 1 つ作っておくとよい (試験と同じ kubeadm、ワーカー 1 台以上がおすすめ)
 - 問題の書き方と仕組みは [docs/practice.md](docs/practice.md)
 
 ### Web UI のターミナル
 
 クラスタの画面の「ターミナル」を押すと、ブラウザの中でそのクラスタの kubeconfig を設定したシェルが開く
-(Talos のクラスタは talosconfig も)。`kubectl` (`k`)、`talosctl` と Tab 補完が使え、`kubectl exec -it` や `edit` も動く。
+(Talos のクラスタは talosconfig も)。`kubectl` (`k`)、`talosctl`、`helm` と Tab 補完が使え、`kubectl exec -it` や `edit` も動く。
 
 - シェルは root では動かさない。`systemd-run` の一時ユーザー (DynamicUser) とサンドボックスで動き、
   OS は読み取り専用、`/var/lib/niwakube` (VM のディスクや秘密鍵) と `/run/niwakube`、`/home` は見えない
 - kubeconfig は systemd の credential として渡し、ホーム (`/run/niwakube-term-*`) はセッションごとで、閉じると消える
 - WebSocket は Origin が Web UI と同じでなければ拒否する。同時に開けるのは 8 つまで
-- kubectl / talosctl は `scripts/host-setup.sh` が入れる (`KUBECTL_VERSION`、`TALOS_VERSIONS` で固定し、SHA256 を確かめる)
+- kubectl / talosctl / helm は `scripts/host-setup.sh` が入れる (`KUBECTL_VERSION`、`TALOS_VERSIONS`、`HELM_VERSION` (既定は最新) で決め、SHA256 を確かめる)
 
 ### SSH でつないでいる PC から kubectl を使う
 

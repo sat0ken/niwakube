@@ -188,13 +188,15 @@ fi
 		b.WriteString(`command -v talosctl >/dev/null 2>&1 && source <(talosctl completion bash)
 `)
 	}
+	b.WriteString(`command -v helm >/dev/null 2>&1 && source <(helm completion bash)
+`)
 	fmt.Fprintf(&b, `PS1='\[\e[1;32m\]%s\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]\$ '
 cd "$HOME"
 echo "niwakube: クラスタ %s のターミナル (kubectl / k`, cluster, cluster)
 	if talos {
 		b.WriteString(` / talosctl`)
 	}
-	b.WriteString(` が使えます。ホームはこのセッションだけのもので、閉じると消えます)"
+	b.WriteString(` / helm が使えます。ホームはこのセッションだけのもので、閉じると消えます)"
 `)
 	if ssh != nil {
 		var names []string

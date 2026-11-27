@@ -1,0 +1,84 @@
+id: ckad-helm-rollback
+exam: CKAD
+domain: アプリのデプロイ
+title: Helm でアップグレードしてロールバックする
+weight: 7
+namespaces: [helm-roll]
+setup: |
+  apiVersion: v1
+  kind: Namespace
+  metadata:
+    name: helm-roll
+task: |
+  ターミナルで helm create web を実行して chart web を作り、Namespace helm-roll で次の順に操作してください。
+  イメージは毎回 registry.k8s.io/e2e-test-images/nginx、タグ 1.14-4 を指定します (image.repository と image.tag)。
+
+  1. リリース web を Pod 1 つ (replicaCount=1) でインストールする (リビジョン 1)
+  2. Pod 3 つ (replicaCount=3) にアップグレードする (リビジョン 2)
+  3. リビジョン 1 にロールバックする (リビジョン 3 になる)
+
+  最後に Pod が 1 つで Ready になっていること。
+checks:
+  - description: リビジョン 2 (アップグレード) がある
+    apiVersion: v1
+    kind: Secret
+    namespace: helm-roll
+    name: sh.helm.release.v1.web.v2
+  - description: 今のリリースはリビジョン 3 (ロールバック) で deployed
+    apiVersion: v1
+    kind: Secret
+    namespace: helm-roll
+    selector: owner=helm,name=web,status=deployed
+    jsonpath: '{.items[*].metadata.labels.version}'
+    equals: "3"
+  - description: Deployment web の Pod が 1 つに戻っている
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: helm-roll
+    name: web
+    jsonpath: '{.spec.replicas}'
+    equals: "1"
+  - description: Pod が Ready
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: helm-roll
+    name: web
+    jsonpath: '{.status.readyReplicas}'
+    equals: "1"
+hint: |
+  helm upgrade は、指定しなかった値を chart の既定値に戻します。毎回 image も渡すか、--reuse-values を使います。
+  helm history web -n helm-roll でリビジョンの一覧が見られ、helm rollback web <リビジョン> -n helm-roll で戻せます。
+solution: |
+  helm create web
+  IMG="--set image.repository=registry.k8s.io/e2e-test-images/nginx --set image.tag=1.14-4"
+  helm install web ./web -n helm-roll --set replicaCount=1 $IMG
+  helm upgrade web ./web -n helm-roll --set replicaCount=3 $IMG
+  helm rollback web 1 -n helm-roll
+  helm history web -n helm-roll
+
+  ロールバックは古いリビジョンを「戻す」のではなく、リビジョン 1 と同じ内容で新しいリビジョン (3) を作ります。
+  Helm はリリースの情報をその Namespace の Secret (sh.helm.release.v1.<リリース>.v<リビジョン>) に保存しています。
+  kubectl -n helm-roll get secrets -l owner=helm で見られます。
+answerRun:
+  - node: cp
+    run: |
+      set -euo pipefail
+      if ! command -v helm >/dev/null 2>&1; then
+        V=$(curl -fsSL --retry 5 https://get.helm.sh/helm-latest-version)
+        A=$(dpkg --print-architecture)
+        T=$(mktemp -d)
+        curl -fsSL --retry 5 -o "$T/h.tgz" "https://get.helm.sh/helm-$V-linux-$A.tar.gz"
+        S=$(curl -fsSL --retry 5 "https://get.helm.sh/helm-$V-linux-$A.tar.gz.sha256sum" | awk '{print $1}')
+        echo "$S  $T/h.tgz" | sha256sum -c --quiet -
+        tar -xzf "$T/h.tgz" -C "$T" "linux-$A/helm"
+        sudo install -m 0755 "$T/linux-$A/helm" /usr/local/bin/helm
+      fi
+      KC=/etc/kubernetes/admin.conf
+      [ -f "$KC" ] || KC=/etc/rancher/k3s/k3s.yaml
+      H="sudo helm --kubeconfig $KC -n helm-roll"
+      IMG="--set image.repository=registry.k8s.io/e2e-test-images/nginx --set image.tag=1.14-4"
+      cd "$(mktemp -d)"
+      helm create web >/dev/null
+      $H install web ./web --set replicaCount=1 $IMG >/dev/null
+      $H upgrade web ./web --set replicaCount=3 $IMG >/dev/null
+      $H rollback web 1 >/dev/null

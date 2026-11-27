@@ -161,12 +161,6 @@ while :; do
 done
 log "クラスタの準備完了 ($((SECONDS - start))s)"
 
-# ノードの containerd は niwakubed のイメージのキャッシュをミラーとして使う (届かなければ元のレジストリから取る)。
-# 黙って元のレジストリに逃げていないことを、キャッシュに入ったレイヤーの数で確かめる
-cache=$(curl -fs "$API/cache")
-echo "    イメージのキャッシュ: $(jq -c '{blobs, manifests, bytes, blobHits, blobMisses, manifestHits, manifestMisses}' <<<"$cache")"
-(( $(jq '.blobs' <<<"$cache") > 0 )) || die "ノードがイメージのキャッシュを使っていません"
-
 # --- kubeconfig で操作する ---
 curl -fs "$API/clusters/$NAME/kubeconfig" >"$KUBECONFIG_FILE"
 k get nodes -o wide
@@ -176,9 +170,9 @@ k get nodes -o wide
 # 入力はそのまま画面に返る (エコー) ので、確かめる値は計算させて、入力と区別できるようにする
 log "Web UI のターミナルで kubectl を使う (root ではなく、データディレクトリは見えない)"
 TERMCHECK=$(dirname "$BIN")/termcheck
-term_cmd='echo "U=$(id -u)"; ls '"$NIWAKUBE_DIR"' >/dev/null 2>&1 && echo "H=$((1+1))" || echo "H=$((2+2))"; kubectl get nodes -o name | sed "s/^/N:/"; exit'
+term_cmd='echo "U=$(id -u)"; ls '"$NIWAKUBE_DIR"' >/dev/null 2>&1 && echo "H=$((1+1))" || echo "H=$((2+2))"; kubectl get nodes -o name | sed "s/^/N:/"; helm version --short | sed "s/^/HELM:/"; exit'
 if ! "$TERMCHECK" -url "ws://$LISTEN/api/clusters/$NAME/terminal" -send "$term_cmd" \
-  -expect "N:node/" -expect "H=4" -reject "U=0"$'\r' -timeout 90s >"$LOG_DIR/terminal.log" 2>&1; then
+  -expect "N:node/" -expect "H=4" -expect "HELM:v" -reject "U=0"$'\r' -timeout 90s >"$LOG_DIR/terminal.log" 2>&1; then
   cat "$LOG_DIR/terminal.log"
   journalctl --no-pager -n 50 -u 'niwakube-term-*' || true
   die "ターミナルで kubectl が使えません"
@@ -211,6 +205,13 @@ fi
 log "Deployment を作る (kubeadm と Talos は CP に taint があるので、Pod はワーカーに載る)"
 k create deployment hello --image="$TEST_IMAGE" --replicas=2 --port=8080 -- /agnhost netexec --http-port=8080
 k rollout status deployment/hello --timeout=300s
+
+# ノードの containerd は niwakubed のイメージのキャッシュをミラーとして使う (届かなければ元のレジストリから取る)。
+# 黙って元のレジストリに逃げていないことを、キャッシュに入ったレイヤーの数で確かめる。
+# ノードが Ready になった時点ではまだイメージを取っていないことがある (k3s + flannel) ので、Deployment が動いたあとに見る
+cache=$(curl -fs "$API/cache")
+echo "    イメージのキャッシュ: $(jq -c '{blobs, manifests, bytes, blobHits, blobMisses, manifestHits, manifestMisses}' <<<"$cache")"
+(( $(jq '.blobs' <<<"$cache") > 0 )) || die "ノードがイメージのキャッシュを使っていません"
 k get pods -o wide
 
 # probe NAME TARGET NODE: NODE 上の Pod から TARGET (host:port) に TCP 接続できるかを確かめる。

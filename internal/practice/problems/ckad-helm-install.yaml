@@ -1,0 +1,85 @@
+id: ckad-helm-install
+exam: CKAD
+domain: アプリのデプロイ
+title: Helm で chart をインストールする
+weight: 6
+namespaces: [helm-web]
+setup: |
+  apiVersion: v1
+  kind: Namespace
+  metadata:
+    name: helm-web
+task: |
+  ターミナルで helm create web を実行して chart web を作り、それを Namespace helm-web にリリース web としてインストールしてください。
+
+  - Pod は 2 つ (replicaCount)
+  - イメージは registry.k8s.io/e2e-test-images/nginx、タグは 1.14-4 (image.repository と image.tag)
+  - values.yaml は書き換えず、インストールのときに値を渡す
+
+  Pod 2 つがすべて Ready になっていること。
+checks:
+  - description: リリース web がインストールされている (deployed)
+    apiVersion: v1
+    kind: Secret
+    namespace: helm-web
+    selector: owner=helm,name=web,status=deployed
+    jsonpath: '{.items[*].metadata.labels.name}'
+    equals: web
+  - description: Deployment web の Pod が 2 つ
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: helm-web
+    name: web
+    jsonpath: '{.spec.replicas}'
+    equals: "2"
+  - description: イメージが registry.k8s.io/e2e-test-images/nginx:1.14-4
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: helm-web
+    name: web
+    jsonpath: '{.spec.template.spec.containers[0].image}'
+    equals: registry.k8s.io/e2e-test-images/nginx:1.14-4
+  - description: Pod 2 つが Ready
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: helm-web
+    name: web
+    jsonpath: '{.status.readyReplicas}'
+    equals: "2"
+hint: |
+  helm create web で作った chart の values.yaml を見ると、replicaCount や image.repository・image.tag の名前が分かります。
+  値は helm install の --set で渡せます (複数なら --set を並べるか、カンマで区切る)。
+  Namespace は -n で指定します。
+solution: |
+  helm create web
+  helm install web ./web -n helm-web \
+    --set replicaCount=2 \
+    --set image.repository=registry.k8s.io/e2e-test-images/nginx \
+    --set image.tag=1.14-4
+
+  helm list -n helm-web で STATUS が deployed になっていること、kubectl -n helm-web get pods で Pod が 2 つ Ready なことを確かめます。
+  helm create の chart は、リリース名に chart 名が含まれるとき、Deployment の名前をリリース名 (web) にします。
+  値をファイルで渡すなら -f values-prod.yaml。--set はファイルより優先されます。
+  helm template web ./web --set ... で、クラスタに入れずに出来上がるマニフェストを確かめられます。
+answerRun:
+  - node: cp
+    run: |
+      set -euo pipefail
+      if ! command -v helm >/dev/null 2>&1; then
+        V=$(curl -fsSL --retry 5 https://get.helm.sh/helm-latest-version)
+        A=$(dpkg --print-architecture)
+        T=$(mktemp -d)
+        curl -fsSL --retry 5 -o "$T/h.tgz" "https://get.helm.sh/helm-$V-linux-$A.tar.gz"
+        S=$(curl -fsSL --retry 5 "https://get.helm.sh/helm-$V-linux-$A.tar.gz.sha256sum" | awk '{print $1}')
+        echo "$S  $T/h.tgz" | sha256sum -c --quiet -
+        tar -xzf "$T/h.tgz" -C "$T" "linux-$A/helm"
+        sudo install -m 0755 "$T/linux-$A/helm" /usr/local/bin/helm
+      fi
+      KC=/etc/kubernetes/admin.conf
+      [ -f "$KC" ] || KC=/etc/rancher/k3s/k3s.yaml
+      cd "$(mktemp -d)"
+      helm create web >/dev/null
+      sudo helm --kubeconfig "$KC" install web ./web -n helm-web \
+        --set replicaCount=2 \
+        --set image.repository=registry.k8s.io/e2e-test-images/nginx \
+        --set image.tag=1.14-4 >/dev/null
