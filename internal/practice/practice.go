@@ -561,7 +561,33 @@ func (s *Service) Setup(ctx context.Context, cluster, id string) error {
 			return fmt.Errorf("setup: %w", err)
 		}
 	}
+	// 作ったばかりの Namespace には、少し遅れて default の ServiceAccount ができる。それまでは Pod を作れないので待つ
+	for _, ns := range p.Namespaces {
+		if err := s.waitDefaultSA(ctx, t, ns); err != nil {
+			return err
+		}
+	}
 	return t.runSteps(ctx, "nodeSetup", p.NodeSetup, false)
+}
+
+func (s *Service) waitDefaultSA(ctx context.Context, t *Target, ns string) error {
+	wctx, cancel := context.WithTimeout(ctx, s.nsWait)
+	defer cancel()
+	// setup が作らなかった Namespace は待たない
+	if obj, err := t.Kube.Get(wctx, "v1", "Namespace", "", ns); err != nil || obj == nil {
+		return nil
+	}
+	for {
+		sa, err := t.Kube.Get(wctx, "v1", "ServiceAccount", ns, "default")
+		if err == nil && sa != nil {
+			return nil
+		}
+		select {
+		case <-wctx.Done():
+			return fmt.Errorf("namespace %s has no default service account yet: %w", ns, wctx.Err())
+		case <-time.After(s.poll):
+		}
+	}
 }
 
 // Solve は模範解答をクラスタに当てる (answer のマニフェストと answerRun)。

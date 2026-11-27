@@ -16,6 +16,7 @@ import (
 type fakeCluster struct {
 	canICalls   []string
 	allowed     map[string]bool // "verb resource" → できるか
+	noDefaultSA bool            // Namespace を作っても default の ServiceAccount を作らない
 	objs        map[string]map[string]any
 	deleted     []string
 	terminating map[string]int // Namespace ごとに、消えるまでに NamespaceExists が true を返す回数
@@ -40,6 +41,10 @@ func (f *fakeCluster) Apply(_ context.Context, manifest string) error {
 	}
 	for _, o := range objs {
 		f.objs[key(o.GetAPIVersion(), o.GetKind(), o.GetNamespace(), o.GetName())] = o.Object
+		if o.GetKind() == "Namespace" && !f.noDefaultSA {
+			// 本物のクラスタでは ServiceAccount のコントローラーが作る
+			f.objs[key("v1", "ServiceAccount", o.GetName(), "default")] = map[string]any{}
+		}
 	}
 	return nil
 }
@@ -564,5 +569,15 @@ func TestResetSnapshotAndVersions(t *testing.T) {
 		if err := s2.Setup(ctx, "demo", "u-1"); !errors.Is(err, ErrUnsupported) {
 			t.Errorf("%s: setup: %v", name, err)
 		}
+	}
+}
+
+func TestSetupWaitsForDefaultServiceAccount(t *testing.T) {
+	fc := newFake()
+	fc.noDefaultSA = true
+	s := service(t, fc)
+	s.nsWait = 50 * time.Millisecond
+	if err := s.Setup(context.Background(), "demo", "ckad-configmap-env"); err == nil || !strings.Contains(err.Error(), "default service account") {
+		t.Errorf("want a wait error, got %v", err)
 	}
 }

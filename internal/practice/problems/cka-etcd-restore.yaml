@@ -30,6 +30,25 @@ nodeSetup:
       $E snapshot save /opt/backup/etcd-before.db >/dev/null
       $K -n ledger patch configmap balance --type merge -p '{"data":{"amount":"0"}}' >/dev/null
       $K -n ledger create configmap intruder --from-literal=note=injected >/dev/null
+cleanup:
+  # 復元で etcd が別のディレクトリ (hostPath) を使っていたら、/var/lib/etcd に入れ替えてマニフェストを標準に戻す。
+  # kubeadm upgrade などは etcd のマニフェストを /var/lib/etcd で作り直すので、そのままだと古いデータに戻ってしまう
+  - node: cp
+    run: |
+      set -e
+      M=/etc/kubernetes/manifests
+      CUR=$(sudo grep -oE 'path: /var/lib/etcd[^[:space:]]*' $M/etcd.yaml | awk '{print $2}' | head -n 1)
+      if [ -z "$CUR" ] || [ "$CUR" = /var/lib/etcd ]; then exit 0; fi
+      CRI="sudo crictl --runtime-endpoint unix:///run/containerd/containerd.sock"
+      sudo mv $M/kube-apiserver.yaml /etc/kubernetes/kube-apiserver.yaml.cleanup
+      sudo mv $M/etcd.yaml /etc/kubernetes/etcd.yaml.cleanup
+      for i in $(seq 1 60); do [ -z "$($CRI ps -q --name '^etcd$')" ] && break; sleep 2; done
+      sudo mv /var/lib/etcd "/var/lib/etcd.old-$(date +%s)"
+      sudo mv "$CUR" /var/lib/etcd
+      sudo sed -i -E "s#(path: )/var/lib/etcd[^[:space:]]*\$#\1/var/lib/etcd#" /etc/kubernetes/etcd.yaml.cleanup
+      sudo mv /etc/kubernetes/etcd.yaml.cleanup $M/etcd.yaml
+      sudo mv /etc/kubernetes/kube-apiserver.yaml.cleanup $M/kube-apiserver.yaml
+      for i in $(seq 1 90); do sudo kubectl --kubeconfig /etc/kubernetes/admin.conf get --raw /readyz >/dev/null 2>&1 && break; sleep 2; done
 task: |
   誤った操作で、クラスタの中身が書き換えられてしまいました。
   コントロールプレーン (ターミナルから ssh cp で入れます) の /opt/backup/etcd-before.db にある etcd のバックアップから復元し、
@@ -82,6 +101,9 @@ solution: |
   1〜2 分待って kubectl -n ledger get configmap で確かめます。sudo crictl ps で etcd と kube-apiserver が動いているかも見られます。
   バックアップは etcdctl snapshot save で取り、復元は etcdutl snapshot restore を使います (etcd v3.5 以降、restore は etcdutl に移りました)。
   復元するとクラスタ全体 (すべての Namespace) がバックアップの時点に戻ります。
+  hostPath を変えたままにすると、kubeadm upgrade が etcd のマニフェストを /var/lib/etcd で作り直したときに古いデータに戻ります。
+  niwakube は次にほかの問題を出すときに、復元したデータを /var/lib/etcd に入れ替えてマニフェストを戻します
+  (/var/lib/etcd.old-* に古いデータが残ります)。
 answerRun:
   - node: cp
     run: |

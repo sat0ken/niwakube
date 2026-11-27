@@ -78,15 +78,17 @@ answerRun:
   - node: cp
     run: |
       set -euo pipefail
+      # apt のあとに needrestart が containerd などを再起動しないようにする
+      export NEEDRESTART_MODE=l DEBIAN_FRONTEND=noninteractive
       NEXT={{nextVersion}}
       sudo sed -i -E "s#/v1\.[0-9]+/deb/#/${NEXT}/deb/#" /etc/apt/sources.list.d/kubernetes.list
       curl -fsSL --retry 5 "https://pkgs.k8s.io/core:/stable:/${NEXT}/deb/Release.key" | sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
       sudo apt-get update -q >/dev/null
       VER=$(apt-cache madison kubeadm | awk '{print $3}' | grep "^${NEXT#v}\." | head -n 1)
       sudo apt-mark unhold kubeadm kubelet kubectl >/dev/null
-      sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q "kubeadm=${VER}" >/dev/null
+      sudo -E apt-get install -y -q "kubeadm=${VER}" >/dev/null
       sudo kubeadm upgrade apply -y "$(kubeadm version -o short)"
-      sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q "kubelet=${VER}" "kubectl=${VER}" >/dev/null
+      sudo -E apt-get install -y -q "kubelet=${VER}" "kubectl=${VER}" >/dev/null
       sudo apt-mark hold kubeadm kubelet kubectl >/dev/null
       sudo systemctl daemon-reload
       sudo systemctl restart kubelet
