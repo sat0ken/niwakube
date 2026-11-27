@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/netip"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -247,7 +248,19 @@ func TestUserDataRegistryMirror(t *testing.T) {
 	if !strings.Contains(fs["/etc/containerd/certs.d/registry.k8s.io/hosts.toml"].Content, `server = "https://registry.k8s.io"`) {
 		t.Error("registry.k8s.io must be mirrored")
 	}
-	if !strings.Contains(fs[installPath].Content, `config_path = "/etc/containerd/certs.d"`) {
-		t.Error("containerd must read certs.d")
+	// 既定の config.toml の空の config_path (1.x は ""、2.x は '') を、どちらも certs.d にする
+	script := fs[installPath].Content
+	i := strings.Index(script, "sed -i -E \"s#config_path")
+	if i < 0 {
+		t.Fatalf("no config_path rewrite:\n%s", script)
+	}
+	line := script[i : i+strings.Index(script[i:], "\n")]
+	for _, in := range []string{`  config_path = ""`, `  config_path = ''`} {
+		cmd := exec.Command("bash", "-c", strings.Replace(strings.Replace(line, " /etc/containerd/config.toml", "", 1), "sed -i ", "sed ", 1))
+		cmd.Stdin = strings.NewReader(in + "\n")
+		out, err := cmd.Output()
+		if err != nil || strings.TrimSpace(string(out)) != "config_path = '/etc/containerd/certs.d'" {
+			t.Errorf("%s -> %q %v", in, out, err)
+		}
 	}
 }

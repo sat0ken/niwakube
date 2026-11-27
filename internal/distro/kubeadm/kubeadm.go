@@ -327,8 +327,8 @@ retry $APT update
 retry $APT install -y containerd apt-transport-https ca-certificates curl gpg
 mkdir -p /etc/containerd
 containerd config default >/etc/containerd/config.toml
-# レジストリのミラーの設定 (/etc/containerd/certs.d) を読ませる (containerd 2.x は既定で読む。1.x は空なので入れる)
-sed -i 's#config_path = ""#config_path = "/etc/containerd/certs.d"#' /etc/containerd/config.toml
+# レジストリのミラーの設定 (/etc/containerd/certs.d) を読ませる。既定の設定では空 (1.x は "", 2.x は '') なので入れる
+sed -i -E "s#config_path = (\"\"|'')#config_path = '/etc/containerd/certs.d'#" /etc/containerd/config.toml
 sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
 {{.Containerd}}systemctl restart containerd
 systemctl enable containerd
