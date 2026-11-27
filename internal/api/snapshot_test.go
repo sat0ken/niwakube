@@ -41,18 +41,19 @@ func TestSnapshotAPI(t *testing.T) {
 		t.Errorf("restore: %d %s", resp.StatusCode, body)
 	}
 	waitNoOperation(t, base)
-	for name, c := range map[string]struct {
-		method, path, body string
-		want               int
+	// 順番が意味を持つ (消したあとにもう一度消す) ので、スライスで順に試す
+	for _, c := range []struct {
+		name, method, path, body string
+		want                     int
 	}{
-		"duplicate":       {http.MethodPost, "/snapshots", `{"name":"s1"}`, http.StatusConflict},
-		"bad name":        {http.MethodPost, "/snapshots", `{"name":"S 1"}`, http.StatusBadRequest},
-		"restore unknown": {http.MethodPost, "/snapshots/nope/restore", "", http.StatusNotFound},
-		"delete":          {http.MethodDelete, "/snapshots/s1", "", http.StatusNoContent},
-		"delete again":    {http.MethodDelete, "/snapshots/s1", "", http.StatusNotFound},
+		{"duplicate", http.MethodPost, "/snapshots", `{"name":"s1"}`, http.StatusConflict},
+		{"bad name", http.MethodPost, "/snapshots", `{"name":"S 1"}`, http.StatusBadRequest},
+		{"restore unknown", http.MethodPost, "/snapshots/nope/restore", "", http.StatusNotFound},
+		{"delete", http.MethodDelete, "/snapshots/s1", "", http.StatusNoContent},
+		{"delete again", http.MethodDelete, "/snapshots/s1", "", http.StatusNotFound},
 	} {
 		if resp, body := do(t, c.method, base+c.path, c.body); resp.StatusCode != c.want {
-			t.Errorf("%s: %d %s", name, resp.StatusCode, body)
+			t.Errorf("%s: %d %s", c.name, resp.StatusCode, body)
 		}
 	}
 	if resp, _ := do(t, http.MethodGet, ts.URL+"/api/clusters/nope/snapshots", ""); resp.StatusCode != http.StatusNotFound {
