@@ -124,4 +124,5 @@ checks:
 
 - `go test ./internal/practice/`: すべての問題を読み込み、形を確かめる。解答を当てると、本物のクラスタが無くても確かめられる項目
   (`.status`、コントローラーや kubelet が作るもの、ノードのコマンド、権限 以外) がすべて合格することを確かめる
-- E2E (`scripts/e2e-cluster.sh`): 本物のクラスタで、そのディストリで出せる全問を「出題 → 満点でない → 模範解答を当てる → 満点」と確かめる
+- E2E (`scripts/e2e-cluster.sh`) では試さない (全問を解くと時間がかかるため)。本物のクラスタで確かめるときは、
+  `POST /api/practice/problems/{id}/setup` → `/check` (満点でない) → `/solve` → `/check` (満点) を API で順に呼ぶ

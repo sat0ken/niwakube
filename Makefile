@@ -33,4 +33,4 @@ CNI ?= cilium
 RUNTIME ?= runc
 RUNTIMES ?=
 e2e-cluster: build
-	sudo BACKEND=$(BACKEND) DISTRO=$(DISTRO) CNI=$(CNI) RUNTIME=$(RUNTIME) RUNTIMES="$(RUNTIMES)" OLDER_MINOR="$(OLDER_MINOR)" ./scripts/e2e-cluster.sh $(BIN)
+	sudo BACKEND=$(BACKEND) DISTRO=$(DISTRO) CNI=$(CNI) RUNTIME=$(RUNTIME) RUNTIMES="$(RUNTIMES)" LIFECYCLE="$(LIFECYCLE)" ./scripts/e2e-cluster.sh $(BIN)

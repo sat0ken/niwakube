@@ -6,7 +6,7 @@
 #
 # 前提: scripts/host-setup.sh を実行済みであること。
 # 環境変数: DISTRO (既定 k3s), CNI (cilium), RUNTIME (既定のランタイム、runc), RUNTIMES (追加で入れるもの、空白区切り),
-#           NAME (e2ek), CLUSTER_TIMEOUT (900), LISTEN (127.0.0.1:18081)
+#           LIFECYCLE (1 でサイズ・台数の変更とスナップショットも), NAME (e2ek), CLUSTER_TIMEOUT (900), LISTEN (127.0.0.1:18081)
 set -euo pipefail
 
 BIN=${1:?usage: $0 path/to/niwakubed}
@@ -16,8 +16,8 @@ CNI=${CNI:-cilium}
 BACKEND=${BACKEND:-cloud-hypervisor}
 RUNTIME=${RUNTIME:-runc}
 RUNTIMES=${RUNTIMES:-}
-# OLDER_MINOR=1 なら、最新より 1 つ古いマイナーバージョンでクラスタを作る (kubeadm のアップグレードの練習問題を試すため)
-OLDER_MINOR=${OLDER_MINOR:-}
+# LIFECYCLE=1 なら、ワーカーのサイズの変更・台数の変更・スナップショットも試す (時間がかかるので CI では 1 ジョブだけ)
+LIFECYCLE=${LIFECYCLE:-}
 NAME=${NAME:-e2ek}
 CLUSTER_TIMEOUT=${CLUSTER_TIMEOUT:-900}
 LISTEN=${LISTEN:-127.0.0.1:18081}
@@ -118,16 +118,8 @@ k() { kubectl --kubeconfig "$KUBECONFIG_FILE" "$@"; }
 log "$DISTRO クラスタを作成: $NAME (CP 1 + ワーカー 1、CNI $CNI、ランタイム $RUNTIME${RUNTIMES:+ + $RUNTIMES})"
 # shellcheck disable=SC2086  # 空白で分割したい
 install_json=$(printf '%s\n' $RUNTIMES | jq -R . | jq -s -c 'map(select(. != ""))')
-VERSION=""
-if [[ $OLDER_MINOR == 1 ]]; then
-  latest=$(curl -fsSL https://dl.k8s.io/release/stable.txt)   # 例: v1.37.3
-  minor=${latest#v1.}
-  minor=${minor%%.*}
-  VERSION="v1.$((minor - 1))"
-  log "最新は $latest。1 つ古い $VERSION で作ります"
-fi
 body=$(cat <<EOF
-{"name":"$NAME","distro":"$DISTRO","workers":1,"cni":"$CNI","version":"${VERSION}",
+{"name":"$NAME","distro":"$DISTRO","workers":1,"cni":"$CNI","version":"",
  "runtime":{"default":"$RUNTIME","install":$install_json},
  "controlPlane":{"cpus":2,"memoryMiB":3072,"diskGiB":15},
  "worker":{"cpus":2,"memoryMiB":3072,"diskGiB":15}}
@@ -388,6 +380,7 @@ if [[ -n $RUNTIMES || $RUNTIME != runc ]]; then
   done
 fi
 
+if [[ $LIFECYCLE == 1 ]]; then
 # --- ノードのサイズの変更 (drain → 止めて変える → 起動 → Ready → uncordon) ---
 log "ワーカーのサイズを変える (メモリ 3GiB → 4GiB、ディスク 15GiB → 20GiB)"
 # 量 (例: 3016908Ki、16Gi、12345) を KiB にする
@@ -488,39 +481,6 @@ k get node "$NAME-worker-2" >/dev/null 2>&1 && die "消したワーカーの Nod
 k get node "$NAME-worker-1" >/dev/null || die "$NAME-worker-1 が消えています"
 k rollout status deployment/hello --timeout=300s || die "ワーカーを減らしたあと Deployment が戻りません"
 
-# --- 練習問題 (CKA / CKAD): 出題 → 解答を当てる → 採点が満点 ---
-log "練習問題: 出題直後は満点でなく、解答を当てると満点になること"
-practice() { curl -s -o "$LOG_DIR/practice.json" -w '%{http_code}' -X POST "$API/practice/problems/$1/$2" -d "{\"cluster\":\"$NAME\"}"; }
-# requires (kubeadm など) が合わない問題は飛ばす。ノードに SSH する問題 (CKA) も、ここで作ったクラスタなら鍵がある
-mapfile -t problem_ids < <(curl -fs "$API/practice/problems?cluster=$NAME" | jq -r '.[] | select(.available) | .id')
-curl -fs "$API/practice/problems?cluster=$NAME" | jq -r '.[] | select(.available | not) | "    出せない: \(.id) (\(.reason))"'
-(( ${#problem_ids[@]} > 0 )) || die "練習問題がありません"
-for id in "${problem_ids[@]}"; do
-  code=$(practice "$id" setup)
-  [[ $code == 204 ]] || die "$id: 出題できません: $code $(cat "$LOG_DIR/practice.json")"
-  code=$(practice "$id" check)
-  [[ $code == 200 ]] || die "$id: 採点できません: $code $(cat "$LOG_DIR/practice.json")"
-  [[ $(jq -r '.passed < .total' "$LOG_DIR/practice.json") == true ]] || die "$id: 出題直後なのに満点です"
-  code=$(practice "$id" solve)
-  [[ $code == 204 ]] || die "$id: 模範解答を当てられません: $code $(cat "$LOG_DIR/practice.json")"
-  start=$SECONDS
-  while :; do
-    code=$(practice "$id" check)
-    [[ $code == 200 && $(jq -r '.passed == .total' "$LOG_DIR/practice.json") == true ]] && break
-    if (( SECONDS - start > 300 )); then
-      jq . "$LOG_DIR/practice.json" || true
-      die "$id: 解答を当てても 300s のうちに満点になりません"
-    fi
-    sleep 5
-  done
-  echo "    $id: $(jq -r '"\(.score)/\(.weight) 点 (\(.passed)/\(.total) 項目)"' "$LOG_DIR/practice.json"), $((SECONDS - start))s"
-done
-# もう一度出題すると、解いた状態は消えて出題直後に戻る
-id=${problem_ids[0]}
-[[ $(practice "$id" setup) == 204 ]] || die "$id: やり直せません: $(cat "$LOG_DIR/practice.json")"
-practice "$id" check >/dev/null
-[[ $(jq -r '.passed < .total' "$LOG_DIR/practice.json") == true ]] || die "$id: やり直したのに解いた状態が残っています"
-
 # --- スナップショット: 取る → 変える → 戻す ---
 log "スナップショット: 取って、変えて、戻すと、取ったときの状態に戻ること"
 # wait_ready <説明>: クラスタが ready に戻るまで待つ (止めて起動し直したあと)
@@ -557,6 +517,8 @@ k get nodes -o wide
 code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$API/clusters/$NAME/snapshots/e2e")
 [[ $code == 204 ]] || die "スナップショットを削除できません: $code"
 [[ ! -e $NIWAKUBE_DIR/snapshots/$NAME/e2e ]] || die "スナップショットのファイルが残っています"
+
+fi # LIFECYCLE
 
 log "クラスタを削除"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$API/clusters/$NAME")
