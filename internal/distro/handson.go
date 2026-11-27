@@ -56,7 +56,6 @@ kubectl get crd gateways.gateway.networking.k8s.io >/dev/null
 func handsonAfterCilium() string {
 	return fmt.Sprintf(`
 # --- ハンズオン: Envoy Gateway と Gateway ---
-export HOME=/root
 if ! command -v helm >/dev/null 2>&1; then
   ver=$(curl -fsSL --retry 5 https://get.helm.sh/helm-latest-version)
   tmp=$(mktemp -d)

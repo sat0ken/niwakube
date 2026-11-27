@@ -163,6 +163,8 @@ func (a Addons) CiliumInstallScript(kubeconfig, apiHost string, apiPort int) str
 # niwakube: Cilium のインストール
 set -euxo pipefail
 export KUBECONFIG=%s
+# cloud-init のスクリプトには HOME が無い。cilium CLI はバージョンを指定すると chart を HOME のキャッシュに取る
+export HOME=/root
 arch=$(dpkg --print-architecture)
 tarball=cilium-linux-${arch}.tar.gz
 tmp=$(mktemp -d)

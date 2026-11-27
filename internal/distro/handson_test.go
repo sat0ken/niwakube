@@ -24,6 +24,7 @@ func TestHandsonCiliumScript(t *testing.T) {
 		"name: handson-gateway",
 		"nodePort: 30080",
 		"insecureNodePort: 31080",
+		"export HOME=/root", // cilium CLI と helm は HOME にキャッシュを置く (cloud-init には HOME が無い)
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("hands-on script lacks %q", want)
