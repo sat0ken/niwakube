@@ -35,7 +35,7 @@ setup: |
 task: |
   Namespace frontend の Deployment web を、Service web-svc で公開してください。
 
-  - 種類は NodePort。ノードのポート 30080 で受ける
+  - 種類は NodePort。ノードのポート 30880 で受ける
   - Service のポートは 80、転送先は Pod の 8080
   - Deployment web の Pod 2 つすべてに振り分けられること
 checks:
@@ -60,13 +60,13 @@ checks:
     name: web-svc
     jsonpath: '{.spec.ports[0].targetPort}'
     equals: "8080"
-  - description: ノードのポートが 30080
+  - description: ノードのポートが 30880
     apiVersion: v1
     kind: Service
     namespace: frontend
     name: web-svc
     jsonpath: '{.spec.ports[0].nodePort}'
-    equals: "30080"
+    equals: "30880"
   - description: Pod 2 つがエンドポイントになっている
     apiVersion: discovery.k8s.io/v1
     kind: EndpointSlice
@@ -81,7 +81,7 @@ solution: |
   kubectl -n frontend expose deployment web --name=web-svc --type=NodePort --port=80 --target-port=8080 \
     --dry-run=client -o yaml > svc.yaml
 
-  svc.yaml の ports に nodePort: 30080 を足して kubectl apply -f svc.yaml します。
+  svc.yaml の ports に nodePort: 30880 を足して kubectl apply -f svc.yaml します。
 
   expose は Deployment の selector (app: web) をそのまま Service の selector にします。
   kubectl -n frontend get endpointslices で Pod の IP が 2 つ入っていることを確かめます。
@@ -99,4 +99,4 @@ answer: |
     ports:
       - port: 80
         targetPort: 8080
-        nodePort: 30080
+        nodePort: 30880
