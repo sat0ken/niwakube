@@ -299,6 +299,12 @@ func (s *Server) deleteCluster(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, err)
 		return
 	}
+	// 消したクラスタのターミナルのホーム (ハンズオン用のクラスタで残しているもの) も消す
+	if s.opts.Terminal != nil {
+		if homes, err := s.clusters.TerminalHomes(r.Context()); err == nil {
+			s.opts.Terminal.PruneHomes(homes)
+		}
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -406,6 +412,15 @@ func (s *Server) terminal(w http.ResponseWriter, r *http.Request) {
 	} else if !errors.Is(err, backend.ErrNotSupported) {
 		s.writeError(w, err)
 		return
+	}
+	opts, err := s.clusters.TerminalOptions(r.Context(), name)
+	if err != nil {
+		s.writeError(w, err)
+		return
+	}
+	f.HomeID = opts.HomeID
+	if len(opts.HostNames) > 0 {
+		f.Hosts = []terminal.HostAlias{{IP: opts.HostIP, Names: opts.HostNames}}
 	}
 	s.opts.Terminal.Serve(w, r, f)
 }

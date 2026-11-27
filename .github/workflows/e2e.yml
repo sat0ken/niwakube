@@ -40,7 +40,7 @@ jobs:
           path: e2e-logs/
 
   cluster:
-    name: Cluster (${{ matrix.distro }}, ${{ matrix.cni }}, ${{ matrix.runtime }})
+    name: Cluster (${{ matrix.profile || matrix.distro }}, ${{ matrix.cni }}, ${{ matrix.runtime }})
     runs-on: ubuntu-26.04
     timeout-minutes: 40
     strategy:
@@ -52,6 +52,8 @@ jobs:
           - { distro: kubeadm, cni: cilium, runtime: crun, runtimes: "crun youki" }
           - { distro: k3s, cni: flannel, runtime: runc, runtimes: "" }
           - { distro: talos, cni: cilium, runtime: runc, runtimes: "" }
+          # CloudNative Days のハンズオン用のクラスタ (kubeadm v1.36、Envoy Gateway、Cilium Ingress、ポートの転送)
+          - { distro: kubeadm, cni: cilium, runtime: runc, runtimes: "", profile: cnd-handson }
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
@@ -60,14 +62,14 @@ jobs:
       - name: Host setup
         run: ./scripts/ci-host-setup.sh
       - name: niwakubed E2E (cluster)
-        run: make e2e-cluster DISTRO=${{ matrix.distro }} CNI=${{ matrix.cni }} RUNTIME=${{ matrix.runtime }} RUNTIMES="${{ matrix.runtimes }}" LIFECYCLE="${{ matrix.lifecycle }}"
+        run: make e2e-cluster PROFILE="${{ matrix.profile }}" DISTRO=${{ matrix.distro }} CNI=${{ matrix.cni }} RUNTIME=${{ matrix.runtime }} RUNTIMES="${{ matrix.runtimes }}" LIFECYCLE="${{ matrix.lifecycle }}"
       - name: Collect logs
         if: failure()
         run: ./scripts/ci-collect-logs.sh
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: e2e-logs-${{ matrix.distro }}-${{ matrix.cni }}-${{ matrix.runtime }}
+          name: e2e-logs-${{ matrix.profile || matrix.distro }}-${{ matrix.cni }}-${{ matrix.runtime }}
           path: e2e-logs/
 
   # systemd-nspawn のバックエンド (コンテナ型のノード。Docker も KVM も使わない)

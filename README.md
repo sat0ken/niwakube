@@ -329,6 +329,17 @@ Web UI の「練習」で、本物のクラスタを使って CKA / CKAD の練�
 - 練習用のクラスタを 1 つ作っておくとよい (試験と同じ kubeadm、ワーカー 1 台以上がおすすめ)
 - 問題の書き方と仕組みは [docs/practice.md](docs/practice.md)
 
+### CloudNative Days のハンズオン
+
+[cloudnativedaysjp/cnd-handson](https://github.com/cloudnativedaysjp/cnd-handson) (『一日で学ぶクラウドネイティブ技術実践ハンズオン』) を、
+niwakube のクラスタで進められる。Web UI の「クラスタを作る」で用途に「CloudNative Days のハンズオン」を選ぶ (API は `"profile":"cnd-handson"`)。
+
+- chapter_cluster-create で kind に入れるものを、クラスタの作成と一緒に入れる: kubeadm の Kubernetes v1.36 (CP 1 台 + ワーカー 2 台)、
+  Gateway API の CRD、ハンズオンと同じ設定の Cilium 1.20、Envoy Gateway と Gateway `handson-gateway`
+- kind のポートの割り当ての代わりに、ミニPC の 80・8080・8443・18080・18443 番を CP の NodePort に転送する (同時に 1 クラスタまで)
+- ターミナルのホームは閉じても残り、`*.example.com` はミニPC に向いている。helmfile・cilium・hubble は `scripts/host-setup.sh` が入れる (`HANDSON_TOOLS=` で入れない)
+- 章ごとの読み替え (`helmfile sync -f helm/helmfile.yaml` は実行しない、`docker exec kind-worker` は `ssh worker` など) は [docs/cnd-handson.md](docs/cnd-handson.md)
+
 ### Web UI のターミナル
 
 クラスタの画面の「ターミナル」を押すと、ブラウザの中でそのクラスタの kubeconfig を設定したシェルが開く
@@ -337,6 +348,7 @@ Web UI の「練習」で、本物のクラスタを使って CKA / CKAD の練�
 - シェルは root では動かさない。`systemd-run` の一時ユーザー (DynamicUser) とサンドボックスで動き、
   OS は読み取り専用、`/var/lib/niwakube` (VM のディスクや秘密鍵) と `/run/niwakube`、`/home` は見えない
 - kubeconfig は systemd の credential として渡し、ホーム (`/run/niwakube-term-*`) はセッションごとで、閉じると消える
+  (ハンズオン用のクラスタは `/var/lib/niwakube-term/<クラスタ>-<作成時刻>` に残し、クラスタを消すと一緒に消す)
 - WebSocket は Origin が Web UI と同じでなければ拒否する。同時に開けるのは 8 つまで
 - kubectl / talosctl / helm は `scripts/host-setup.sh` が入れる (`KUBECTL_VERSION`、`TALOS_VERSIONS`、`HELM_VERSION` (既定は最新) で決め、SHA256 を確かめる)
 

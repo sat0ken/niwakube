@@ -20,6 +20,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -41,6 +42,12 @@ type Config struct {
 	MaxSessions int
 	// Hidden はシェルから見えなくするパス (Sandbox のとき)。
 	Hidden []string
+	// HomeBase は残すホーム (Files.HomeID) を置くディレクトリ。systemd の StateDirectory (DynamicUser) の実体で、
+	// 既定 /var/lib/private/niwakube-term。PruneHomes が使う
+	HomeBase string
+	// HostsDir は Files.Hosts のファイルを置くディレクトリ (既定 /run/niwakube-term-hosts)。
+	// Hidden (/run/niwakube) の外に置き、一時ユーザーが読めるようにする (秘密は入っていない)
+	HostsDir string
 }
 
 // Files はシェルに渡すクラスタの設定。
@@ -50,6 +57,52 @@ type Files struct {
 	Talosconfig []byte // Talos のクラスタのみ
 	// SSH があれば、シェルから ssh <ノード名> でそのクラスタのノードに入れる (鍵はクラスタごと)
 	SSH *SSH
+	// HomeID があれば、ホームを閉じても残す (HomeBase/HomeID)。クラスタを作り直したら別のホームになるよう、
+	// クラスタの名前と作成時刻から作る。空ならセッションだけのホーム (閉じると消える)
+	HomeID string
+	// Hosts はシェルの /etc/hosts に足す名前 (Sandbox のとき)
+	Hosts []HostAlias
+}
+
+// HostAlias は /etc/hosts の 1 行。
+type HostAlias struct {
+	IP    netip.Addr
+	Names []string
+}
+
+var hostNameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$`)
+
+func validHosts(hs []HostAlias) error {
+	for _, h := range hs {
+		if !h.IP.IsValid() || len(h.Names) == 0 {
+			return errors.New("hosts: bad entry")
+		}
+		for _, n := range h.Names {
+			if !hostNameRe.MatchString(n) {
+				return fmt.Errorf("hosts: bad name %q", n)
+			}
+		}
+	}
+	return nil
+}
+
+// hostsFile は、ホストの /etc/hosts に hs を足したもの。
+func hostsFile(hs []HostAlias) string {
+	base, _ := os.ReadFile("/etc/hosts")
+	var b strings.Builder
+	if len(base) == 0 {
+		b.WriteString("127.0.0.1 localhost\n::1 localhost ip6-localhost ip6-loopback\n")
+	} else {
+		b.Write(base)
+		if base[len(base)-1] != '\n' {
+			b.WriteByte('\n')
+		}
+	}
+	b.WriteString("# niwakube のターミナルで足したもの\n")
+	for _, h := range hs {
+		fmt.Fprintf(&b, "%s %s\n", h.IP, strings.Join(h.Names, " "))
+	}
+	return b.String()
 }
 
 // SSH はノードに入るための鍵と接続先。
@@ -106,6 +159,12 @@ func New(cfg Config, log *slog.Logger) *Manager {
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
+	if cfg.HostsDir == "" {
+		cfg.HostsDir = "/run/niwakube-term-hosts"
+	}
+	if cfg.HomeBase == "" {
+		cfg.HomeBase = "/var/lib/private/" + homeState
+	}
 	m := &Manager{cfg: cfg, log: log}
 	m.command = m.shellCommand
 	return m
@@ -117,9 +176,30 @@ func (m *Manager) Cleanup(ctx context.Context) {
 		_ = exec.CommandContext(ctx, "systemctl", "stop", unitPrefix+"*.service").Run()
 	}
 	_ = os.RemoveAll(m.cfg.Dir)
+	_ = os.RemoveAll(m.cfg.HostsDir)
 }
 
 const unitPrefix = "niwakube-term-"
+
+// homeState は残すホームの StateDirectory (/var/lib/<homeState>/<HomeID>)。
+const homeState = "niwakube-term"
+
+var homeIDRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$`)
+
+// PruneHomes は、keep に無い残したホーム (消したクラスタのもの) を消す。起動時に呼ぶ。
+func (m *Manager) PruneHomes(keep []string) {
+	entries, err := os.ReadDir(m.cfg.HomeBase)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !slices.Contains(keep, e.Name()) {
+			if err := os.RemoveAll(filepath.Join(m.cfg.HomeBase, e.Name())); err == nil {
+				m.log.Info("terminal: removed the home of a deleted cluster", "home", e.Name())
+			}
+		}
+	}
+}
 
 type session struct {
 	id      string
@@ -127,6 +207,8 @@ type session struct {
 	cluster string
 	talos   bool
 	ssh     bool
+	homeID  string // 空でなければ残すホーム
+	hosts   string // 空でなければ /etc/hosts にするファイル
 }
 
 func (s *session) unit() string { return unitPrefix + s.id }
@@ -152,11 +234,13 @@ func sshConfig(x *SSH) string {
 }
 
 // bashrc はシェルの起動時に読む設定。credential を書き込める HOME にコピーし、補完とプロンプトを設定する。
-func bashrc(cluster string, talos bool, ssh *SSH) string {
+func bashrc(cluster string, talos bool, ssh *SSH, keepHome bool) string {
 	var b strings.Builder
-	b.WriteString(`# niwakube のターミナル (このセッションだけのホーム。閉じると消える)
+	b.WriteString(`# niwakube のターミナル
 [ -f /etc/bash.bashrc ] && . /etc/bash.bashrc
 umask 077
+# sudo は使えないので、自分で入れるコマンドは ~/bin に置く
+export PATH="$HOME/bin:$HOME/.local/bin:$PATH"
 mkdir -p "$HOME/.kube"
 cp "$CREDENTIALS_DIRECTORY/kubeconfig" "$HOME/.kube/config"
 export KUBECONFIG="$HOME/.kube/config"
@@ -196,8 +280,15 @@ echo "niwakube: クラスタ %s のターミナル (kubectl / k`, cluster, clust
 	if talos {
 		b.WriteString(` / talosctl`)
 	}
-	b.WriteString(` / helm が使えます。ホームはこのセッションだけのもので、閉じると消えます)"
+	if keepHome {
+		b.WriteString(` / helm が使えます。ホームは閉じても残ります)"
+# 自分で書いた設定 (ハンズオンの echo ... >> ~/.bashrc など)
+[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"
 `)
+	} else {
+		b.WriteString(` / helm が使えます。ホームはこのセッションだけのもので、閉じると消えます)"
+`)
+	}
 	if ssh != nil {
 		var names []string
 		for _, h := range ssh.Hosts {
@@ -221,6 +312,16 @@ func (m *Manager) shellCommand(s *session) *exec.Cmd {
 	}
 	unit := s.unit()
 	home := "/run/" + unit
+	var extra []string
+	if s.homeID != "" {
+		// 残すホーム。同じクラスタのターミナルは同じ一時ユーザーにする (ホームの持ち主が変わらないように)
+		state := homeState + "/" + s.homeID
+		home = "/var/lib/" + state
+		extra = append(extra, "--property=StateDirectory="+state, "--property=User=nkterm-"+s.cluster)
+	}
+	if s.hosts != "" {
+		extra = append(extra, "--property=BindReadOnlyPaths="+s.hosts+":/etc/hosts")
+	}
 	args := []string{
 		"--pty", "--quiet", "--collect", "--unit=" + unit,
 		"--property=Description=niwakube terminal (" + s.cluster + ")",
@@ -247,6 +348,7 @@ func (m *Manager) shellCommand(s *session) *exec.Cmd {
 		"--setenv=LANG=C.UTF-8",
 		"--setenv=NIWAKUBE_CLUSTER=" + s.cluster,
 	}
+	args = append(args, extra...)
 	if s.talos {
 		args = append(args, "--property=LoadCredential=talosconfig:"+filepath.Join(s.dir, "talosconfig"))
 	}
@@ -293,12 +395,19 @@ func (m *Manager) prepare(f Files) (*session, error) {
 			return nil, err
 		}
 	}
-	s := &session{id: f.Cluster + "-" + hex.EncodeToString(b[:]), cluster: f.Cluster, talos: len(f.Talosconfig) > 0, ssh: f.SSH != nil}
+	if f.HomeID != "" && !homeIDRe.MatchString(f.HomeID) {
+		return nil, fmt.Errorf("invalid home id %q", f.HomeID)
+	}
+	if err := validHosts(f.Hosts); err != nil {
+		return nil, err
+	}
+	s := &session{id: f.Cluster + "-" + hex.EncodeToString(b[:]), cluster: f.Cluster, talos: len(f.Talosconfig) > 0, ssh: f.SSH != nil,
+		homeID: f.HomeID}
 	s.dir = filepath.Join(m.cfg.Dir, s.id)
 	if err := os.MkdirAll(s.dir, 0o700); err != nil {
 		return nil, err
 	}
-	files := map[string][]byte{"kubeconfig": f.Kubeconfig, "bashrc": []byte(bashrc(f.Cluster, s.talos, f.SSH))}
+	files := map[string][]byte{"kubeconfig": f.Kubeconfig, "bashrc": []byte(bashrc(f.Cluster, s.talos, f.SSH, s.homeID != ""))}
 	if s.talos {
 		files["talosconfig"] = f.Talosconfig
 	}
@@ -311,7 +420,27 @@ func (m *Manager) prepare(f Files) (*session, error) {
 			return nil, err
 		}
 	}
+	if len(f.Hosts) > 0 {
+		s.hosts = filepath.Join(m.cfg.HostsDir, s.id)
+		err := os.MkdirAll(m.cfg.HostsDir, 0o755)
+		if err == nil {
+			// 一時ユーザーが読めるように 0644
+			err = os.WriteFile(s.hosts, []byte(hostsFile(f.Hosts)), 0o644)
+		}
+		if err != nil {
+			m.remove(s)
+			return nil, err
+		}
+	}
 	return s, nil
+}
+
+// remove はセッションのファイルを消す。
+func (m *Manager) remove(s *session) {
+	_ = os.RemoveAll(s.dir)
+	if s.hosts != "" {
+		_ = os.Remove(s.hosts)
+	}
 }
 
 // control はブラウザから届く制御のメッセージ (テキストのフレーム)。端末の入力はバイナリのフレームで届く。
@@ -335,7 +464,7 @@ func (m *Manager) Serve(w http.ResponseWriter, r *http.Request, f Files) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	defer os.RemoveAll(s.dir)
+	defer m.remove(s)
 
 	conn, err := websocket.Accept(w, r, nil) // 既定で Origin と Host が違えば 403
 	if err != nil {

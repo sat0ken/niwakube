@@ -2,6 +2,7 @@ package api
 
 import (
 	"bufio"
+	"net"
 	"net/http"
 	"os"
 	"runtime"
@@ -20,6 +21,8 @@ type HostInfo struct {
 	Memory    MemoryInfo    `json:"memory"`
 	Disk      DiskInfo      `json:"disk"`
 	Allocated AllocatedInfo `json:"allocated"`
+	// LANAddress はデフォルトルートの出口のアドレス (LAN の PC から見たミニPC の IP)。わからなければ空
+	LANAddress string `json:"lanAddress,omitempty"`
 }
 
 type MemoryInfo struct {
@@ -80,6 +83,7 @@ func diskInfo(path string) DiskInfo {
 func (s *Server) hostInfo(w http.ResponseWriter, r *http.Request) {
 	h := HostInfo{Version: s.opts.Version, CPUs: runtime.NumCPU(), Memory: readMeminfo(), Disk: diskInfo(s.opts.DataDir)}
 	h.Hostname, _ = os.Hostname()
+	h.LANAddress = lanAddress()
 	vms, err := s.svc.List(r.Context())
 	if err != nil {
 		s.writeError(w, err)
@@ -94,4 +98,17 @@ func (s *Server) hostInfo(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, h)
+}
+
+// lanAddress はデフォルトルートの出口のアドレスを返す (UDP は connect してもパケットを送らない)。
+func lanAddress() string {
+	c, err := net.Dial("udp4", "192.0.2.1:9") // TEST-NET-1。経路を調べるだけ
+	if err != nil {
+		return ""
+	}
+	defer c.Close()
+	if a, ok := c.LocalAddr().(*net.UDPAddr); ok && !a.IP.IsLoopback() {
+		return a.IP.String()
+	}
+	return ""
 }

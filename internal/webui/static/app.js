@@ -220,6 +220,11 @@ async function viewNewCluster() {
       <div class="row"><label for="f-name">名前</label>
         <div><input id="f-name" name="name" required pattern="[a-z0-9]([a-z0-9\\-]{0,18}[a-z0-9])?" placeholder="demo" maxlength="20">
         <div class="hint">英小文字・数字・ハイフン、20 文字まで。ノードは「名前-cp-1」「名前-worker-1」…になる</div></div></div>
+      <div class="row"><label for="f-profile">用途</label>
+        <div><select id="f-profile" name="profile">
+          <option value="">普通のクラスタ</option>
+          <option value="cnd-handson">CloudNative Days のハンズオン (cnd-handson)</option></select>
+        <div class="hint" id="f-profile-note"></div></div></div>
       <div class="row"><label for="f-distro">ディストリ</label>
         <div class="inline"><select id="f-distro" name="distro">${distros.map((d) => html`<option value="${d.name}" ${d.name === def.name ? raw("selected") : ""}>${d.name}</option>`)}</select>
         <input id="f-version" name="version" placeholder="${def.defaultVersion}"><span class="hint">空なら既定のバージョン</span></div></div>
@@ -252,11 +257,26 @@ async function viewNewCluster() {
   }));
 
   const sync = () => {
+    // ハンズオン用は kind と同じ kubeadm、ハンズオンの設定の Cilium + Hubble に決まっている
+    const handson = form.profile.value === "cnd-handson";
+    if (handson) {
+      form.distro.value = "kubeadm";
+      form.cni.value = "cilium";
+      form.hubble.checked = true;
+    }
+    form.distro.disabled = handson;
+    form.cni.disabled = handson;
+    document.getElementById("f-profile-note").innerHTML = handson
+      ? html`<a href="https://github.com/cloudnativedaysjp/cnd-handson" target="_blank" rel="noopener">cnd-handson</a> の
+        chapter_cluster-create の環境 (Kubernetes v1.36、Cilium、Envoy Gateway、Gateway handson-gateway) を作り、
+        ホストの 80・8080・8443・18080・18443 番をクラスタにつなぎます (ハンズオン用のクラスタは同時に 1 つまで)。
+        Prometheus や KubeVirt まで進めるなら、ワーカーは large がおすすめです。`
+      : "";
     const d = distros.find((x) => x.name === form.distro.value);
-    form.version.placeholder = d.defaultVersion;
+    form.version.placeholder = handson ? "v1.36" : d.defaultVersion;
     const talos = d.name === "talos";
     const cilium = form.cni.value === "cilium";
-    form.hubble.disabled = !cilium;
+    form.hubble.disabled = !cilium || handson;
     if (!cilium) form.hubble.checked = false;
     form.runtimeDefault.disabled = talos;
     form.querySelectorAll("input[name=install]").forEach((i) => { i.disabled = talos; if (talos) i.checked = false; });
@@ -267,6 +287,7 @@ async function viewNewCluster() {
   };
   form.distro.addEventListener("change", sync);
   form.cni.addEventListener("change", sync);
+  form.profile.addEventListener("change", sync);
   sync();
 
   form.addEventListener("submit", async (e) => {
@@ -287,6 +308,7 @@ async function viewNewCluster() {
       runtime: { default: form.runtimeDefault.value, install },
     };
     if (form.version.value.trim()) body.version = form.version.value.trim();
+    if (form.profile.value) body.profile = form.profile.value;
     try {
       const c = await api("POST", "/api/clusters", body);
       toast(`クラスタ ${c.name} を作りました。構築は数分かかります`);
@@ -321,12 +343,39 @@ async function loadSerial(name) {
   }
 }
 
+// ハンズオン (cnd-handson) のクラスタで、PC の hosts と、資料の読み替えを案内する
+const HANDSON_HOSTS = ["hello-world", "rollout", "blue-green", "app", "prometheus", "grafana", "jaeger", "argocd",
+  "app-argocd", "app-cicd", "dev-kustomize-argocd", "prd-kustomize-argocd", "helm-argocd", "app-preview-argocd",
+  "headlamp", "argocdupdate", "app-rollouts", "app-preview-rollouts", "kiali", "kiali-ambient", "app-cilium",
+  "hubble-cilium", "pyroscope", "troubleshoot", "cnd-web"];
+
+function handsonCard(c, host) {
+  const ip = (host && host.lanAddress) || "<ミニPC の IP>";
+  const hosts = HANDSON_HOSTS.map((h) => `${ip}    ${h}.example.com`).join("\n");
+  return html`<div class="card">
+    <h2>CloudNative Days のハンズオン</h2>
+    <p><a href="https://github.com/cloudnativedaysjp/cnd-handson" target="_blank" rel="noopener">cnd-handson</a> の
+      chapter_cluster-create (kind・Cilium・Envoy Gateway・Gateway) までは済んでいます。
+      <code>helmfile sync -f helm/helmfile.yaml</code> は実行せず、「アプリケーションのデプロイ」から進めてください。
+      ほかの読み替えは <a href="https://github.com/sat0ken/niwakube/blob/main/docs/cnd-handson.md" target="_blank" rel="noopener">docs/cnd-handson.md</a> にあります。</p>
+    <ul class="hint">
+      <li>作業は「ターミナル」で。ホームは閉じても残り、<code>git clone https://github.com/cloudnativedaysjp/cnd-handson.git</code> から始めます。
+        helmfile・cilium・hubble も入っています。sudo は使えないので、資料の <code>sudo mv ... /usr/local/bin</code> は <code>~/bin</code> に置きます</li>
+      <li>ターミナルでは <code>*.example.com</code> がミニPC に向いているので、資料の <code>curl</code> はそのまま動きます</li>
+      <li><code>docker exec kind-worker</code> は <code>ssh worker</code>、kind のノード名 (kind-control-plane など) は ${c.name}-cp-1 などに読み替えます</li>
+    </ul>
+    <p>ブラウザで開く PC の hosts (Windows は <code>C:\\Windows\\System32\\drivers\\etc\\hosts</code>、Mac / Linux は <code>/etc/hosts</code>) に足すもの:</p>
+    <pre class="log">${hosts}</pre>
+  </div>`;
+}
+
 async function viewCluster(name) {
   setNav("");
-  const [c, forwards, snapshots] = await Promise.all([
+  const [c, forwards, snapshots, host] = await Promise.all([
     api("GET", `/api/clusters/${encodeURIComponent(name)}`),
     api("GET", `/api/clusters/${encodeURIComponent(name)}/forwards`),
     api("GET", `/api/clusters/${encodeURIComponent(name)}/snapshots`).catch(() => null), // 使えなければカードを出さない
+    api("GET", "/api/host").catch(() => null),
   ]);
   if (!serialState.machine || !c.machines.some((m) => m.name === serialState.machine)) {
     serialState.machine = c.machines[0] ? c.machines[0].name : "";
@@ -353,6 +402,7 @@ async function viewCluster(name) {
       <p class="hint spaced-top">「SSH 経由用の kubeconfig${c.distro === "talos" ? " / talosconfig" : ""}」は、PC で <code>ssh -N -D 1080 &lt;ユーザー&gt;@&lt;ミニPC&gt;</code> をつないだまま、
         PC の kubectl${c.distro === "talos" ? " / talosctl" : ""} で使います (クラスタがいくつあっても SSH は 1 本でよい)。ミニPC の上では普通の kubeconfig を使います。</p>
     </div>
+    ${c.profile === "cnd-handson" ? handsonCard(c, host) : ""}
     <div class="card">
       <h2>概要</h2>
       <dl class="kv">

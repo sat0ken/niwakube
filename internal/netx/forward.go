@@ -34,8 +34,9 @@ func (f Forwarder) Ruleset(forwards []PortForward) string {
 		target := fmt.Sprintf("%s:%d", fw.TargetIP, fw.TargetPort)
 		// LAN など外から入ってきたもの
 		fmt.Fprintf(&pre, "    iifname != %q %s dport %d dnat to %s\n", f.Bridge, fw.Proto, fw.HostPort, target)
-		// ホスト自身からホストのアドレス宛てに接続したもの
-		fmt.Fprintf(&out, "    fib daddr type local %s dport %d dnat to %s\n", fw.Proto, fw.HostPort, target)
+		// ホスト自身からホストのアドレス宛てに接続したもの。127.0.0.1 は除く
+		// (localhost で待つもの、たとえば SSH トンネルで開く Web UI の 127.0.0.1:8080 を横取りしないように)
+		fmt.Fprintf(&out, "    fib daddr type local ip daddr != 127.0.0.0/8 %s dport %d dnat to %s\n", fw.Proto, fw.HostPort, target)
 	}
 	return fmt.Sprintf(`table ip niwakube_fwd
 delete table ip niwakube_fwd

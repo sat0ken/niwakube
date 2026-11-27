@@ -1,0 +1,45 @@
+# niwakube: CloudNative Days のハンズオン (cloudnativedaysjp/cnd-handson) の
+# chapter_cluster-create/helm/values/cilium.values.yaml と同じ設定。
+# k8sServiceHost (kind-control-plane → CP の IP)、ipam、kubeProxyReplacement、l2announcements などは niwakube が --set で渡す。
+rollOutCiliumPods: true
+# ハンズオンの入り口は Envoy Gateway。chapter_cilium で Cilium の Gateway API も使うので有効にする
+gatewayAPI:
+  enabled: true
+ingressController:
+  enabled: true
+  default: true
+  enforceHttps: false
+  loadbalancerMode: shared
+  service:
+    type: NodePort
+    insecureNodePort: 31080
+    secureNodePort: 31443
+operator:
+  rollOutPods: true
+  prometheus:
+    enabled: true
+prometheus:
+  enabled: true
+hubble:
+  enabled: true
+  relay:
+    enabled: true
+  ui:
+    enabled: true
+    podAnnotations:
+      policy.cilium.io/proxy-visibility: "<Ingress/8081/TCP/HTTP>"
+  metrics:
+    enableOpenMetrics: true
+    enabled:
+    - dns
+    - drop
+    - tcp
+    - flow
+    - port-distribution
+    - icmp
+    - httpV2:exemplars=true;labelsContext=source_ip,source_namespace,source_workload,destination_ip,destination_namespace,destination_workload,traffic_direction
+socketLB:
+  hostNamespaceOnly: true
+# Istio の CNI と同居させる
+cni:
+  exclusive: false
