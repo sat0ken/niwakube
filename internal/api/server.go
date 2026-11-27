@@ -17,6 +17,7 @@ import (
 	"github.com/sat0ken/niwakube/internal/ipam"
 	"github.com/sat0ken/niwakube/internal/machine"
 	"github.com/sat0ken/niwakube/internal/practice"
+	"github.com/sat0ken/niwakube/internal/regcache"
 	"github.com/sat0ken/niwakube/internal/store"
 	"github.com/sat0ken/niwakube/internal/terminal"
 )
@@ -40,6 +41,8 @@ type Options struct {
 	Terminal *terminal.Manager
 	// Practice は CKA / CKAD の練習問題。nil なら使えない (501)
 	Practice *practice.Service
+	// Cache はコンテナイメージのキャッシュ。nil なら使えない (501)
+	Cache *regcache.Cache
 }
 
 func New(svc *machine.Service, clusters *cluster.Service, log *slog.Logger, opts ...Options) *Server {
@@ -75,6 +78,8 @@ func New(svc *machine.Service, clusters *cluster.Service, log *slog.Logger, opts
 //	DELETE /api/clusters/{name}
 //	POST   /api/clusters/{name}/start
 //	POST   /api/clusters/{name}/stop
+//	GET    /api/cache                           コンテナイメージのキャッシュの大きさと使われ方
+//	DELETE /api/cache                           キャッシュを空にする
 //	GET    /api/practice/problems[?cluster=demo] CKA / CKAD の練習問題の一覧 (cluster を付けると出せるかも返す)
 //	GET    /api/practice/problems/{id}          問題文・ヒント・解説
 //	POST   /api/practice/problems/{id}/setup    {"cluster":"demo"} 問題の Namespace を作り直して出題する
@@ -129,6 +134,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/clusters/{name}/snapshots", s.createSnapshot)
 	mux.HandleFunc("POST /api/clusters/{name}/snapshots/{snap}/restore", s.restoreSnapshot)
 	mux.HandleFunc("DELETE /api/clusters/{name}/snapshots/{snap}", s.deleteSnapshot)
+	mux.HandleFunc("GET /api/cache", s.cacheStats)
+	mux.HandleFunc("DELETE /api/cache", s.clearCache)
 	mux.HandleFunc("GET /api/practice/problems", s.listProblems)
 	mux.HandleFunc("GET /api/practice/problems/{id}", s.getProblem)
 	mux.HandleFunc("POST /api/practice/problems/{id}/setup", s.setupProblem)

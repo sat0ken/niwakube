@@ -230,3 +230,24 @@ func TestUserDataContainer(t *testing.T) {
 		t.Error("VM config must not have container settings")
 	}
 }
+
+func TestUserDataRegistryMirror(t *testing.T) {
+	k := New()
+	sec, _ := k.GenerateSecrets("demo")
+	c := &distro.Cluster{Name: "demo", Version: "v1.37", APIAddr: netip.MustParseAddr("172.30.1.11"), Secrets: sec, RegistryMirror: "http://172.30.0.1:5000",
+		Addons: distro.Addons{CNI: distro.CNIFlannel, DefaultRuntime: distro.RuntimeRunc}}
+	w, err := k.UserData(c, &distro.Node{Name: "demo-worker-1", Role: distro.RoleWorker, Index: 1, IP: netip.MustParseAddr("172.30.1.21")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs := files(t, w)
+	if got := fs["/etc/containerd/certs.d/docker.io/hosts.toml"].Content; got != "server = \"https://registry-1.docker.io\"\n\n[host.\"http://172.30.0.1:5000\"]\n  capabilities = [\"pull\", \"resolve\"]\n" {
+		t.Errorf("docker.io hosts.toml:\n%s", got)
+	}
+	if !strings.Contains(fs["/etc/containerd/certs.d/registry.k8s.io/hosts.toml"].Content, `server = "https://registry.k8s.io"`) {
+		t.Error("registry.k8s.io must be mirrored")
+	}
+	if !strings.Contains(fs[installPath].Content, `config_path = "/etc/containerd/certs.d"`) {
+		t.Error("containerd must read certs.d")
+	}
+}

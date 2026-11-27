@@ -31,6 +31,17 @@ type Secrets struct {
 	NodeSSHKey string `json:"nodeSSHKey,omitempty"`
 }
 
+// MirroredRegistries は RegistryMirror を通して取るレジストリ。
+var MirroredRegistries = []string{"docker.io", "registry.k8s.io", "ghcr.io", "quay.io", "gcr.io"}
+
+// RegistryServer は containerd の hosts.toml の server (元のレジストリの URL)。
+func RegistryServer(registry string) string {
+	if registry == "docker.io" {
+		return "https://registry-1.docker.io"
+	}
+	return "https://" + registry
+}
+
 // Cluster は Distro がノードの設定を作るのに必要な、クラスタの情報。
 type Cluster struct {
 	Name    string
@@ -38,6 +49,9 @@ type Cluster struct {
 	APIAddr netip.Addr // API サーバーのアドレス (いまは CP 1 台目。HA にしたら VIP)
 	Secrets *Secrets
 	Addons  Addons // CNI とコンテナランタイム
+	// RegistryMirror はコンテナイメージのキャッシュ (niwakubed のミラー) の URL (例: http://172.30.0.1:5000)。
+	// 空ならミラーを使わない。ミラーに届かなければ、containerd は元のレジストリから取る
+	RegistryMirror string
 	// Container はノードがコンテナ (systemd-nspawn など) で動くとき true。ホストのカーネルを共有するので、
 	// kube-proxy に conntrack の上限 (ホスト全体の設定) を変えさせない、事前チェックを緩めるなどの調整をする
 	Container bool
