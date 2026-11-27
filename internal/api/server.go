@@ -80,6 +80,7 @@ func New(svc *machine.Service, clusters *cluster.Service, log *slog.Logger, opts
 //	POST   /api/clusters/{name}/stop
 //	GET    /api/cache                           コンテナイメージのキャッシュの大きさと使われ方
 //	DELETE /api/cache                           キャッシュを空にする
+//	POST   /api/cache/prune                     いま自動の削除を動かす (使われていないもの、上限、ディスクの空き)
 //	GET    /api/practice/problems[?cluster=demo] CKA / CKAD の練習問題の一覧 (cluster を付けると出せるかも返す)
 //	GET    /api/practice/problems/{id}          問題文・ヒント・解説
 //	POST   /api/practice/problems/{id}/setup    {"cluster":"demo"} 問題の Namespace を作り直して出題する
@@ -136,6 +137,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/clusters/{name}/snapshots/{snap}", s.deleteSnapshot)
 	mux.HandleFunc("GET /api/cache", s.cacheStats)
 	mux.HandleFunc("DELETE /api/cache", s.clearCache)
+	mux.HandleFunc("POST /api/cache/prune", s.pruneCache)
 	mux.HandleFunc("GET /api/practice/problems", s.listProblems)
 	mux.HandleFunc("GET /api/practice/problems/{id}", s.getProblem)
 	mux.HandleFunc("POST /api/practice/problems/{id}/setup", s.setupProblem)

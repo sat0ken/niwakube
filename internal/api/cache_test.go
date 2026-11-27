@@ -21,6 +21,9 @@ func TestCacheAPI(t *testing.T) {
 	if resp, body := do(t, http.MethodGet, ts.URL+"/api/cache", ""); resp.StatusCode != http.StatusOK || !strings.Contains(body, `"blobs":0`) {
 		t.Errorf("stats: %d %s", resp.StatusCode, body)
 	}
+	if resp, body := do(t, http.MethodPost, ts.URL+"/api/cache/prune", ""); resp.StatusCode != http.StatusOK || !strings.Contains(body, `"removed":0`) {
+		t.Errorf("prune: %d %s", resp.StatusCode, body)
+	}
 	if resp, _ := do(t, http.MethodDelete, ts.URL+"/api/cache", ""); resp.StatusCode != http.StatusNoContent {
 		t.Errorf("clear: %d", resp.StatusCode)
 	}

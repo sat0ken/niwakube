@@ -100,7 +100,8 @@ const isEditing = () => document.activeElement && document.activeElement.closest
 
 async function viewHome() {
   setNav("home");
-  const [host, clusters] = await Promise.all([api("GET", "/api/host"), api("GET", "/api/clusters")]);
+  const [host, clusters, cache] = await Promise.all([api("GET", "/api/host"), api("GET", "/api/clusters"),
+    api("GET", "/api/cache").catch(() => null)]); // キャッシュが無効なら出さない
   document.getElementById("host-name").textContent = `${host.hostname} · ${host.version}`;
   const memUsed = host.memory.totalMiB - host.memory.availableMiB;
   const diskUsed = host.disk.totalGiB - host.disk.freeGiB;
@@ -130,6 +131,12 @@ async function viewHome() {
         <div class="value">${host.allocated.running} / ${host.allocated.machines}</div>
         <div class="sub">実行中 / 全体</div>
       </div>
+      ${cache ? html`<div class="card stat">
+        <div class="label">イメージのキャッシュ</div>
+        <div class="value">${(cache.bytes / 2 ** 30).toFixed(1)}${cache.maxBytes ? ` / ${(cache.maxBytes / 2 ** 30).toFixed(0)}` : ""} GiB</div>
+        <div class="sub">レイヤー ${cache.blobs} 個 · 起動してからキャッシュで返した量 ${(cache.bytesFromCache / 2 ** 30).toFixed(1)} GiB${cache.lastPrune && cache.lastPrune.removed ? ` · 前回の整理で ${cache.lastPrune.removed} 個消去` : ""}</div>
+        ${cache.maxBytes ? html`<div class="meter"><span data-pct="${pct(cache.bytes, cache.maxBytes)}"></span></div>` : ""}
+      </div>` : ""}
     </div>
     <div class="card">
       <h1>クラスタ <a class="button" href="#/clusters/new">クラスタを作る</a></h1>

@@ -203,6 +203,7 @@ kubectl --kubeconfig demo.kubeconfig -n kube-system port-forward svc/hubble-ui 1
 | POST | `/api/clusters/{name}/resize` | ロールのノードのサイズを変える (下記、202) |
 | POST | `/api/clusters/{name}/scale` | ワーカーの台数を変える (`{"workers":3}`、下記、202) |
 | GET / DELETE | `/api/cache` | コンテナイメージのキャッシュの大きさと使われ方 / 空にする (下記) |
+| POST | `/api/cache/prune` | キャッシュの自動の削除を今すぐ行う (下記) |
 | GET / POST | `/api/clusters/{name}/snapshots` | スナップショットの一覧 / 取る (`{"name":"..."}`、下記、202) |
 | POST / DELETE | `/api/clusters/{name}/snapshots/{snap}[/restore]` | スナップショットに戻す (202) / 消す |
 | GET | `/api/clusters/{name}/kubeconfig` | admin の kubeconfig |
@@ -282,6 +283,11 @@ niwakubed はコンテナイメージのプルスルーキャッシュ (レジ�
 - 同じレイヤーを複数のノードが同時に取りにきても、上流からは 1 回だけ取る
 - キャッシュが止まっていても、ノードは元のレジストリから取る。この機能より前に作ったクラスタは使わない
 - 大きさと使われ方は `GET /api/cache`、空にするのは `DELETE /api/cache`。止めるときは `--registry-cache=false`
+- 古いものは 1 時間ごとに自動で消す。使った時刻 (キャッシュから返した時刻) を覚えておき、
+  - `--registry-cache-max-age` (既定 720h = 30 日) のあいだ使われていないレイヤーとマニフェストを消す
+  - 合計が `--registry-cache-max-gib` (既定 30 GiB、0 で上限なし) を超えたら、使われていない順にその 9 割まで消す
+  - キャッシュを置いたファイルシステムの空きが 1 割を切ったら、空きが 1 割に戻るまで使われていない順に消す (VM のディスクを優先する)
+- 今すぐ整理するのは `POST /api/cache/prune`。消してしまったものは、次に使うときに上流から取り直す
 
 ```bash
 curl -s localhost:8080/api/cache | jq .

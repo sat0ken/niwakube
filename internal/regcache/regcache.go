@@ -49,6 +49,10 @@ type Config struct {
 	// Insecure は HTTP で取りにいくレジストリ (テスト用)
 	Insecure []string
 	Log      *slog.Logger
+	// 自動の削除 (prune.go)。0 ならその決まりは使わない
+	MaxBytes     int64         // 合計の上限
+	MaxAge       time.Duration // これより長く使われていないものは消す
+	MinFreeRatio float64       // ファイルシステムの空きがこの割合を切ったら消す (0.1 = 10%)
 }
 
 // Cache はプルスルーキャッシュ。http.Handler として /v2/ を受ける。
@@ -59,6 +63,11 @@ type Cache struct {
 	mu       sync.Mutex
 	inflight map[string]*flight // 上流から取っている途中のレイヤー (ダイジェストごと)
 	trans    map[string]cachedTransport
+
+	pruneMu   sync.Mutex // Prune と Clear を同時に動かさない
+	statsMu   sync.Mutex
+	lastPrune *PruneResult
+	diskUsage func(path string) (free, total uint64, err error)
 
 	stats struct {
 		manifestHits, manifestMisses atomic.Int64
@@ -102,7 +111,7 @@ func New(cfg Config) (*Cache, error) {
 			return nil, err
 		}
 	}
-	return &Cache{cfg: cfg, log: cfg.Log, inflight: map[string]*flight{}, trans: map[string]cachedTransport{}}, nil
+	return &Cache{cfg: cfg, log: cfg.Log, inflight: map[string]*flight{}, trans: map[string]cachedTransport{}, diskUsage: diskUsage}, nil
 }
 
 // registryError はレジストリの API の形のエラーを返す。404 なら containerd は元のレジストリに取りにいく。
@@ -225,6 +234,7 @@ func (c *Cache) loadManifest(digest string) ([]byte, string, bool) {
 	if err != nil || json.Unmarshal(raw, &meta) != nil {
 		return nil, "", false
 	}
+	touch(c.manifestPath(digest)) // 使った時刻 (自動の削除で、使われていない順に消すため)
 	return body, meta.MediaType, true
 }
 
@@ -419,7 +429,9 @@ func (c *Cache) serveBlobFile(w http.ResponseWriter, r *http.Request, digest str
 	if r.Method != http.MethodHead {
 		c.stats.bytesFromCache.Add(fi.Size())
 	}
-	http.ServeContent(w, r, "", fi.ModTime(), f) // Range と HEAD も扱う
+	modTime := fi.ModTime()
+	touch(c.blobPath(digest))               // 使った時刻
+	http.ServeContent(w, r, "", modTime, f) // Range と HEAD も扱う
 	return true
 }
 
@@ -506,6 +518,11 @@ type Stats struct {
 	BytesFromCache int64 `json:"bytesFromCache"` // キャッシュから返したレイヤーの量 (niwakubed を起動してから)
 	BytesFromUp    int64 `json:"bytesFromUpstream"`
 	StaleServed    int64 `json:"staleServed"` // 上流に届かず、保存してあったタグを返した回数
+	// 自動の削除の設定と、前回の結果
+	MaxBytes     int64        `json:"maxBytes,omitempty"`
+	MaxAge       string       `json:"maxAge,omitempty"`
+	MinFreeRatio float64      `json:"minFreeRatio,omitempty"`
+	LastPrune    *PruneResult `json:"lastPrune,omitempty"`
 }
 
 // Stats は今の状態を返す。
@@ -515,7 +532,14 @@ func (c *Cache) Stats() (Stats, error) {
 		ManifestHits: c.stats.manifestHits.Load(), ManifestMisses: c.stats.manifestMisses.Load(),
 		BytesFromCache: c.stats.bytesFromCache.Load(), BytesFromUp: c.stats.bytesFromUp.Load(),
 		StaleServed: c.stats.staleServed.Load(),
+		MaxBytes:    c.cfg.MaxBytes, MinFreeRatio: c.cfg.MinFreeRatio,
 	}
+	if c.cfg.MaxAge > 0 {
+		st.MaxAge = c.cfg.MaxAge.String()
+	}
+	c.statsMu.Lock()
+	st.LastPrune = c.lastPrune
+	c.statsMu.Unlock()
 	for dir, count := range map[string]*int{"blobs": &st.Blobs, "manifests": &st.Manifests} {
 		err := filepath.WalkDir(filepath.Join(c.cfg.Dir, dir), func(_ string, d fs.DirEntry, err error) error {
 			if err != nil || d.IsDir() {
@@ -538,6 +562,8 @@ func (c *Cache) Stats() (Stats, error) {
 
 // Clear は保存しているものをすべて消す。
 func (c *Cache) Clear() error {
+	c.pruneMu.Lock()
+	defer c.pruneMu.Unlock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, d := range []string{"blobs", "manifests", "tags"} {
