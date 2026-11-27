@@ -123,6 +123,7 @@ type Service struct {
 
 	drainTimeout     time.Duration
 	nodeReadyTimeout time.Duration
+	readyWait        time.Duration // スナップショットを取る・戻したあと、ready に戻るのを待つ時間 (練習問題)
 
 	// 裏で動く処理 (bootstrap、アドオンの適用) の設定と、止めるための context
 	postCreateTimeout  time.Duration
@@ -162,7 +163,7 @@ func NewService(cfg Config, st *store.Store, ms *machine.Service, prober Prober,
 	return &Service{
 		cfg: cfg, store: st, machines: ms, distros: m, defDist: distros[0].Name(),
 		prober: prober, log: log, adminCert: map[string]pki.KeyPair{}, addonState: map[string]string{},
-		opState: map[string]string{}, nodeOps: cfg.NodeOps, drainTimeout: 5 * time.Minute, nodeReadyTimeout: 10 * time.Minute,
+		opState: map[string]string{}, nodeOps: cfg.NodeOps, drainTimeout: 5 * time.Minute, nodeReadyTimeout: 10 * time.Minute, readyWait: 15 * time.Minute,
 		postCreateTimeout: 30 * time.Minute, postCreateInterval: 10 * time.Second, bg: bg, stop: stop,
 	}, nil
 }

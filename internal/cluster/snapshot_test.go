@@ -192,3 +192,40 @@ func TestSnapshotErrors(t *testing.T) {
 		t.Errorf("disabled: %v", err)
 	}
 }
+
+func TestSnapshotAndWait(t *testing.T) {
+	ctx := context.Background()
+	cs, _, _, pr := newTest(t)
+	cs.cfg.SnapshotDir = filepath.Join(t.TempDir(), "snapshots")
+	cs.postCreateInterval = 10 * time.Millisecond
+	if _, err := cs.Create(ctx, CreateRequest{Name: "demo", Workers: intp(1)}); err != nil {
+		t.Fatal(err)
+	}
+	pr.mu.Lock()
+	pr.err, pr.ready = nil, 2 // Kubernetes の API に届き、2 台とも Ready
+	pr.mu.Unlock()
+
+	if has, err := cs.HasSnapshot(ctx, "demo", "practice-x"); err != nil || has {
+		t.Fatalf("before: %v %v", has, err)
+	}
+	if err := cs.SnapshotAndWait(ctx, "demo", "practice-x"); err != nil {
+		t.Fatal(err)
+	}
+	if has, _ := cs.HasSnapshot(ctx, "demo", "practice-x"); !has {
+		t.Error("snapshot must exist")
+	}
+	if cs.operation("demo") != "" {
+		t.Error("SnapshotAndWait must return after the operation finished")
+	}
+	if err := cs.RestoreAndWait(ctx, "demo", "practice-x"); err != nil {
+		t.Fatal(err)
+	}
+	// ready に戻らなければ時間切れ
+	pr.mu.Lock()
+	pr.err = errors.New("connection refused")
+	pr.mu.Unlock()
+	cs.readyWait = 200 * time.Millisecond
+	if err := cs.RestoreAndWait(ctx, "demo", "practice-x"); err == nil {
+		t.Error("want a timeout while the cluster is not ready")
+	}
+}

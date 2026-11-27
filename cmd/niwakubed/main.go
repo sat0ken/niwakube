@@ -40,6 +40,24 @@ import (
 // version はビルド時に -ldflags "-X main.version=..." で埋め込む。
 var version = "dev"
 
+// practiceSnapshots は練習問題が使う、クラスタ 1 つのスナップショットの操作。
+type practiceSnapshots struct {
+	clusters *cluster.Service
+	name     string
+}
+
+func (p practiceSnapshots) Has(ctx context.Context, snap string) (bool, error) {
+	return p.clusters.HasSnapshot(ctx, p.name, snap)
+}
+
+func (p practiceSnapshots) Take(ctx context.Context, snap string) error {
+	return p.clusters.SnapshotAndWait(ctx, p.name, snap)
+}
+
+func (p practiceSnapshots) Restore(ctx context.Context, snap string) error {
+	return p.clusters.RestoreAndWait(ctx, p.name, snap)
+}
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "niwakubed:", err)
@@ -178,11 +196,11 @@ func run() error {
 		if err != nil {
 			return nil, err
 		}
-		d, err := clusters.DistroOf(ctx, name)
+		d, ver, err := clusters.DistroOf(ctx, name)
 		if err != nil {
 			return nil, err
 		}
-		t := &practice.Target{Kube: kc2, Distro: d}
+		t := &practice.Target{Kube: kc2, Distro: d, Version: ver, Snapshots: practiceSnapshots{clusters, name}}
 		a, err := clusters.NodeAccess(ctx, name)
 		switch {
 		case err == nil:
@@ -193,7 +211,7 @@ func run() error {
 				ips[n.Alias] = n.IP
 			}
 			t.Run = func(ctx context.Context, node, script string) (*nodeexec.Result, error) {
-				ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+				ctx, cancel := context.WithTimeout(ctx, 20*time.Minute) // アップグレードの模範解答は数分かかる
 				defer cancel()
 				return nodeexec.Run(ctx, ips[node], a.User, a.Key, script)
 			}

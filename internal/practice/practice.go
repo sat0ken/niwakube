@@ -63,6 +63,12 @@ type Problem struct {
 	// Answer と AnswerRun は問題を解いた状態にする (CI で満点になることを確かめる。Web UI の「模範解答を当てる」)
 	Answer    string `json:"answer,omitempty"`
 	AnswerRun []Step `json:"answerRun,omitempty"`
+	// ResetSnapshot が true の問題は、元に戻せない変更 (アップグレードなど) をさせる。最初の出題でクラスタの
+	// スナップショット (practice-<id>) を取り、2 回目からはそれに戻してから出題する
+	ResetSnapshot bool `json:"resetSnapshot,omitempty"`
+	// NeedsOlderVersion が true の問題は、マイナーバージョンを指定して作ったクラスタ (v1.36 など) が要る。
+	// {{version}} (v1.36) と {{nextVersion}} (v1.37) が使える
+	NeedsOlderVersion bool `json:"needsOlderVersion,omitempty"`
 }
 
 // Step はノードで動かすコマンド。Node は cp / worker (1 台目)、cp2 / worker2 ... (2 台目以降)。
@@ -115,13 +121,18 @@ type Summary struct {
 	Weight   int    `json:"weight"`
 	Requires string `json:"requires,omitempty"`
 	Nodes    bool   `json:"nodes,omitempty"` // ノードに入る問題 (ノードの鍵があるクラスタが要る)
+	// Available と Reason は、クラスタを指定して一覧を取ったときだけ入る (そのクラスタで出せるか、出せない理由)
+	Available *bool  `json:"available,omitempty"`
+	Reason    string `json:"reason,omitempty"`
 }
 
 var (
 	idRe   = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 	nodeRe = regexp.MustCompile(`^(cp|worker)[0-9]*$`)
 	saRe   = regexp.MustCompile(`^[a-z0-9-]+/[a-z0-9.-]+$`)
-	phRe   = regexp.MustCompile(`\{\{\s*([a-z0-9]+)\s*\}\}`)
+	phRe   = regexp.MustCompile(`\{\{\s*([a-zA-Z0-9]+)\s*\}\}`)
+	// minorRe はクラスタを作ったときのバージョンの指定 (v1.36、v1.36.2)
+	minorRe = regexp.MustCompile(`^v1\.([0-9]+)(\.[0-9]+)?$`)
 )
 
 // Load は埋め込んだ問題をすべて読み、形を確かめる。
@@ -248,7 +259,7 @@ func (c *Check) validate() error {
 
 // usesNodes はノードに入る (ノードの名前を使う) 問題か。cleanup は後片付けなので数えない。
 func (p *Problem) usesNodes() bool {
-	if len(p.NodeSetup)+len(p.AnswerRun) > 0 || phRe.MatchString(p.Answer) || phRe.MatchString(p.Setup) {
+	if len(p.NodeSetup)+len(p.AnswerRun) > 0 || nodePh(p.Answer) || nodePh(p.Setup) {
 		return true
 	}
 	for _, c := range p.Checks {
@@ -256,7 +267,17 @@ func (p *Problem) usesNodes() bool {
 		if c.Equals != nil {
 			eq = *c.Equals
 		}
-		if c.Node != "" || phRe.MatchString(c.Name+c.Selector+c.FieldSelector+c.JSONPath+eq) {
+		if c.Node != "" || nodePh(c.Name+c.Selector+c.FieldSelector+c.JSONPath+eq+c.Contains) {
+			return true
+		}
+	}
+	return false
+}
+
+// nodePh は s にノードの名前の置き換え ({{cp}}、{{worker}} など。{{version}} は除く) があるか。
+func nodePh(s string) bool {
+	for _, m := range phRe.FindAllStringSubmatch(s, -1) {
+		if m[1] != "version" && m[1] != "nextVersion" {
 			return true
 		}
 	}
@@ -292,13 +313,42 @@ type Target struct {
 	Nodes map[string]string
 	// Run は別名のノードで script を動かす。ノードに入れないクラスタは nil
 	Run func(ctx context.Context, node, script string) (*nodeexec.Result, error)
+	// Version はクラスタを作ったときのバージョンの指定 (v1.36、stable など)
+	Version string
+	// Snapshots はクラスタのスナップショット。nil なら使えない
+	Snapshots Snapshots
+}
+
+// Snapshots はクラスタのスナップショットの操作。Take と Restore は終わるまで待つ。
+type Snapshots interface {
+	Has(ctx context.Context, name string) (bool, error)
+	Take(ctx context.Context, name string) error
+	Restore(ctx context.Context, name string) error
+}
+
+// versions は {{version}} と {{nextVersion}} の値を返す (マイナーバージョンを指定して作ったクラスタだけ)。
+func (t *Target) versions() (cur, next string, ok bool) {
+	m := minorRe.FindStringSubmatch(t.Version)
+	if m == nil {
+		return "", "", false
+	}
+	var minor int
+	fmt.Sscanf(m[1], "%d", &minor)
+	return fmt.Sprintf("v1.%d", minor), fmt.Sprintf("v1.%d", minor+1), true
 }
 
 // expand は {{cp}} や {{worker}} をノードの名前に置き換える。知らない別名があればエラー。
 func (t *Target) expand(s string) (string, error) {
 	var missing string
+	cur, next, hasVersion := t.versions()
 	out := phRe.ReplaceAllStringFunc(s, func(m string) string {
 		alias := phRe.FindStringSubmatch(m)[1]
+		switch {
+		case alias == "version" && hasVersion:
+			return cur
+		case alias == "nextVersion" && hasVersion:
+			return next
+		}
 		if name, ok := t.Nodes[alias]; ok {
 			return name
 		}
@@ -390,13 +440,64 @@ func (s *Service) target(ctx context.Context, cluster string, p *Problem) (*Targ
 	if err != nil {
 		return nil, err
 	}
-	if p.Requires != "" && t.Distro != p.Requires {
-		return nil, fmt.Errorf("%s needs a %s cluster (%s is %s): %w", p.ID, p.Requires, cluster, t.Distro, ErrUnsupported)
-	}
-	if p.usesNodes() && t.Run == nil {
-		return nil, fmt.Errorf("%s needs ssh access to the nodes, which %s does not have (create a new cluster): %w", p.ID, cluster, ErrUnsupported)
+	if reason := unsupported(t, p); reason != "" {
+		return nil, fmt.Errorf("%s: %s: %w", p.ID, reason, ErrUnsupported)
 	}
 	return t, nil
+}
+
+// unsupported はクラスタ t で問題 p を出せない理由を返す (出せるなら空)。
+func unsupported(t *Target, p *Problem) string {
+	switch {
+	case p.Requires != "" && t.Distro != p.Requires:
+		return fmt.Sprintf("%s のクラスタが要ります (このクラスタは %s)", p.Requires, t.Distro)
+	case p.usesNodes() && t.Run == nil:
+		return "ノードに SSH できるクラスタが要ります (v0.4.0 より前に作ったクラスタにはノードの鍵が無いので、作り直してください)"
+	case p.ResetSnapshot && t.Snapshots == nil:
+		return "スナップショットが使えません"
+	}
+	if _, _, ok := t.versions(); p.NeedsOlderVersion && !ok {
+		v := t.Version
+		if v == "" {
+			v = "stable"
+		}
+		return fmt.Sprintf("最新より 1 つ古いマイナーバージョンを指定して作ったクラスタが要ります (例: v1.36。このクラスタは %s)", v)
+	}
+	return ""
+}
+
+// ListFor は問題の一覧に、クラスタ cluster で出せるか (Available) と出せない理由 (Reason) を付けて返す。
+func (s *Service) ListFor(ctx context.Context, cluster string) ([]Summary, error) {
+	t, err := s.connect(ctx, cluster)
+	if err != nil {
+		return nil, err
+	}
+	out := s.List()
+	for i := range out {
+		reason := unsupported(t, s.byID[out[i].ID])
+		ok := reason == ""
+		out[i].Available, out[i].Reason = &ok, reason
+	}
+	return out, nil
+}
+
+// resetBySnapshot は、最初の出題ならスナップショットを取り、2 回目からはそれに戻す。
+func resetBySnapshot(ctx context.Context, t *Target, p *Problem) error {
+	name := "practice-" + p.ID
+	has, err := t.Snapshots.Has(ctx, name)
+	if err != nil {
+		return err
+	}
+	if has {
+		if err := t.Snapshots.Restore(ctx, name); err != nil {
+			return fmt.Errorf("restore snapshot %s: %w", name, err)
+		}
+		return nil
+	}
+	if err := t.Snapshots.Take(ctx, name); err != nil {
+		return fmt.Errorf("take snapshot %s: %w", name, err)
+	}
+	return nil
 }
 
 // Setup はノードの後片付けをし、問題の Namespace を消して (消え終わるのを待って) から、setup と nodeSetup を適用する。
@@ -419,6 +520,13 @@ func (s *Service) Setup(ctx context.Context, cluster, id string) error {
 			if err := t.runSteps(ctx, q.ID+" cleanup", q.Cleanup, true); err != nil {
 				return err
 			}
+		}
+	}
+	// 元に戻せない変更をさせる問題は、スナップショットで出題前の状態に戻す (初回は取る)。
+	// 後片付けのあとに取るので、ほかの問題の変更 (cordon など) は入らない
+	if p.ResetSnapshot {
+		if err := resetBySnapshot(ctx, t, p); err != nil {
+			return err
 		}
 	}
 	for _, ns := range p.Namespaces {
@@ -453,7 +561,33 @@ func (s *Service) Setup(ctx context.Context, cluster, id string) error {
 			return fmt.Errorf("setup: %w", err)
 		}
 	}
+	// 作ったばかりの Namespace には、少し遅れて default の ServiceAccount ができる。それまでは Pod を作れないので待つ
+	for _, ns := range p.Namespaces {
+		if err := s.waitDefaultSA(ctx, t, ns); err != nil {
+			return err
+		}
+	}
 	return t.runSteps(ctx, "nodeSetup", p.NodeSetup, false)
+}
+
+func (s *Service) waitDefaultSA(ctx context.Context, t *Target, ns string) error {
+	wctx, cancel := context.WithTimeout(ctx, s.nsWait)
+	defer cancel()
+	// setup が作らなかった Namespace は待たない
+	if obj, err := t.Kube.Get(wctx, "v1", "Namespace", "", ns); err != nil || obj == nil {
+		return nil
+	}
+	for {
+		sa, err := t.Kube.Get(wctx, "v1", "ServiceAccount", ns, "default")
+		if err == nil && sa != nil {
+			return nil
+		}
+		select {
+		case <-wctx.Done():
+			return fmt.Errorf("namespace %s has no default service account yet: %w", ns, wctx.Err())
+		case <-time.After(s.poll):
+		}
+	}
 }
 
 // Solve は模範解答をクラスタに当てる (answer のマニフェストと answerRun)。
@@ -594,7 +728,11 @@ func evaluate(ctx context.Context, t *Target, chk Check) (bool, string, error) {
 			return false, "値が違います", nil
 		}
 	case chk.Contains != "":
-		if !strings.Contains(got, chk.Contains) {
+		want, err := t.expand(chk.Contains)
+		if err != nil {
+			return false, "", err
+		}
+		if !strings.Contains(got, want) {
 			return false, "値が違います", nil
 		}
 	case chk.Exists:
