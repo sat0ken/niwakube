@@ -55,6 +55,8 @@ type Config struct {
 	NFS NFSConfig
 	// NodeOps はノードの大きさを変えるときの cordon / drain / Ready の確認。nil なら Kubernetes の API を使う
 	NodeOps NodeOps
+	// SnapshotDir はクラスタのスナップショットの置き場所。空ならスナップショットは使えない
+	SnapshotDir string
 }
 
 // NFSConfig はホストの NFS サーバーの設定。クラスタごとに Root/<クラスタ名> を共有する。
@@ -705,6 +707,9 @@ func (s *Service) Delete(ctx context.Context, name string) error {
 	if _, err := s.store.GetCluster(ctx, name); err != nil {
 		return err
 	}
+	if err := s.busy(name); err != nil {
+		return err
+	}
 	return s.deleteLocked(ctx, name)
 }
 
@@ -722,6 +727,12 @@ func (s *Service) deleteLocked(ctx context.Context, name string) error {
 	if len(errs) > 0 {
 		// ノードが残っているうちは登録を消さない (やり直せるように)
 		return errors.Join(errs...)
+	}
+	if s.cfg.SnapshotDir != "" {
+		// スナップショットもクラスタと一緒に消す
+		if err := os.RemoveAll(s.snapshotRoot(name)); err != nil {
+			s.log.Error("remove snapshots", "cluster", name, "err", err)
+		}
 	}
 	if s.nfsEnabled() {
 		// NFS のデータもクラスタと一緒に消す (同じ名前で作り直したときに古いデータが見えないように)
@@ -746,15 +757,30 @@ func (s *Service) deleteLocked(ctx context.Context, name string) error {
 
 // Start はクラスタのノードをすべて起動する。
 func (s *Service) Start(ctx context.Context, name string) (*Cluster, error) {
+	if err := s.busy(name); err != nil {
+		return nil, err
+	}
 	return s.setState(ctx, name, machine.DesiredRunning)
 }
 
 // Stop はクラスタのノードをすべて正常停止する (ワーカーから先に止める)。
 func (s *Service) Stop(ctx context.Context, name string) (*Cluster, error) {
+	if err := s.busy(name); err != nil {
+		return nil, err
+	}
 	return s.setState(ctx, name, machine.DesiredStopped)
 }
 
 func (s *Service) setState(ctx context.Context, name, state string) (*Cluster, error) {
+	rec, err := s.applyState(ctx, name, state)
+	if err != nil {
+		return nil, err
+	}
+	return s.view(ctx, rec)
+}
+
+// applyState はクラスタのノードをすべて起動 / 停止する (起動は CP から、停止はワーカーから)。
+func (s *Service) applyState(ctx context.Context, name, state string) (*store.Cluster, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rec, err := s.store.GetCluster(ctx, name)
@@ -798,7 +824,7 @@ func (s *Service) setState(ctx context.Context, name, state string) (*Cluster, e
 	if len(errs) > 0 {
 		return nil, errors.Join(errs...)
 	}
-	return s.view(ctx, rec)
+	return rec, nil
 }
 
 func addonsOf(cni string, hubble bool, rt store.Runtime) distro.Addons {

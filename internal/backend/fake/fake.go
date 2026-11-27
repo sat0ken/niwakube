@@ -18,8 +18,9 @@ type Backend struct {
 	// Caps を設定すると Capabilities がそれを返す (コンテナ型のバックエンドのまね)。
 	Caps *backend.Capabilities
 
-	mu       sync.Mutex
-	machines map[string]*entry
+	mu        sync.Mutex
+	machines  map[string]*entry
+	snapshots map[string]backend.MachineSpec // Snapshot の保存先 → その時点の spec
 }
 
 type entry struct {
@@ -29,7 +30,39 @@ type entry struct {
 
 var _ backend.Backend = (*Backend)(nil)
 
-func New() *Backend { return &Backend{machines: map[string]*entry{}} }
+func New() *Backend {
+	return &Backend{machines: map[string]*entry{}, snapshots: map[string]backend.MachineSpec{}}
+}
+
+// Snapshot は止まっているノードの spec を覚えておく (ディスクの代わり)。
+func (b *Backend) Snapshot(_ context.Context, name, dest string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	e, err := b.get(name)
+	if err != nil {
+		return err
+	}
+	if e.running {
+		return fmt.Errorf("%s: %w", name, backend.ErrRunning)
+	}
+	b.snapshots[dest] = e.spec
+	return nil
+}
+
+// Restore は覚えておいた spec に戻す (ノードが無ければ作る)。
+func (b *Backend) Restore(_ context.Context, name, src string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	spec, ok := b.snapshots[src]
+	if !ok {
+		return fmt.Errorf("snapshot %s: %w", src, backend.ErrNotFound)
+	}
+	if e, ok := b.machines[name]; ok && e.running {
+		return fmt.Errorf("%s: %w", name, backend.ErrRunning)
+	}
+	b.machines[name] = &entry{spec: spec}
+	return nil
+}
 
 func (b *Backend) Name() string { return Name }
 

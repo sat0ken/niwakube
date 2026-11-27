@@ -21,6 +21,11 @@ import (
 
 func newTestServer(t *testing.T, opts ...Options) *httptest.Server {
 	t.Helper()
+	return newTestServerWith(t, cluster.Config{Subnet: netip.MustParsePrefix("172.30.0.0/16")}, opts...)
+}
+
+func newTestServerWith(t *testing.T, ccfg cluster.Config, opts ...Options) *httptest.Server {
+	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -35,7 +40,7 @@ func newTestServer(t *testing.T, opts ...Options) *httptest.Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cs, err := cluster.NewService(cluster.Config{Subnet: netip.MustParsePrefix("172.30.0.0/16")}, st, svc, nil, nil, k3s.New())
+	cs, err := cluster.NewService(ccfg, st, svc, nil, nil, k3s.New())
 	if err != nil {
 		t.Fatal(err)
 	}
