@@ -22,6 +22,8 @@ TALOS_SCHEMATIC=${TALOS_SCHEMATIC:-376567988ad370138ad8b2698212367b8edcb69b5fd68
 
 # Web UI のターミナルで使う kubectl のバージョン (niwakubed の client-go に合わせる)。talosctl は TALOS_VERSIONS の最初のもの
 KUBECTL_VERSION=${KUBECTL_VERSION:-v1.37.2}
+# Web UI のターミナルで使う helm のバージョン。latest なら get.helm.sh の最新。空にすると入れない
+HELM_VERSION=${HELM_VERSION-latest}
 
 # 動作確認したバージョンに固定する (CI の E2E で検証済み)。最新を試すなら CH_VERSION=latest
 CH_VERSION=${CH_VERSION:-v55.0}
@@ -99,6 +101,28 @@ install_verified() {
 }
 
 # Web UI のターミナル (と手元の操作) で使う kubectl / talosctl
+# install_helm は helm を入れる (get.helm.sh の tar.gz を、同じ場所の SHA256 で確かめる)。
+install_helm() {
+  local arch=$1 ver=$HELM_VERSION sum tmp
+  [[ -n $ver ]] || return 0
+  if [[ $ver == latest ]]; then
+    ver=$(curl -fsSL --retry 3 https://get.helm.sh/helm-latest-version)
+  fi
+  log "helm のインストール ($ver)"
+  sum=$(curl -fsSL --retry 3 "https://get.helm.sh/helm-$ver-linux-$arch.tar.gz.sha256sum" | awk '{print $1}')
+  [[ -n $sum ]] || die "helm $ver の SHA256 が見つかりません"
+  tmp=$(mktemp -d)
+  curl -fsSL --retry 3 -o "$tmp/helm.tar.gz" "https://get.helm.sh/helm-$ver-linux-$arch.tar.gz"
+  if ! echo "$sum  $tmp/helm.tar.gz" | sha256sum -c --quiet -; then
+    rm -rf "$tmp"
+    die "helm の SHA256 が一致しません"
+  fi
+  tar -xzf "$tmp/helm.tar.gz" -C "$tmp" "linux-$arch/helm"
+  install -m 0755 "$tmp/linux-$arch/helm" /usr/local/bin/helm
+  rm -rf "$tmp"
+  echo "    $(helm version --short 2>/dev/null)"
+}
+
 install_clients() {
   local arch sum talos
   arch=$(dpkg --print-architecture)
@@ -106,6 +130,8 @@ install_clients() {
   sum=$(curl -fsSL --retry 3 "https://dl.k8s.io/release/$KUBECTL_VERSION/bin/linux/$arch/kubectl.sha256")
   install_verified "https://dl.k8s.io/release/$KUBECTL_VERSION/bin/linux/$arch/kubectl" "$sum" /usr/local/bin/kubectl
   echo "    $(kubectl version --client 2>/dev/null | head -n1)"
+
+  install_helm "$arch"
 
   talos=${TALOS_VERSIONS%% *}
   [[ -n $talos ]] || return 0

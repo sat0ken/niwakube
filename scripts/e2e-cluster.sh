@@ -176,9 +176,9 @@ k get nodes -o wide
 # 入力はそのまま画面に返る (エコー) ので、確かめる値は計算させて、入力と区別できるようにする
 log "Web UI のターミナルで kubectl を使う (root ではなく、データディレクトリは見えない)"
 TERMCHECK=$(dirname "$BIN")/termcheck
-term_cmd='echo "U=$(id -u)"; ls '"$NIWAKUBE_DIR"' >/dev/null 2>&1 && echo "H=$((1+1))" || echo "H=$((2+2))"; kubectl get nodes -o name | sed "s/^/N:/"; exit'
+term_cmd='echo "U=$(id -u)"; ls '"$NIWAKUBE_DIR"' >/dev/null 2>&1 && echo "H=$((1+1))" || echo "H=$((2+2))"; kubectl get nodes -o name | sed "s/^/N:/"; helm version --short | sed "s/^/HELM:/"; exit'
 if ! "$TERMCHECK" -url "ws://$LISTEN/api/clusters/$NAME/terminal" -send "$term_cmd" \
-  -expect "N:node/" -expect "H=4" -reject "U=0"$'\r' -timeout 90s >"$LOG_DIR/terminal.log" 2>&1; then
+  -expect "N:node/" -expect "H=4" -expect "HELM:v" -reject "U=0"$'\r' -timeout 90s >"$LOG_DIR/terminal.log" 2>&1; then
   cat "$LOG_DIR/terminal.log"
   journalctl --no-pager -n 50 -u 'niwakube-term-*' || true
   die "ターミナルで kubectl が使えません"

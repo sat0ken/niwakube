@@ -147,7 +147,10 @@ func TestLoadEmbedded(t *testing.T) {
 
 // static は本物のクラスタが無くても確かめられる項目か。状態 (.status)、コントローラーや kubelet が作る・変える
 // オブジェクト (selector で選ぶもの、Node、ノードの名前を使うもの)、ノードでのコマンド、権限は E2E で確かめる。
-func static(c Check) bool {
+func static(p *Problem, c Check) bool {
+	if strings.TrimSpace(p.Answer) == "" {
+		return false // 解答がノードのコマンドだけ (helm など) なら、偽のクラスタでは確かめられない
+	}
 	eq := ""
 	if c.Equals != nil {
 		eq = *c.Equals
@@ -172,7 +175,7 @@ func TestAnswersSatisfyChecks(t *testing.T) {
 		}
 		staticPass, staticTotal := 0, 0
 		for i, c := range before.Checks {
-			if static(p.Checks[i]) {
+			if static(p, p.Checks[i]) {
 				staticTotal++
 				if c.Passed {
 					staticPass++
@@ -191,7 +194,7 @@ func TestAnswersSatisfyChecks(t *testing.T) {
 			t.Fatal(err)
 		}
 		for i, c := range after.Checks {
-			if static(p.Checks[i]) && !c.Passed {
+			if static(p, p.Checks[i]) && !c.Passed {
 				t.Errorf("%s: answer fails %q: %s", p.ID, c.Description, c.Message)
 			}
 		}
