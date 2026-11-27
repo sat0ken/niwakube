@@ -161,12 +161,6 @@ while :; do
 done
 log "クラスタの準備完了 ($((SECONDS - start))s)"
 
-# ノードの containerd は niwakubed のイメージのキャッシュをミラーとして使う (届かなければ元のレジストリから取る)。
-# 黙って元のレジストリに逃げていないことを、キャッシュに入ったレイヤーの数で確かめる
-cache=$(curl -fs "$API/cache")
-echo "    イメージのキャッシュ: $(jq -c '{blobs, manifests, bytes, blobHits, blobMisses, manifestHits, manifestMisses}' <<<"$cache")"
-(( $(jq '.blobs' <<<"$cache") > 0 )) || die "ノードがイメージのキャッシュを使っていません"
-
 # --- kubeconfig で操作する ---
 curl -fs "$API/clusters/$NAME/kubeconfig" >"$KUBECONFIG_FILE"
 k get nodes -o wide
@@ -211,6 +205,13 @@ fi
 log "Deployment を作る (kubeadm と Talos は CP に taint があるので、Pod はワーカーに載る)"
 k create deployment hello --image="$TEST_IMAGE" --replicas=2 --port=8080 -- /agnhost netexec --http-port=8080
 k rollout status deployment/hello --timeout=300s
+
+# ノードの containerd は niwakubed のイメージのキャッシュをミラーとして使う (届かなければ元のレジストリから取る)。
+# 黙って元のレジストリに逃げていないことを、キャッシュに入ったレイヤーの数で確かめる。
+# ノードが Ready になった時点ではまだイメージを取っていないことがある (k3s + flannel) ので、Deployment が動いたあとに見る
+cache=$(curl -fs "$API/cache")
+echo "    イメージのキャッシュ: $(jq -c '{blobs, manifests, bytes, blobHits, blobMisses, manifestHits, manifestMisses}' <<<"$cache")"
+(( $(jq '.blobs' <<<"$cache") > 0 )) || die "ノードがイメージのキャッシュを使っていません"
 k get pods -o wide
 
 # probe NAME TARGET NODE: NODE 上の Pod から TARGET (host:port) に TCP 接続できるかを確かめる。
