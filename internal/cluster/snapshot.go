@@ -318,3 +318,60 @@ func (s *Service) DeleteSnapshot(ctx context.Context, cluster, snap string) erro
 	s.log.Info("cluster snapshot deleted", "cluster", cluster, "snapshot", snap)
 	return nil
 }
+
+// HasSnapshot はスナップショットがあるかを返す (練習問題用)。
+func (s *Service) HasSnapshot(ctx context.Context, cluster, snap string) (bool, error) {
+	if err := s.snapshotsEnabled(); err != nil {
+		return false, err
+	}
+	_, err := s.readSnapshot(cluster, snap)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// SnapshotAndWait はスナップショットを取り、クラスタが ready に戻るまで待つ (練習問題用)。
+func (s *Service) SnapshotAndWait(ctx context.Context, cluster, snap string) error {
+	if _, err := s.CreateSnapshot(ctx, cluster, SnapshotRequest{Name: snap}); err != nil {
+		return err
+	}
+	return s.waitDone(ctx, cluster)
+}
+
+// RestoreAndWait はスナップショットに戻し、クラスタが ready に戻るまで待つ (練習問題用)。
+func (s *Service) RestoreAndWait(ctx context.Context, cluster, snap string) error {
+	if _, err := s.RestoreSnapshot(ctx, cluster, snap); err != nil {
+		return err
+	}
+	return s.waitDone(ctx, cluster)
+}
+
+// waitDone は操作が終わり、(動かしているクラスタなら) ready になるまで待つ。
+func (s *Service) waitDone(ctx context.Context, cluster string) error {
+	ctx, cancel := context.WithTimeout(ctx, s.readyWait)
+	defer cancel()
+	for {
+		op := s.operation(cluster)
+		if s.operationFailed(cluster) {
+			return errors.New(op)
+		}
+		if op == "" {
+			rec, err := s.store.GetCluster(ctx, cluster)
+			if err != nil {
+				return err
+			}
+			if rec.DesiredState != machine.DesiredRunning {
+				return nil
+			}
+			if c, err := s.view(ctx, rec); err == nil && c.Status.Phase == "ready" {
+				return nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("cluster %s did not become ready (%s): %w", cluster, op, ctx.Err())
+		case <-time.After(s.postCreateInterval):
+		}
+	}
+}

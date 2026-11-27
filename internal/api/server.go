@@ -75,7 +75,7 @@ func New(svc *machine.Service, clusters *cluster.Service, log *slog.Logger, opts
 //	DELETE /api/clusters/{name}
 //	POST   /api/clusters/{name}/start
 //	POST   /api/clusters/{name}/stop
-//	GET    /api/practice/problems               CKA / CKAD の練習問題の一覧
+//	GET    /api/practice/problems[?cluster=demo] CKA / CKAD の練習問題の一覧 (cluster を付けると出せるかも返す)
 //	GET    /api/practice/problems/{id}          問題文・ヒント・解説
 //	POST   /api/practice/problems/{id}/setup    {"cluster":"demo"} 問題の Namespace を作り直して出題する
 //	POST   /api/practice/problems/{id}/check    {"cluster":"demo"} クラスタの状態で採点する

@@ -16,6 +16,8 @@ CNI=${CNI:-cilium}
 BACKEND=${BACKEND:-cloud-hypervisor}
 RUNTIME=${RUNTIME:-runc}
 RUNTIMES=${RUNTIMES:-}
+# OLDER_MINOR=1 なら、最新より 1 つ古いマイナーバージョンでクラスタを作る (kubeadm のアップグレードの練習問題を試すため)
+OLDER_MINOR=${OLDER_MINOR:-}
 NAME=${NAME:-e2ek}
 CLUSTER_TIMEOUT=${CLUSTER_TIMEOUT:-900}
 LISTEN=${LISTEN:-127.0.0.1:18081}
@@ -116,8 +118,16 @@ k() { kubectl --kubeconfig "$KUBECONFIG_FILE" "$@"; }
 log "$DISTRO クラスタを作成: $NAME (CP 1 + ワーカー 1、CNI $CNI、ランタイム $RUNTIME${RUNTIMES:+ + $RUNTIMES})"
 # shellcheck disable=SC2086  # 空白で分割したい
 install_json=$(printf '%s\n' $RUNTIMES | jq -R . | jq -s -c 'map(select(. != ""))')
+VERSION=""
+if [[ $OLDER_MINOR == 1 ]]; then
+  latest=$(curl -fsSL https://dl.k8s.io/release/stable.txt)   # 例: v1.37.3
+  minor=${latest#v1.}
+  minor=${minor%%.*}
+  VERSION="v1.$((minor - 1))"
+  log "最新は $latest。1 つ古い $VERSION で作ります"
+fi
 body=$(cat <<EOF
-{"name":"$NAME","distro":"$DISTRO","workers":1,"cni":"$CNI",
+{"name":"$NAME","distro":"$DISTRO","workers":1,"cni":"$CNI","version":"${VERSION}",
  "runtime":{"default":"$RUNTIME","install":$install_json},
  "controlPlane":{"cpus":2,"memoryMiB":3072,"diskGiB":15},
  "worker":{"cpus":2,"memoryMiB":3072,"diskGiB":15}}
@@ -475,7 +485,8 @@ k rollout status deployment/hello --timeout=300s || die "ワーカーを減ら�
 log "練習問題: 出題直後は満点でなく、解答を当てると満点になること"
 practice() { curl -s -o "$LOG_DIR/practice.json" -w '%{http_code}' -X POST "$API/practice/problems/$1/$2" -d "{\"cluster\":\"$NAME\"}"; }
 # requires (kubeadm など) が合わない問題は飛ばす。ノードに SSH する問題 (CKA) も、ここで作ったクラスタなら鍵がある
-mapfile -t problem_ids < <(curl -fs "$API/practice/problems" | jq -r --arg d "$DISTRO" '.[] | select(.requires == null or .requires == $d) | .id')
+mapfile -t problem_ids < <(curl -fs "$API/practice/problems?cluster=$NAME" | jq -r '.[] | select(.available) | .id')
+curl -fs "$API/practice/problems?cluster=$NAME" | jq -r '.[] | select(.available | not) | "    出せない: \(.id) (\(.reason))"'
 (( ${#problem_ids[@]} > 0 )) || die "練習問題がありません"
 for id in "${problem_ids[@]}"; do
   code=$(practice "$id" setup)
