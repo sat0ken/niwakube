@@ -1,0 +1,106 @@
+id: cka-taint-toleration
+exam: CKA
+domain: ワークロードとスケジューリング
+title: taint の付いたノードに Pod を置く
+weight: 6
+requires: kubeadm
+namespaces: [gpu]
+setup: |
+  apiVersion: v1
+  kind: Namespace
+  metadata:
+    name: gpu
+nodeSetup:
+  - node: cp
+    run: |
+      K="sudo kubectl --kubeconfig /etc/kubernetes/admin.conf"
+      $K taint node {{worker}} dedicated=gpu:NoSchedule --overwrite
+      $K label node {{worker}} niwakube.io/pool=gpu --overwrite
+cleanup:
+  - node: cp
+    run: |
+      K="sudo kubectl --kubeconfig /etc/kubernetes/admin.conf"
+      $K taint node {{worker}} dedicated=gpu:NoSchedule- >/dev/null 2>&1 || true
+      $K label node {{worker}} niwakube.io/pool- >/dev/null 2>&1 || true
+task: |
+  ワーカーのノードには、taint dedicated=gpu:NoSchedule と、ラベル niwakube.io/pool=gpu が付いています。
+  Namespace gpu に Pod trainer を作り、このノードでだけ動くようにしてください。
+
+  - イメージ: registry.k8s.io/e2e-test-images/agnhost:2.39、引数: netexec --http-port=8080
+  - taint dedicated=gpu:NoSchedule を許容する (toleration)
+  - ラベル niwakube.io/pool=gpu のノードにだけ置く (nodeSelector)
+
+  Pod が Running で Ready になっていること。
+checks:
+  - description: toleration の key dedicated、effect が NoSchedule
+    apiVersion: v1
+    kind: Pod
+    namespace: gpu
+    name: trainer
+    jsonpath: '{.spec.tolerations[?(@.key=="dedicated")].effect}'
+    equals: NoSchedule
+  - description: toleration の value が gpu
+    apiVersion: v1
+    kind: Pod
+    namespace: gpu
+    name: trainer
+    jsonpath: '{.spec.tolerations[?(@.key=="dedicated")].value}'
+    equals: gpu
+  - description: nodeSelector が niwakube.io/pool=gpu
+    apiVersion: v1
+    kind: Pod
+    namespace: gpu
+    name: trainer
+    jsonpath: '{.spec.nodeSelector.niwakube\.io/pool}'
+    equals: gpu
+  - description: ワーカーで動いている
+    apiVersion: v1
+    kind: Pod
+    namespace: gpu
+    name: trainer
+    jsonpath: '{.spec.nodeName}'
+    equals: '{{worker}}'
+  - description: Pod が Ready
+    apiVersion: v1
+    kind: Pod
+    namespace: gpu
+    name: trainer
+    jsonpath: '{.status.conditions[?(@.type=="Ready")].status}'
+    equals: "True"
+hint: |
+  kubectl describe node でノードの Taints と Labels を確かめます。
+  taint は「許容 (toleration) の無い Pod を置かない」だけで、Pod をそのノードに引き寄せはしません。
+  置き場所は nodeSelector (か nodeAffinity) で指定します。
+solution: |
+  kubectl run の下書き (--dry-run=client -o yaml) の spec に次を足して kubectl apply -f します。
+
+    spec:
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: gpu
+          effect: NoSchedule
+      nodeSelector:
+        niwakube.io/pool: gpu
+
+  toleration だけだとほかのノードにも置かれることがあり、nodeSelector だけだと taint で置けずに Pending になります。
+  「このノードでだけ動かす」には両方が要ります。
+  kubectl -n gpu get pod trainer -o wide で NODE がワーカーになっていることを確かめます。
+answer: |
+  apiVersion: v1
+  kind: Pod
+  metadata:
+    name: trainer
+    namespace: gpu
+  spec:
+    tolerations:
+      - key: dedicated
+        operator: Equal
+        value: gpu
+        effect: NoSchedule
+    nodeSelector:
+      niwakube.io/pool: gpu
+    containers:
+      - name: trainer
+        image: registry.k8s.io/e2e-test-images/agnhost:2.39
+        args: ["netexec", "--http-port=8080"]

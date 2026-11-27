@@ -1,0 +1,48 @@
+id: cka-etcd-snapshot
+exam: CKA
+domain: クラスタの構築と管理
+title: etcd のスナップショットを取る
+weight: 7
+requires: kubeadm
+nodeSetup:
+  - node: cp
+    run: sudo rm -f /opt/backup/etcd-snapshot.db
+task: |
+  コントロールプレーンのノード (ターミナルから ssh cp で入れます) で動いている etcd のスナップショットを取り、
+  /opt/backup/etcd-snapshot.db に保存してください。
+
+  - etcd のエンドポイント: https://127.0.0.1:2379
+  - 証明書: /etc/kubernetes/pki/etcd/ にある ca.crt、server.crt、server.key
+checks:
+  - description: /opt/backup/etcd-snapshot.db がある
+    node: cp
+    run: sudo test -s /opt/backup/etcd-snapshot.db
+  - description: etcd のスナップショットとして読める (etcdutl snapshot status)
+    node: cp
+    run: sudo etcdutl snapshot status /opt/backup/etcd-snapshot.db >/dev/null
+hint: |
+  ssh cp でノードに入り、etcdctl snapshot save を使います。
+  etcd は TLS のクライアント証明書を求めるので、--cacert・--cert・--key を付けます。
+  証明書のパスは /etc/kubernetes/manifests/etcd.yaml の起動オプションでも確かめられます。
+solution: |
+  ssh cp
+  sudo mkdir -p /opt/backup
+  sudo etcdctl --endpoints=https://127.0.0.1:2379 \
+    --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+    --cert=/etc/kubernetes/pki/etcd/server.crt \
+    --key=/etc/kubernetes/pki/etcd/server.key \
+    snapshot save /opt/backup/etcd-snapshot.db
+
+  sudo etcdutl snapshot status /opt/backup/etcd-snapshot.db -w table で、ハッシュ・リビジョン・キーの数を確かめられます。
+  証明書のパスは試験では問題文に書かれていることが多いですが、無いときは etcd の static Pod のマニフェスト
+  (/etc/kubernetes/manifests/etcd.yaml) の --trusted-ca-file・--cert-file・--key-file を見ます。
+  復元は etcdutl snapshot restore で別のデータディレクトリに展開し、etcd のマニフェストの hostPath をそこに向けます。
+answerRun:
+  - node: cp
+    run: |
+      sudo mkdir -p /opt/backup
+      sudo etcdctl --endpoints=https://127.0.0.1:2379 \
+        --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+        --cert=/etc/kubernetes/pki/etcd/server.crt \
+        --key=/etc/kubernetes/pki/etcd/server.key \
+        snapshot save /opt/backup/etcd-snapshot.db

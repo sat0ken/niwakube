@@ -1,0 +1,116 @@
+id: cka-rbac
+exam: CKA
+domain: クラスタの構築と管理
+title: ServiceAccount に必要な権限だけを与える
+weight: 6
+namespaces: [team-a]
+setup: |
+  apiVersion: v1
+  kind: Namespace
+  metadata:
+    name: team-a
+task: |
+  Namespace team-a で、CI から Deployment を更新するための ServiceAccount を用意してください。
+
+  - ServiceAccount deployer を作る
+  - Role deploy-manager を作り、Deployment に対する get、list、watch、create、update、patch、delete を許可する
+  - RoleBinding deployer-binding で、deploy-manager を deployer に与える
+
+  deployer はこれ以外の操作 (Pod の削除など) や、ほかの Namespace での操作はできないこと。
+checks:
+  - description: ServiceAccount deployer がある
+    apiVersion: v1
+    kind: ServiceAccount
+    namespace: team-a
+    name: deployer
+  - description: RoleBinding deployer-binding がある
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: RoleBinding
+    namespace: team-a
+    name: deployer-binding
+  - description: deployer は team-a で Deployment を作れる
+    canI:
+      serviceAccount: team-a/deployer
+      verb: create
+      group: apps
+      resource: deployments
+      namespace: team-a
+    allowed: true
+  - description: deployer は team-a で Deployment を一覧できる
+    canI:
+      serviceAccount: team-a/deployer
+      verb: list
+      group: apps
+      resource: deployments
+      namespace: team-a
+    allowed: true
+  - description: deployer は team-a で Deployment を消せる
+    canI:
+      serviceAccount: team-a/deployer
+      verb: delete
+      group: apps
+      resource: deployments
+      namespace: team-a
+    allowed: true
+  - description: deployer は Pod を消せない
+    canI:
+      serviceAccount: team-a/deployer
+      verb: delete
+      resource: pods
+      namespace: team-a
+    allowed: false
+  - description: deployer はほかの Namespace の Deployment を作れない
+    canI:
+      serviceAccount: team-a/deployer
+      verb: create
+      group: apps
+      resource: deployments
+      namespace: default
+    allowed: false
+hint: |
+  kubectl create serviceaccount、kubectl create role、kubectl create rolebinding で作れます。
+  Role の --resource は複数形 (deployments) で、API グループが要るときは deployments.apps と書きます。
+  kubectl auth can-i ... --as=system:serviceaccount:team-a:deployer で確かめられます。
+solution: |
+  kubectl -n team-a create serviceaccount deployer
+  kubectl -n team-a create role deploy-manager \
+    --verb=get,list,watch,create,update,patch,delete --resource=deployments.apps
+  kubectl -n team-a create rolebinding deployer-binding --role=deploy-manager --serviceaccount=team-a:deployer
+
+  確かめ方:
+  kubectl -n team-a auth can-i create deployments --as=system:serviceaccount:team-a:deployer   # yes
+  kubectl -n team-a auth can-i delete pods --as=system:serviceaccount:team-a:deployer          # no
+  kubectl -n default auth can-i create deployments --as=system:serviceaccount:team-a:deployer  # no
+
+  Role と RoleBinding は Namespace の中だけで効きます。全 Namespace に効かせるなら ClusterRole と ClusterRoleBinding です
+  (ClusterRole を RoleBinding で与えると、その Namespace の中だけで効きます)。
+answer: |
+  apiVersion: v1
+  kind: ServiceAccount
+  metadata:
+    name: deployer
+    namespace: team-a
+  ---
+  apiVersion: rbac.authorization.k8s.io/v1
+  kind: Role
+  metadata:
+    name: deploy-manager
+    namespace: team-a
+  rules:
+    - apiGroups: ["apps"]
+      resources: ["deployments"]
+      verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  ---
+  apiVersion: rbac.authorization.k8s.io/v1
+  kind: RoleBinding
+  metadata:
+    name: deployer-binding
+    namespace: team-a
+  roleRef:
+    apiGroup: rbac.authorization.k8s.io
+    kind: Role
+    name: deploy-manager
+  subjects:
+    - kind: ServiceAccount
+      name: deployer
+      namespace: team-a

@@ -167,6 +167,16 @@ if ! "$TERMCHECK" -url "ws://$LISTEN/api/clusters/$NAME/terminal" -send "$term_c
   journalctl --no-pager -n 50 -u 'niwakube-term-*' || true
   die "ターミナルで kubectl が使えません"
 fi
+if [[ $DISTRO != talos ]]; then
+  # クラスタの鍵で、ターミナルからノードに ssh できること (CKA の練習問題で使う)
+  ssh_cmd='ssh -o ConnectTimeout=10 worker "echo SSH=\$(hostname)"; exit'
+  if ! "$TERMCHECK" -url "ws://$LISTEN/api/clusters/$NAME/terminal" -send "$ssh_cmd" \
+    -expect "SSH=$NAME-worker-1" -timeout 90s >"$LOG_DIR/terminal-ssh.log" 2>&1; then
+    cat "$LOG_DIR/terminal-ssh.log"
+    die "ターミナルからノードに ssh できません"
+  fi
+  echo "    ssh worker: OK"
+fi
 grep -a 'U=\|H=\|N:node' "$LOG_DIR/terminal.log" | grep -v 'echo' | sed 's/^/    /'
 
 if [[ $CNI == cilium ]]; then
@@ -464,7 +474,8 @@ k rollout status deployment/hello --timeout=300s || die "ワーカーを減ら�
 # --- 練習問題 (CKA / CKAD): 出題 → 解答を当てる → 採点が満点 ---
 log "練習問題: 出題直後は満点でなく、解答を当てると満点になること"
 practice() { curl -s -o "$LOG_DIR/practice.json" -w '%{http_code}' -X POST "$API/practice/problems/$1/$2" -d "{\"cluster\":\"$NAME\"}"; }
-mapfile -t problem_ids < <(curl -fs "$API/practice/problems" | jq -r '.[].id')
+# requires (kubeadm など) が合わない問題は飛ばす。ノードに SSH する問題 (CKA) も、ここで作ったクラスタなら鍵がある
+mapfile -t problem_ids < <(curl -fs "$API/practice/problems" | jq -r --arg d "$DISTRO" '.[] | select(.requires == null or .requires == $d) | .id')
 (( ${#problem_ids[@]} > 0 )) || die "練習問題がありません"
 for id in "${problem_ids[@]}"; do
   code=$(practice "$id" setup)
@@ -472,7 +483,8 @@ for id in "${problem_ids[@]}"; do
   code=$(practice "$id" check)
   [[ $code == 200 ]] || die "$id: 採点できません: $code $(cat "$LOG_DIR/practice.json")"
   [[ $(jq -r '.passed < .total' "$LOG_DIR/practice.json") == true ]] || die "$id: 出題直後なのに満点です"
-  curl -fs "$API/practice/problems/$id" | jq -r .answer | k apply -f - >/dev/null
+  code=$(practice "$id" solve)
+  [[ $code == 204 ]] || die "$id: 模範解答を当てられません: $code $(cat "$LOG_DIR/practice.json")"
   start=$SECONDS
   while :; do
     code=$(practice "$id" check)

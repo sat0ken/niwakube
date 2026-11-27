@@ -29,6 +29,7 @@ import (
 	"github.com/sat0ken/niwakube/internal/kube"
 	"github.com/sat0ken/niwakube/internal/machine"
 	"github.com/sat0ken/niwakube/internal/netx"
+	"github.com/sat0ken/niwakube/internal/nodeexec"
 	"github.com/sat0ken/niwakube/internal/practice"
 	"github.com/sat0ken/niwakube/internal/store"
 	"github.com/sat0ken/niwakube/internal/sys"
@@ -166,13 +167,39 @@ func run() error {
 	}
 	term.Cleanup(ctx)
 
-	// CKA / CKAD の練習問題。問題を出すクラスタには admin の kubeconfig でつなぐ
-	drills, err := practice.NewService(func(ctx context.Context, name string) (practice.Cluster, error) {
+	// CKA / CKAD の練習問題。問題を出すクラスタには admin の kubeconfig でつなぎ、ノードにはクラスタの鍵で SSH する
+	drills, err := practice.NewService(func(ctx context.Context, name string) (*practice.Target, error) {
 		kc, err := clusters.Kubeconfig(ctx, name)
 		if err != nil {
 			return nil, err
 		}
-		return kube.New(kc)
+		kc2, err := kube.New(kc)
+		if err != nil {
+			return nil, err
+		}
+		d, err := clusters.DistroOf(ctx, name)
+		if err != nil {
+			return nil, err
+		}
+		t := &practice.Target{Kube: kc2, Distro: d}
+		a, err := clusters.NodeAccess(ctx, name)
+		switch {
+		case err == nil:
+			t.Nodes = map[string]string{}
+			ips := map[string]string{}
+			for _, n := range a.Nodes {
+				t.Nodes[n.Alias] = n.Name
+				ips[n.Alias] = n.IP
+			}
+			t.Run = func(ctx context.Context, node, script string) (*nodeexec.Result, error) {
+				ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+				defer cancel()
+				return nodeexec.Run(ctx, ips[node], a.User, a.Key, script)
+			}
+		case !errors.Is(err, backend.ErrNotSupported):
+			return nil, err
+		}
+		return t, nil
 	})
 	if err != nil {
 		log.Error("load practice problems", "err", err)

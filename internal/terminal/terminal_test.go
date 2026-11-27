@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -128,13 +129,13 @@ func TestSandboxCommand(t *testing.T) {
 }
 
 func TestBashrc(t *testing.T) {
-	rc := bashrc("tal", true)
+	rc := bashrc("tal", true, nil)
 	for _, want := range []string{`cp "$CREDENTIALS_DIRECTORY/kubeconfig" "$HOME/.kube/config"`, `export TALOSCONFIG=`, "alias k=kubectl", "kubectl completion bash", "talosctl completion bash", "tal"} {
 		if !strings.Contains(rc, want) {
 			t.Errorf("bashrc does not contain %q:\n%s", want, rc)
 		}
 	}
-	if strings.Contains(bashrc("k3s", false), "talos") {
+	if strings.Contains(bashrc("k3s", false, nil), "talos") {
 		t.Error("talos settings must not be in a non-Talos bashrc")
 	}
 	// bash で構文エラーが無いこと
@@ -152,6 +153,69 @@ func TestPrepareRejectsBadNames(t *testing.T) {
 	for _, n := range []string{"", "../x", "a b", "A"} {
 		if _, err := m.prepare(Files{Cluster: n}); err == nil {
 			t.Errorf("%q must be rejected", n)
+		}
+	}
+}
+
+func TestSSH(t *testing.T) {
+	x := &SSH{User: "ubuntu", Key: []byte("PRIVATE KEY"), Hosts: []SSHHost{
+		{Names: []string{"demo-cp-1", "cp"}, IP: netip.MustParseAddr("172.30.1.11")},
+		{Names: []string{"demo-worker-1", "worker"}, IP: netip.MustParseAddr("172.30.1.21")},
+	}}
+	dir := t.TempDir()
+	m := New(Config{Dir: dir}, nil)
+	s, err := m.prepare(Files{Cluster: "demo", Kubeconfig: []byte("kc"), SSH: x})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(filepath.Join(s.dir, "sshkey")); err != nil || string(b) != "PRIVATE KEY" {
+		t.Errorf("sshkey: %q %v", b, err)
+	}
+	if fi, _ := os.Stat(filepath.Join(s.dir, "sshkey")); fi.Mode().Perm() != 0o600 {
+		t.Errorf("sshkey mode: %v", fi.Mode())
+	}
+	sb := New(Config{Dir: dir, Sandbox: true}, nil)
+	args := strings.Join(sb.shellCommand(&session{id: "demo-abc", cluster: "demo", ssh: true}).Args, " ")
+	if !strings.Contains(args, "--property=LoadCredential=sshkey:") {
+		t.Errorf("the key must be passed as a credential:\n%s", args)
+	}
+
+	// bashrc を実際に動かし、ssh の設定ができること
+	home := filepath.Join(dir, "home")
+	os.MkdirAll(home, 0o700)
+	rc := bashrc("demo", false, x)
+	script := rc + "\ncat \"$HOME/.ssh/config\"; type ssh; stat -c %a \"$HOME/.ssh/id_ed25519\"\n"
+	f := filepath.Join(dir, "rc")
+	os.WriteFile(f, []byte(script), 0o600)
+	cmd := exec.Command("bash", f)
+	cmd.Env = []string{"HOME=" + home, "CREDENTIALS_DIRECTORY=" + s.dir, "PATH=/usr/bin:/bin"}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bashrc: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"Host demo-cp-1 cp\n  HostName 172.30.1.11",
+		"Host demo-worker-1 worker\n  HostName 172.30.1.21",
+		"User ubuntu",
+		"IdentityFile " + home + "/.ssh/id_ed25519",
+		"UserKnownHostsFile " + home + "/.ssh/known_hosts",
+		`command ssh -F "$HOME/.ssh/config"`,
+		"600",
+		"ssh <ノード> でノードに入れます (demo-cp-1, demo-worker-1",
+	} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("output does not contain %q:\n%s", want, out)
+		}
+	}
+
+	for name, bad := range map[string]*SSH{
+		"bad name": {User: "ubuntu", Key: []byte("k"), Hosts: []SSHHost{{Names: []string{"a;rm -rf /"}, IP: netip.MustParseAddr("1.2.3.4")}}},
+		"bad user": {User: "-oProxyCommand=x", Key: []byte("k")},
+		"no key":   {User: "ubuntu"},
+		"no ip":    {User: "ubuntu", Key: []byte("k"), Hosts: []SSHHost{{Names: []string{"cp"}}}},
+	} {
+		if _, err := m.prepare(Files{Cluster: "demo", Kubeconfig: []byte("kc"), SSH: bad}); err == nil {
+			t.Errorf("%s: want an error", name)
 		}
 	}
 }

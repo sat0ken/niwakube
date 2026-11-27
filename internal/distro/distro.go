@@ -26,6 +26,9 @@ type Secrets struct {
 	ServiceAccountKey string `json:"serviceAccountKey,omitempty"`
 	// Extra はディストリ固有の秘密情報 (例: Talos の secrets bundle)。
 	Extra map[string]string `json:"extra,omitempty"`
+	// NodeSSHKey はこのクラスタのノードに入る SSH の秘密鍵 (OpenSSH 形式)。公開鍵は全ノードに入れる。
+	// 練習問題 (CKA) の出題・採点と、Web UI のターミナルからの ssh に使う。古いクラスタには無い
+	NodeSSHKey string `json:"nodeSSHKey,omitempty"`
 }
 
 // Cluster は Distro がノードの設定を作るのに必要な、クラスタの情報。
