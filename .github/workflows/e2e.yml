@@ -48,7 +48,8 @@ jobs:
       matrix:
         include:
           - { distro: k3s, cni: cilium, runtime: runc, runtimes: "crun youki" }
-          - { distro: kubeadm, cni: cilium, runtime: crun, runtimes: "crun youki" }
+          # 1 つ古いマイナーバージョンで作り、kubeadm のアップグレードの練習問題も試す
+          - { distro: kubeadm, cni: cilium, runtime: crun, runtimes: "crun youki", older_minor: "1" }
           - { distro: k3s, cni: flannel, runtime: runc, runtimes: "" }
           - { distro: talos, cni: cilium, runtime: runc, runtimes: "" }
     steps:
@@ -59,7 +60,7 @@ jobs:
       - name: Host setup
         run: ./scripts/ci-host-setup.sh
       - name: niwakubed E2E (cluster)
-        run: make e2e-cluster DISTRO=${{ matrix.distro }} CNI=${{ matrix.cni }} RUNTIME=${{ matrix.runtime }} RUNTIMES="${{ matrix.runtimes }}"
+        run: make e2e-cluster DISTRO=${{ matrix.distro }} CNI=${{ matrix.cni }} RUNTIME=${{ matrix.runtime }} RUNTIMES="${{ matrix.runtimes }}" OLDER_MINOR="${{ matrix.older_minor }}"
       - name: Collect logs
         if: failure()
         run: ./scripts/ci-collect-logs.sh

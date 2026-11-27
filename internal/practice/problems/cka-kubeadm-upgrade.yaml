@@ -1,0 +1,92 @@
+id: cka-kubeadm-upgrade
+exam: CKA
+domain: クラスタの構築と管理
+title: kubeadm でコントロールプレーンを次のマイナーバージョンに上げる
+weight: 8
+requires: kubeadm
+resetSnapshot: true
+needsOlderVersion: true
+nodeSetup:
+  - node: cp
+    run: |
+      if ! curl -fsSI --max-time 30 "https://pkgs.k8s.io/core:/stable:/{{nextVersion}}/deb/Release" >/dev/null; then
+        echo "{{nextVersion}} のパッケージがありません (このクラスタはすでに最新のマイナーバージョンです)。1 つ古いマイナーバージョンでクラスタを作り直してください"
+        exit 1
+      fi
+task: |
+  このクラスタのコントロールプレーンを、今のマイナーバージョンから 1 つ上 (例: v1.36 なら v1.37) に、kubeadm で上げてください。
+
+  - コントロールプレーンのノードには ssh cp で入れます
+  - パッケージ (kubeadm・kubelet・kubectl) は pkgs.k8s.io から入れます。リポジトリはマイナーバージョンごとに分かれています
+  - コントロールプレーンの kubeadm・kubelet・kubectl を新しいバージョンにする
+  - ワーカーはこのままでよい
+
+  最初の出題ではスナップショットを取るので、数分かかります。もう一度出題すると、スナップショットに戻して最初からやり直せます。
+checks:
+  - description: kube-apiserver が新しいバージョン
+    apiVersion: v1
+    kind: Pod
+    namespace: kube-system
+    name: 'kube-apiserver-{{cp}}'
+    jsonpath: '{.spec.containers[0].image}'
+    contains: ':{{nextVersion}}.'
+  - description: コントロールプレーンの kubelet が新しいバージョン
+    apiVersion: v1
+    kind: Node
+    name: '{{cp}}'
+    jsonpath: '{.status.nodeInfo.kubeletVersion}'
+    contains: '{{nextVersion}}.'
+  - description: kubeadm が新しいバージョン
+    node: cp
+    run: kubeadm version -o short | grep -q '^{{nextVersion}}\.'
+  - description: コントロールプレーンが Ready
+    apiVersion: v1
+    kind: Node
+    name: '{{cp}}'
+    jsonpath: '{.status.conditions[?(@.type=="Ready")].status}'
+    equals: "True"
+hint: |
+  順番は「kubeadm を上げる → kubeadm upgrade plan / apply → kubelet と kubectl を上げる → kubelet を再起動」です。
+  apt のリポジトリは /etc/apt/sources.list.d/kubernetes.list に、マイナーバージョン入りの URL で書かれています。
+  パッケージは apt-mark hold で固定されているので、上げる前に外します。
+solution: |
+  ssh cp
+
+  1. リポジトリを次のマイナーバージョンに切り替える (例: v1.36 → v1.37)
+     sudo sed -i 's#/v1.36/deb/#/v1.37/deb/#' /etc/apt/sources.list.d/kubernetes.list
+     sudo apt-get update
+     apt-cache madison kubeadm            # 入れられるバージョンを確かめる
+
+  2. kubeadm を上げて、コントロールプレーンを上げる
+     sudo apt-mark unhold kubeadm
+     sudo apt-get install -y kubeadm='1.37.x-*'
+     sudo kubeadm upgrade plan
+     sudo kubeadm upgrade apply v1.37.x
+
+  3. (本来は) ノードを drain してから kubelet と kubectl を上げ、kubelet を再起動して uncordon する
+     kubectl drain <コントロールプレーンの名前> --ignore-daemonsets
+     sudo apt-mark unhold kubelet kubectl
+     sudo apt-get install -y kubelet='1.37.x-*' kubectl='1.37.x-*'
+     sudo apt-mark hold kubeadm kubelet kubectl
+     sudo systemctl daemon-reload && sudo systemctl restart kubelet
+     kubectl uncordon <コントロールプレーンの名前>
+
+  kubectl get nodes で VERSION が新しくなったことを確かめます。kube-apiserver などは kubeadm upgrade apply で、
+  kubelet は自分でパッケージを上げたときに新しくなります。ワーカーは kubeadm upgrade node を使って同じように上げます。
+  マイナーバージョンは 1 つずつしか上げられません (v1.35 から v1.37 へは直接上げられない)。
+answerRun:
+  - node: cp
+    run: |
+      set -euo pipefail
+      NEXT={{nextVersion}}
+      sudo sed -i -E "s#/v1\.[0-9]+/deb/#/${NEXT}/deb/#" /etc/apt/sources.list.d/kubernetes.list
+      curl -fsSL --retry 5 "https://pkgs.k8s.io/core:/stable:/${NEXT}/deb/Release.key" | sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      sudo apt-get update -q >/dev/null
+      VER=$(apt-cache madison kubeadm | awk '{print $3}' | grep "^${NEXT#v}\." | head -n 1)
+      sudo apt-mark unhold kubeadm kubelet kubectl >/dev/null
+      sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q "kubeadm=${VER}" >/dev/null
+      sudo kubeadm upgrade apply -y "$(kubeadm version -o short)"
+      sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q "kubelet=${VER}" "kubectl=${VER}" >/dev/null
+      sudo apt-mark hold kubeadm kubelet kubectl >/dev/null
+      sudo systemctl daemon-reload
+      sudo systemctl restart kubelet

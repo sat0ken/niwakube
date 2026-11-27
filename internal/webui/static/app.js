@@ -820,7 +820,9 @@ async function viewProblem(id) {
             <button class="primary" id="pr-setup">出題する</button>
             <button id="pr-check">採点</button>
           </div>
-          <p class="hint">「出題する」は Namespace ${p.namespaces.join(", ")} を消して作り直します。やり直すときももう一度押します。</p>`
+          <p class="hint">${(p.namespaces || []).length ? `「出題する」は Namespace ${p.namespaces.join(", ")} を消して作り直します。` : "「出題する」で出題直後の状態にします。"}
+            やり直すときももう一度押します。${p.resetSnapshot ? "この問題は最初の出題でクラスタのスナップショットを取り (数分かかります)、2 回目からはそれに戻します。" : ""}</p>
+          <div id="pr-avail"></div>`
           : html`<p>${p.requires ? `${p.requires} の` : ""}Ready のクラスタがありません。<a href="#/clusters/new">練習用のクラスタを作って</a>から開いてください。</p>`}
           <div id="pr-result"></div>
         </div>
@@ -860,6 +862,23 @@ async function viewProblem(id) {
     btn.textContent = busy;
     try { await fn(); } catch (err) { toast(err.message, true); } finally { btn.disabled = false; btn.textContent = label; }
   };
+  // 選んだクラスタでこの問題を出せるか (ディストリ、ノードの鍵、バージョン)
+  const avail = document.getElementById("pr-avail");
+  const checkAvail = async () => {
+    avail.replaceChildren();
+    let ok = true;
+    try {
+      const list = await api("GET", `/api/practice/problems?cluster=${encodeURIComponent(chosen)}`);
+      const me = list.find((x) => x.id === p.id);
+      if (me && me.available === false) {
+        ok = false;
+        avail.innerHTML = html`<p class="badge warn">このクラスタでは出せません</p> <span class="hint">${me.reason}</span>`;
+      }
+    } catch { /* 確かめられなければ出題のときにエラーが出る */ }
+    ["pr-setup", "pr-check", "pr-solve"].forEach((bid) => { const b = document.getElementById(bid); if (b) b.disabled = !ok; });
+  };
+  checkAvail();
+  document.getElementById("pr-cluster").addEventListener("change", checkAvail);
   const setupBtn = document.getElementById("pr-setup");
   setupBtn.addEventListener("click", () => run(setupBtn, "出題中…", async () => {
     await api("POST", `/api/practice/problems/${encodeURIComponent(p.id)}/setup`, { cluster: chosen });

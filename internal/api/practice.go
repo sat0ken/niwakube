@@ -20,8 +20,18 @@ func (s *Server) practiceEnabled(w http.ResponseWriter) bool {
 	return true
 }
 
-func (s *Server) listProblems(w http.ResponseWriter, _ *http.Request) {
+// listProblems は問題の一覧。?cluster=demo を付けると、そのクラスタで出せるか (available) と理由 (reason) も返す。
+func (s *Server) listProblems(w http.ResponseWriter, r *http.Request) {
 	if !s.practiceEnabled(w) {
+		return
+	}
+	if c := r.URL.Query().Get("cluster"); c != "" {
+		list, err := s.opts.Practice.ListFor(r.Context(), c)
+		if err != nil {
+			s.writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, list)
 		return
 	}
 	writeJSON(w, http.StatusOK, s.opts.Practice.List())

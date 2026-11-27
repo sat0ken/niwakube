@@ -93,7 +93,7 @@ func (n *fakeNodes) run(_ context.Context, node, script string) (*nodeexec.Resul
 }
 
 func target(fc *fakeCluster, nodes *fakeNodes) *Target {
-	t := &Target{Kube: fc, Distro: "kubeadm"}
+	t := &Target{Kube: fc, Distro: "kubeadm", Version: "v1.36", Snapshots: &fakeSnapshots{have: map[string]bool{}}}
 	if nodes != nil {
 		t.Nodes = map[string]string{"cp": "demo-cp-1", "worker": "demo-worker-1"}
 		t.Run = nodes.run
@@ -458,5 +458,111 @@ func TestFindNullArray(t *testing.T) {
 	got, err := find(obj, `{.items[*].endpoints[?(@.conditions.ready==true)].targetRef.kind}`)
 	if err != nil || got != "" {
 		t.Errorf("got %q %v", got, err)
+	}
+}
+
+const upgradeProblem = `id: u-1
+exam: CKA
+domain: d
+title: upgrade
+weight: 5
+requires: kubeadm
+resetSnapshot: true
+needsOlderVersion: true
+nodeSetup:
+  - node: cp
+    run: check {{nextVersion}}
+task: t
+checks:
+  - description: kubelet is new
+    apiVersion: v1
+    kind: Node
+    name: '{{cp}}'
+    jsonpath: '{.status.nodeInfo.kubeletVersion}'
+    contains: '{{nextVersion}}.'
+answerRun:
+  - node: cp
+    run: upgrade {{version}} to {{nextVersion}}
+solution: s
+`
+
+type fakeSnapshots struct {
+	have map[string]bool
+	log  []string
+}
+
+func (f *fakeSnapshots) Has(_ context.Context, name string) (bool, error) { return f.have[name], nil }
+func (f *fakeSnapshots) Take(_ context.Context, name string) error {
+	f.log = append(f.log, "take "+name)
+	f.have[name] = true
+	return nil
+}
+func (f *fakeSnapshots) Restore(_ context.Context, name string) error {
+	f.log = append(f.log, "restore "+name)
+	return nil
+}
+
+func TestResetSnapshotAndVersions(t *testing.T) {
+	ctx := context.Background()
+	ps, err := load(fstest.MapFS{
+		"problems/u-1.yaml": {Data: []byte(upgradeProblem)},
+		"problems/p-1.yaml": {Data: []byte(plainProblem)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fc := newFake()
+	nodes := &fakeNodes{}
+	snaps := &fakeSnapshots{have: map[string]bool{}}
+	tg := target(fc, nodes)
+	tg.Version, tg.Snapshots = "v1.36", snaps
+	s := serviceFor(t, ps, tg)
+
+	// 1 回目はスナップショットを取り、2 回目からは戻す。{{version}} / {{nextVersion}} は作ったときのバージョンから
+	for range 2 {
+		if err := s.Setup(ctx, "demo", "u-1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := strings.Join(snaps.log, ","); got != "take practice-u-1,restore practice-u-1" {
+		t.Errorf("snapshots: %s", got)
+	}
+	if nodes.log[0] != "cp: check v1.37" {
+		t.Errorf("node setup: %v", nodes.log)
+	}
+	if err := s.Solve(ctx, "demo", "u-1"); err != nil || nodes.log[len(nodes.log)-1] != "cp: upgrade v1.36 to v1.37" {
+		t.Errorf("solve: %v %v", err, nodes.log)
+	}
+	fc.objs[key("v1", "Node", "", "demo-cp-1")] = map[string]any{"status": map[string]any{"nodeInfo": map[string]any{"kubeletVersion": "v1.37.2"}}}
+	if r, err := s.Check(ctx, "demo", "u-1"); err != nil || r.Passed != 1 {
+		t.Errorf("contains must expand {{nextVersion}}: %+v %v", r, err)
+	}
+
+	// 出せるかどうかの一覧
+	sum, err := s.ListFor(ctx, "demo")
+	if err != nil || !*sum[0].Available || !*sum[1].Available {
+		t.Errorf("available: %+v %v", sum, err)
+	}
+	for name, mod := range map[string]func(*Target){
+		"stable":       func(t *Target) { t.Version = "stable" },
+		"no snapshots": func(t *Target) { t.Snapshots = nil },
+		"k3s":          func(t *Target) { t.Distro = "k3s" },
+	} {
+		tg2 := *tg
+		mod(&tg2)
+		s2 := serviceFor(t, ps, &tg2)
+		sum, _ := s2.ListFor(ctx, "demo")
+		var u Summary
+		for _, x := range sum {
+			if x.ID == "u-1" {
+				u = x
+			}
+		}
+		if *u.Available || u.Reason == "" {
+			t.Errorf("%s: must be unavailable with a reason: %+v", name, u)
+		}
+		if err := s2.Setup(ctx, "demo", "u-1"); !errors.Is(err, ErrUnsupported) {
+			t.Errorf("%s: setup: %v", name, err)
+		}
 	}
 }

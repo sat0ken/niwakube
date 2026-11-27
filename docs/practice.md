@@ -95,6 +95,25 @@ answerRun:                      # 解いた状態にするノードのコマン�
 
 - オブジェクトは `name` のほか、`selector` (ラベル) と `fieldSelector` (`spec.nodeName={{worker}}` など) で一覧から選べる
 
+元に戻せない変更をさせる問題 (アップグレードなど):
+
+```yaml
+resetSnapshot: true             # 最初の出題でクラスタのスナップショット practice-<id> を取り、2 回目からはそれに戻してから出題する
+needsOlderVersion: true         # マイナーバージョンを指定して作ったクラスタ (v1.36 など) が要る
+checks:
+  - description: kubelet が新しいバージョン
+    apiVersion: v1
+    kind: Node
+    name: '{{cp}}'
+    jsonpath: '{.status.nodeInfo.kubeletVersion}'
+    contains: '{{nextVersion}}.'   # {{version}} = v1.36、{{nextVersion}} = v1.37 (クラスタを作ったときのバージョンから)
+```
+
+- スナップショットは、ほかの問題の後片付け (cleanup) のあとに取るので、cordon などは入らない。取る・戻すときはクラスタを
+  いったん止めて起動し、ready に戻るまで待つ (数分かかる)
+- `GET /api/practice/problems?cluster=demo` で、そのクラスタで出せるか (`available`) と出せない理由 (`reason`) が分かる
+  (ディストリ、ノードの鍵、スナップショット、バージョン)。Web UI の問題の画面は、選んだクラスタで出せないと理由を出してボタンを止める
+
 - `jsonpath` は `kubectl -o jsonpath` と同じ書き方。結果は空白区切りの 1 つの文字列にして比べる。
   `selector` のときは `{"items": [...]}` に対して評価する
 - 状態を見る項目 (`.status` の Ready など) は、すぐには満たされない。CI は解答を当ててから最大 300 秒、満点になるまで採点を繰り返す

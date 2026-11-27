@@ -1,0 +1,94 @@
+id: cka-etcd-restore
+exam: CKA
+domain: クラスタの構築と管理
+title: etcd をバックアップから復元する
+weight: 8
+requires: kubeadm
+namespaces: [ledger]
+setup: |
+  apiVersion: v1
+  kind: Namespace
+  metadata:
+    name: ledger
+  ---
+  apiVersion: v1
+  kind: ConfigMap
+  metadata:
+    name: balance
+    namespace: ledger
+  data:
+    amount: "100"
+nodeSetup:
+  - node: cp
+    run: |
+      set -e
+      E="sudo etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key"
+      K="sudo kubectl --kubeconfig /etc/kubernetes/admin.conf"
+      # バックアップを取ってから、中身を壊す
+      sudo mkdir -p /opt/backup
+      sudo rm -f /opt/backup/etcd-before.db
+      $E snapshot save /opt/backup/etcd-before.db >/dev/null
+      $K -n ledger patch configmap balance --type merge -p '{"data":{"amount":"0"}}' >/dev/null
+      $K -n ledger create configmap intruder --from-literal=note=injected >/dev/null
+task: |
+  誤った操作で、クラスタの中身が書き換えられてしまいました。
+  コントロールプレーン (ターミナルから ssh cp で入れます) の /opt/backup/etcd-before.db にある etcd のバックアップから復元し、
+  クラスタをバックアップを取った時点の状態に戻してください。
+
+  - etcd は kubeadm の static Pod で動いていて、データは /var/lib/etcd にあります
+  - 復元先は新しいディレクトリ (例: /var/lib/etcd-restore) にして、etcd がそこを使うようにする
+
+  戻ったかどうかは、Namespace ledger の ConfigMap balance の amount が 100 に戻り、ConfigMap intruder が無くなっていることで確かめられます。
+checks:
+  - description: ConfigMap balance の amount が 100 に戻っている
+    apiVersion: v1
+    kind: ConfigMap
+    namespace: ledger
+    name: balance
+    jsonpath: '{.data.amount}'
+    equals: "100"
+  - description: バックアップのあとに作られた ConfigMap intruder が無い
+    apiVersion: v1
+    kind: ConfigMap
+    namespace: ledger
+    fieldSelector: metadata.name=intruder
+    jsonpath: '{.items[*].metadata.name}'
+    equals: ""
+hint: |
+  復元は etcdutl snapshot restore で、新しいデータディレクトリに展開します (動いている etcd のデータは直接書き換えない)。
+  展開したら、etcd の static Pod のマニフェスト (/etc/kubernetes/manifests/etcd.yaml) で、データの hostPath を新しいディレクトリに向けます。
+  マニフェストを書き換えると kubelet が etcd を作り直します。少し待ってから kubectl で確かめます。
+solution: |
+  ssh cp
+
+  1. バックアップを新しいディレクトリに展開する
+     sudo etcdutl snapshot restore /opt/backup/etcd-before.db --data-dir /var/lib/etcd-restore
+
+  2. (推奨) 復元のあいだ API サーバーを止める。static Pod のマニフェストを manifests の外に出すと止まる
+     sudo mv /etc/kubernetes/manifests/kube-apiserver.yaml /etc/kubernetes/
+
+  3. etcd のマニフェストで、データの hostPath を新しいディレクトリに向ける
+     sudo vi /etc/kubernetes/manifests/etcd.yaml
+       volumes:
+       - hostPath:
+           path: /var/lib/etcd-restore     # ← /var/lib/etcd から変える
+           type: DirectoryOrCreate
+         name: etcd-data
+     (コンテナの中のパス --data-dir=/var/lib/etcd と mountPath はそのままでよい)
+
+  4. etcd が起動し直したら API サーバーを戻す
+     sudo mv /etc/kubernetes/kube-apiserver.yaml /etc/kubernetes/manifests/
+
+  1〜2 分待って kubectl -n ledger get configmap で確かめます。sudo crictl ps で etcd と kube-apiserver が動いているかも見られます。
+  バックアップは etcdctl snapshot save で取り、復元は etcdutl snapshot restore を使います (etcd v3.5 以降、restore は etcdutl に移りました)。
+  復元するとクラスタ全体 (すべての Namespace) がバックアップの時点に戻ります。
+answerRun:
+  - node: cp
+    run: |
+      set -e
+      NEW=/var/lib/etcd-restore-$(date +%s)
+      sudo etcdutl snapshot restore /opt/backup/etcd-before.db --data-dir "$NEW" >/dev/null
+      sudo mv /etc/kubernetes/manifests/kube-apiserver.yaml /etc/kubernetes/kube-apiserver.yaml.stopped
+      sudo sed -i -E "s#(path: )/var/lib/etcd[^[:space:]]*\$#\1${NEW}#" /etc/kubernetes/manifests/etcd.yaml
+      sleep 30
+      sudo mv /etc/kubernetes/kube-apiserver.yaml.stopped /etc/kubernetes/manifests/kube-apiserver.yaml

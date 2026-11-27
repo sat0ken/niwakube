@@ -91,11 +91,11 @@ func alias(base string, i int) string {
 	return fmt.Sprintf("%s%d", base, i)
 }
 
-// DistroOf はクラスタのディストリの名前を返す。
-func (s *Service) DistroOf(ctx context.Context, name string) (string, error) {
+// DistroOf はクラスタのディストリの名前と、作ったときのバージョンの指定 (v1.36、stable など) を返す。
+func (s *Service) DistroOf(ctx context.Context, name string) (distroName, version string, err error) {
 	rec, err := s.store.GetCluster(ctx, name)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return rec.Distro, nil
+	return rec.Distro, rec.Spec.Version, nil
 }

@@ -295,9 +295,11 @@ curl -s -X POST localhost:8080/api/clusters/demo/snapshots/before-upgrade/restor
 Web UI の「練習」で、本物のクラスタを使って CKA / CKAD の練習ができる。問題を開くと左に問題文、右にクラスタのターミナルが出る。
 「出題する」で問題の Namespace を作り直し、kubectl で解いたら「採点」を押すと、項目ごとの合否と点数が出る。
 
-- 問題は公開されている出題範囲に沿ったオリジナル (本物の試験問題ではない)。今は CKA の 6 問と CKAD の 10 問
-- CKA の問題の多くはノードに入って解く (etcd のバックアップ、kubelet の故障、static Pod、taint、drain)。kubeadm のクラスタで、
+- 問題は公開されている出題範囲に沿ったオリジナル (本物の試験問題ではない)。今は CKA の 8 問と CKAD の 10 問
+- CKA の問題の多くはノードに入って解く (etcd のバックアップと復元、kubelet の故障、static Pod、taint、drain、アップグレード)。kubeadm のクラスタで、
   ターミナルから `ssh cp` / `ssh worker` で入れる。ノードの鍵はクラスタを作るときに作るので、この機能より前に作ったクラスタでは使えない
+- kubeadm のアップグレードの問題は、最新より 1 つ古いマイナーバージョン (`"version":"v1.36"` など) で作ったクラスタで出せる。
+  最初の出題でスナップショットを取り、やり直すときはそれに戻す
 - 練習用のクラスタを 1 つ作っておくとよい (試験と同じ kubeadm、ワーカー 1 台以上がおすすめ)
 - 問題の書き方と仕組みは [docs/practice.md](docs/practice.md)
 
