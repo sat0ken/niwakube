@@ -432,7 +432,7 @@ NFS サーバーは `host-setup.sh` が用意する (`/var/lib/niwakube/nfs` を
 | ワークフロー | 内容 |
 |---|---|
 | `CI` (`.github/workflows/ci.yml`) | `go vet` / `gofmt` / `go test -race` / shellcheck、linux/amd64・arm64 のバイナリをビルドして Artifacts に保存。`v*` のタグを push すると Release を作ってバイナリと `SHA256SUMS` を添付する |
-| `E2E (KVM)` (`.github/workflows/e2e.yml`) | ランナーの `/dev/kvm` を使い (nested virtualization)、実際に VM を作って試す。`VM` ジョブは `test-vm.sh` と `scripts/e2e.sh`、`Cluster` ジョブは `scripts/e2e-cluster.sh` で k3s クラスタを作り、Deployment・Service・クラスタ内 DNS まで確かめる |
+| `E2E (KVM)` (`.github/workflows/e2e.yml`) | ランナーの `/dev/kvm` を使い (nested virtualization)、実際に VM を作って試す。`VM` ジョブは `test-vm.sh` と `scripts/e2e.sh`、`Cluster` と `nspawn` のジョブは `scripts/e2e-cluster.sh` で k3s・kubeadm・Talos のクラスタを作り、Deployment・Service・クラスタ内 DNS・LoadBalancer・PV まで確かめる。ワーカーのサイズと台数の変更、スナップショットは時間がかかるので `Cluster (k3s, cilium, runc)` だけで試す (`LIFECYCLE=1`) |
 
 E2E は実機でも同じスクリプトで試せる (`host-setup.sh` を済ませておくこと):
 
@@ -442,4 +442,8 @@ make e2e
 
 ```bash
 make e2e-cluster DISTRO=k3s
+```
+
+```bash
+make e2e-cluster DISTRO=k3s LIFECYCLE=1
 ```
