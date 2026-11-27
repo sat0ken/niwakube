@@ -34,3 +34,16 @@ func (s *Server) clearCache(w http.ResponseWriter, _ *http.Request) {
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// pruneCache は自動の削除をいま動かし、結果を返す。
+func (s *Server) pruneCache(w http.ResponseWriter, _ *http.Request) {
+	if !s.cacheEnabled(w) {
+		return
+	}
+	res, err := s.opts.Cache.Prune()
+	if err != nil {
+		s.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}

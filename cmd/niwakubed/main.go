@@ -112,6 +112,8 @@ func run() error {
 		devFake     = flag.Bool("dev-fake-backend", false, "VM を実際には作らない (KVM の無い PC で Web UI を開発するため)")
 		regCache    = flag.Bool("registry-cache", true, "コンテナイメージのキャッシュ (ノードの containerd のミラー) を動かす")
 		regPort     = flag.Int("registry-cache-port", 5000, "イメージのキャッシュの待ち受けポート (ブリッジのアドレスで待ち受ける)")
+		regMaxGiB   = flag.Int("registry-cache-max-gib", 30, "イメージのキャッシュの上限 (GiB)。超えたら使われていない順に消す。0 なら上限なし")
+		regMaxAge   = flag.Duration("registry-cache-max-age", 30*24*time.Hour, "これより長く使われていないイメージのキャッシュは消す。0 なら消さない")
 	)
 	flag.Parse()
 	if *showVer {
@@ -196,7 +198,8 @@ func run() error {
 	var cache *regcache.Cache
 	mirror := ""
 	if *regCache && !*devFake {
-		cache, err = regcache.New(regcache.Config{Dir: filepath.Join(*dataDir, "registry-cache"), Upstreams: distro.MirroredRegistries, Log: log})
+		cache, err = regcache.New(regcache.Config{Dir: filepath.Join(*dataDir, "registry-cache"), Upstreams: distro.MirroredRegistries, Log: log,
+			MaxBytes: int64(*regMaxGiB) << 30, MaxAge: *regMaxAge, MinFreeRatio: 0.1})
 		if err != nil {
 			return err
 		}
@@ -225,6 +228,10 @@ func run() error {
 		log.Warn("terminal runs without the sandbox (dev mode)")
 	}
 	term.Cleanup(ctx)
+	if cache != nil {
+		// 起動時と 1 時間ごとに、使われていないイメージを消す (上限・期限・ディスクの空き)
+		go cache.Run(ctx, time.Hour)
+	}
 
 	// CKA / CKAD の練習問題。問題を出すクラスタには admin の kubeconfig でつなぎ、ノードにはクラスタの鍵で SSH する
 	drills, err := practice.NewService(func(ctx context.Context, name string) (*practice.Target, error) {
