@@ -14,6 +14,7 @@ import (
 
 	"github.com/sat0ken/niwakube/internal/backend"
 	"github.com/sat0ken/niwakube/internal/cluster"
+	"github.com/sat0ken/niwakube/internal/handson"
 	"github.com/sat0ken/niwakube/internal/ipam"
 	"github.com/sat0ken/niwakube/internal/machine"
 	"github.com/sat0ken/niwakube/internal/practice"
@@ -43,6 +44,8 @@ type Options struct {
 	Practice *practice.Service
 	// Cache はコンテナイメージのキャッシュ。nil なら使えない (501)
 	Cache *regcache.Cache
+	// Handson は CloudNative Days のハンズオンの資料。nil なら使えない (501)
+	Handson *handson.Service
 }
 
 func New(svc *machine.Service, clusters *cluster.Service, log *slog.Logger, opts ...Options) *Server {
@@ -95,6 +98,9 @@ func New(svc *machine.Service, clusters *cluster.Service, log *slog.Logger, opts
 //	GET    /api/clusters/{name}/kubeconfig     ?proxy=socks5://localhost:1080 で proxy-url を入れる
 //	GET    /api/kubeconfig?cluster=a&cluster=b  複数のクラスタを 1 つにまとめた kubeconfig (?proxy= も使える)
 //	GET    /api/clusters/{name}/terminal       WebSocket。クラスタの kubeconfig を設定したシェル (Web UI のターミナル)
+//	GET    /api/handson/chapters            CloudNative Days のハンズオンの章の一覧 (niwakube での読み替えつき)
+//	GET    /api/handson/chapters/{id}       章の資料を HTML にしたもの (?doc=README_CI.md で章の中のほかのファイル)
+//	GET    /api/handson/files/{path...}     資料の画像 (GitHub から取る)
 //	GET    /api/clusters/{name}/talosconfig  Talos のみ (?proxy= で proxy-url を入れる)
 //	GET    /api/clusters/{name}/forwards     ホストのポートからクラスタへの転送の一覧
 //	POST   /api/clusters/{name}/forwards     {"hostPort":8080,"ip":"172.30.1.100","port":80}
@@ -138,6 +144,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/cache", s.cacheStats)
 	mux.HandleFunc("DELETE /api/cache", s.clearCache)
 	mux.HandleFunc("POST /api/cache/prune", s.pruneCache)
+	mux.HandleFunc("GET /api/handson/chapters", s.listHandson)
+	mux.HandleFunc("GET /api/handson/chapters/{id}", s.handsonPage)
+	mux.HandleFunc("GET /api/handson/files/{path...}", s.handsonFile)
 	mux.HandleFunc("GET /api/practice/problems", s.listProblems)
 	mux.HandleFunc("GET /api/practice/problems/{id}", s.getProblem)
 	mux.HandleFunc("POST /api/practice/problems/{id}/setup", s.setupProblem)
@@ -499,7 +508,8 @@ func statusFor(err error) int {
 	switch {
 	case errors.Is(err, machine.ErrInvalid), errors.Is(err, backend.ErrImageNotFound), errors.Is(err, practice.ErrUnsupported):
 		return http.StatusBadRequest
-	case errors.Is(err, store.ErrNotFound), errors.Is(err, backend.ErrNotFound), errors.Is(err, practice.ErrNotFound):
+	case errors.Is(err, store.ErrNotFound), errors.Is(err, backend.ErrNotFound), errors.Is(err, practice.ErrNotFound),
+		errors.Is(err, handson.ErrNotFound):
 		return http.StatusNotFound
 	case errors.Is(err, store.ErrExists), errors.Is(err, backend.ErrAlreadyExists), errors.Is(err, ipam.ErrExhausted),
 		errors.Is(err, machine.ErrPartOfCluster), errors.Is(err, cluster.ErrBusy):

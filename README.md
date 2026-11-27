@@ -210,6 +210,8 @@ kubectl --kubeconfig demo.kubeconfig -n kube-system port-forward svc/hubble-ui 1
 | GET | `/api/clusters/{name}/talosconfig` | Talos の talosconfig (Talos のみ) |
 | GET / POST / DELETE | `/api/clusters/{name}/forwards` | ホストのポートからクラスタへの転送 (下記) |
 | GET | `/api/practice/problems` | 練習問題の一覧 (下記) |
+| GET | `/api/handson/chapters` | CloudNative Days のハンズオンの章の一覧 (niwakube での読み替えつき、下記) |
+| GET | `/api/handson/chapters/{id}` | 章の資料を HTML にしたもの (`?doc=README_CI.md` で章の中のほかのファイル) |
 | POST | `/api/practice/problems/{id}/setup` / `check` / `solve` | `{"cluster":"demo"}` 出題する / 採点する / 模範解答を当てる |
 
 `POST /api/clusters` の項目 (省略時の既定値): `name` (必須、20 文字以内)、`distro` (k3s)、
@@ -337,6 +339,8 @@ niwakube のクラスタで進められる。Web UI の「クラスタを作る�
 - chapter_cluster-create で kind に入れるものを、クラスタの作成と一緒に入れる: kubeadm の Kubernetes v1.36 (CP 1 台 + ワーカー 2 台)、
   Gateway API の CRD、ハンズオンと同じ設定の Cilium 1.20、Envoy Gateway と Gateway `handson-gateway`
 - kind のポートの割り当ての代わりに、ミニPC の 80・8080・8443・18080・18443 番を CP の NodePort に転送する (同時に 1 クラスタまで)
+- クラスタの画面の「資料とターミナルを並べて開く」で、左にハンズオンの資料 (GitHub の README をミニPC が取ってきて表示)、右にターミナルを並べる。
+  章ごとに niwakube での読み替えを資料の上に出し、コマンドは「ターミナルに貼る」で右に貼れる
 - ターミナルのホームは閉じても残り、`*.example.com` はミニPC に向いている。helmfile・cilium・hubble は `scripts/host-setup.sh` が入れる (`HANDSON_TOOLS=` で入れない)
 - 章ごとの読み替え (`helmfile sync -f helm/helmfile.yaml` は実行しない、`docker exec kind-worker` は `ssh worker` など) は [docs/cnd-handson.md](docs/cnd-handson.md)
 

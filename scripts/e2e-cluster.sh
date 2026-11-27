@@ -386,6 +386,10 @@ YAML
     die "ターミナルを閉じるとホームが消えています"
   fi
   echo "    hosts・helmfile / cilium / hubble・閉じても残るホーム: OK"
+  # 資料とターミナルを並べる画面で使う、ハンズオンの資料 (niwakubed が GitHub から取って HTML にする)
+  curl -fsS "$API/handson/chapters/chapter_cluster-create" | jq -e '.html | contains("<h1")' >/dev/null ||
+    die "ハンズオンの資料を取れません"
+  echo "    ハンズオンの資料 (chapter_cluster-create): OK"
 fi
 
 # pv_pod NAME PVC: PVC をマウントして /data/hello に書き込む Pod を作る

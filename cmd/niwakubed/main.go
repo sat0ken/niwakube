@@ -28,6 +28,7 @@ import (
 	"github.com/sat0ken/niwakube/internal/distro/k3s"
 	"github.com/sat0ken/niwakube/internal/distro/kubeadm"
 	"github.com/sat0ken/niwakube/internal/distro/talos"
+	"github.com/sat0ken/niwakube/internal/handson"
 	"github.com/sat0ken/niwakube/internal/ipam"
 	"github.com/sat0ken/niwakube/internal/kube"
 	"github.com/sat0ken/niwakube/internal/machine"
@@ -292,6 +293,7 @@ func run() error {
 			Terminal:     term,
 			Practice:     drills,
 			Cache:        cache,
+			Handson:      handson.New(),
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
