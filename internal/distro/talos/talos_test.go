@@ -209,3 +209,18 @@ func TestIsAlreadyBootstrapped(t *testing.T) {
 		t.Error("connection errors must be retried")
 	}
 }
+
+func TestMachineConfigRegistryMirror(t *testing.T) {
+	c := newCluster(t, distro.CNIFlannel)
+	c.RegistryMirror = "http://172.30.0.1:5000"
+	b := must(New().RawUserData(c, wNode))
+	for _, want := range []string{"docker.io", "registry.k8s.io", "http://172.30.0.1:5000"} {
+		if !bytes.Contains(b, []byte(want)) {
+			t.Errorf("machine config does not contain %q", want)
+		}
+	}
+	c.RegistryMirror = ""
+	if b := must(New().RawUserData(c, wNode)); bytes.Contains(b, []byte("172.30.0.1:5000")) {
+		t.Error("no mirror without RegistryMirror")
+	}
+}

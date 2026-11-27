@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/netip"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -228,5 +229,38 @@ func TestUserDataContainer(t *testing.T) {
 	if strings.Contains(fs[configPath].Content, "KubeProxyConfiguration") || strings.Contains(fs[initPath].Content, "ignore-preflight") ||
 		strings.Contains(fs[installPath].Content, "|| true") {
 		t.Error("VM config must not have container settings")
+	}
+}
+
+func TestUserDataRegistryMirror(t *testing.T) {
+	k := New()
+	sec, _ := k.GenerateSecrets("demo")
+	c := &distro.Cluster{Name: "demo", Version: "v1.37", APIAddr: netip.MustParseAddr("172.30.1.11"), Secrets: sec, RegistryMirror: "http://172.30.0.1:5000",
+		Addons: distro.Addons{CNI: distro.CNIFlannel, DefaultRuntime: distro.RuntimeRunc}}
+	w, err := k.UserData(c, &distro.Node{Name: "demo-worker-1", Role: distro.RoleWorker, Index: 1, IP: netip.MustParseAddr("172.30.1.21")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs := files(t, w)
+	if got := fs["/etc/containerd/certs.d/docker.io/hosts.toml"].Content; got != "server = \"https://registry-1.docker.io\"\n\n[host.\"http://172.30.0.1:5000\"]\n  capabilities = [\"pull\", \"resolve\"]\n" {
+		t.Errorf("docker.io hosts.toml:\n%s", got)
+	}
+	if !strings.Contains(fs["/etc/containerd/certs.d/registry.k8s.io/hosts.toml"].Content, `server = "https://registry.k8s.io"`) {
+		t.Error("registry.k8s.io must be mirrored")
+	}
+	// 既定の config.toml の空の config_path (1.x は ""、2.x は '') を、どちらも certs.d にする
+	script := fs[installPath].Content
+	i := strings.Index(script, "sed -i -E \"s#config_path")
+	if i < 0 {
+		t.Fatalf("no config_path rewrite:\n%s", script)
+	}
+	line := script[i : i+strings.Index(script[i:], "\n")]
+	for _, in := range []string{`  config_path = ""`, `  config_path = ''`} {
+		cmd := exec.Command("bash", "-c", strings.Replace(strings.Replace(line, " /etc/containerd/config.toml", "", 1), "sed -i ", "sed ", 1))
+		cmd.Stdin = strings.NewReader(in + "\n")
+		out, err := cmd.Output()
+		if err != nil || strings.TrimSpace(string(out)) != "config_path = '/etc/containerd/certs.d'" {
+			t.Errorf("%s -> %q %v", in, out, err)
+		}
 	}
 }

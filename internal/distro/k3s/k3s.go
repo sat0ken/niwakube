@@ -162,6 +162,18 @@ func (k K3s) UserData(c *distro.Cluster, n *distro.Node) (map[string]any, error)
 		return nil, fmt.Errorf("unknown role %q", n.Role)
 	}
 
+	if c.RegistryMirror != "" {
+		// イメージは niwakubed のキャッシュを通して取る (届かなければ k3s の containerd は元のレジストリから取る)
+		mirrors := map[string]any{}
+		for _, r := range distro.MirroredRegistries {
+			mirrors[r] = map[string]any{"endpoint": []string{c.RegistryMirror}}
+		}
+		reg, err := yaml.Marshal(map[string]any{"mirrors": mirrors})
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, writeFile{Path: "/etc/rancher/k3s/registries.yaml", Permissions: "0600", Content: string(reg)})
+	}
 	cfgYAML, err := yaml.Marshal(cfg)
 	if err != nil {
 		return nil, err
