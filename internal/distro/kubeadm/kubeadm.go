@@ -363,6 +363,21 @@ if [ "$ROLE" = "control-plane" ]; then
     sleep 10
   done
 {{- end}}
+  # etcd のバックアップと復元 (CKA の練習問題) に使う etcdctl / etcdutl を、etcd のイメージと同じバージョンで入れる。
+  # 入れられなくてもクラスタは使えるので、失敗は警告だけにする
+  install_etcd_client() {
+    local ver arch tmp
+    ver=$(kubeadm config images list --kubernetes-version "$(kubeadm version -o short)" 2>/dev/null | sed -n 's#.*/etcd:v\{0,1\}\([0-9][0-9.]*\).*#\1#p' | head -n 1)
+    [ -n "$ver" ] || return 1
+    arch=$(dpkg --print-architecture)
+    tmp=$(mktemp -d)
+    curl -fsSL --retry 5 --retry-all-errors -o "$tmp/etcd.tar.gz" \
+      "https://github.com/etcd-io/etcd/releases/download/v${ver}/etcd-v${ver}-linux-${arch}.tar.gz" || return 1
+    tar -xzf "$tmp/etcd.tar.gz" -C "$tmp" --strip-components=1 || return 1
+    install -m 0755 "$tmp/etcdctl" "$tmp/etcdutl" /usr/local/bin/ || return 1
+    rm -rf "$tmp"
+  }
+  install_etcd_client || echo "niwakube: etcdctl / etcdutl を入れられませんでした" >&2
 else
   # CP の API が上がるまで待ってから join する (CP 側もパッケージのインストール中)
   until curl -ks --max-time 5 -o /dev/null "https://{{.Endpoint}}/livez"; do sleep 5; done

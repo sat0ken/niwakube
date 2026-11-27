@@ -8,7 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sat0ken/niwakube/internal/backend"
 	"github.com/sat0ken/niwakube/internal/machine"
+	"github.com/sat0ken/niwakube/internal/nodeexec"
 	"github.com/sat0ken/niwakube/internal/store"
 )
 
@@ -169,5 +171,61 @@ func TestScaleDownBusyAndNoAPI(t *testing.T) {
 	}
 	if c, _ := cs.Get(ctx, "demo"); c.Workers != 0 || len(workerNames(t, ms, "demo")) != 0 {
 		t.Errorf("after retry: %d workers", c.Workers)
+	}
+}
+
+func TestNodeAccess(t *testing.T) {
+	ctx := context.Background()
+	cs, _, _, _ := newTest(t)
+	cs.postCreateInterval = 10 * time.Millisecond
+	if _, err := cs.Create(ctx, CreateRequest{Name: "demo", Distro: "kubeadm", Workers: intp(2)}); err != nil {
+		t.Fatal(err)
+	}
+	a, err := cs.NodeAccess(ctx, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, n := range a.Nodes {
+		names = append(names, n.Name+"/"+n.Alias+"="+n.IP)
+	}
+	if strings.Join(names, ",") != "demo-cp-1/cp=172.30.1.11,demo-worker-1/worker=172.30.1.21,demo-worker-2/worker2=172.30.1.22" || a.User != "ubuntu" || a.Distro != "kubeadm" {
+		t.Errorf("access: %+v %v", a, names)
+	}
+	// 全ノードにこのクラスタの公開鍵が入っている
+	pub, err := nodeexec.AuthorizedKey(a.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range a.Nodes {
+		m, _ := cs.store.GetMachine(ctx, n.Name)
+		if !slices.Contains(m.SSHKeys, pub) {
+			t.Errorf("%s: cluster key is not authorized: %v", n.Name, m.SSHKeys)
+		}
+	}
+	// 足したワーカーにも入る
+	if _, err := cs.Scale(ctx, "demo", ScaleRequest{Workers: intp(3)}); err != nil {
+		t.Fatal(err)
+	}
+	waitOperation(t, cs, "demo")
+	if m, _ := cs.store.GetMachine(ctx, "demo-worker-3"); !slices.Contains(m.SSHKeys, pub) {
+		t.Errorf("added worker: %v", m.SSHKeys)
+	}
+	// クラスタごとに別の鍵
+	if _, err := cs.Create(ctx, CreateRequest{Name: "other", Distro: "kubeadm", Workers: intp(0)}); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := cs.NodeAccess(ctx, "other"); b == nil || b.Key == a.Key {
+		t.Error("each cluster must have its own key")
+	}
+	// Talos には SSH が無い
+	if _, err := cs.Create(ctx, CreateRequest{Name: "tal", Distro: "talos", Workers: intp(0)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cs.NodeAccess(ctx, "tal"); !errors.Is(err, backend.ErrNotSupported) {
+		t.Errorf("talos: %v", err)
+	}
+	if _, err := cs.NodeAccess(ctx, "nope"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("unknown: %v", err)
 	}
 }

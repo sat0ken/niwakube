@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"time"
 
@@ -78,6 +79,7 @@ func New(svc *machine.Service, clusters *cluster.Service, log *slog.Logger, opts
 //	GET    /api/practice/problems/{id}          問題文・ヒント・解説
 //	POST   /api/practice/problems/{id}/setup    {"cluster":"demo"} 問題の Namespace を作り直して出題する
 //	POST   /api/practice/problems/{id}/check    {"cluster":"demo"} クラスタの状態で採点する
+//	POST   /api/practice/problems/{id}/solve    {"cluster":"demo"} 模範解答を当てる
 //	POST   /api/clusters/{name}/resize   {"role":"worker","size":{"cpus":4,"memoryMiB":8192,"diskGiB":50}} 1 台ずつ drain して再起動 (202)
 //	POST   /api/clusters/{name}/scale    {"workers":3} ワーカーの台数を変える (減らすときは drain してから消す) (202)
 //	GET    /api/clusters/{name}/kubeconfig     ?proxy=socks5://localhost:1080 で proxy-url を入れる
@@ -123,6 +125,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/practice/problems/{id}", s.getProblem)
 	mux.HandleFunc("POST /api/practice/problems/{id}/setup", s.setupProblem)
 	mux.HandleFunc("POST /api/practice/problems/{id}/check", s.checkProblem)
+	mux.HandleFunc("POST /api/practice/problems/{id}/solve", s.solveProblem)
 	mux.HandleFunc("GET /api/clusters/{name}/kubeconfig", s.kubeconfig)
 	mux.HandleFunc("GET /api/kubeconfig", s.mergedKubeconfig)
 	mux.HandleFunc("GET /api/clusters/{name}/terminal", s.terminal)
@@ -348,6 +351,20 @@ func (s *Server) kubeconfig(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(b)
 }
 
+// terminalSSH はターミナルから ssh で入る接続先を作る。ノード名のほか、別名 (cp、worker、worker2 ...) でも呼べる
+// (練習問題の問題文はこの別名を使う)。
+func terminalSSH(a *cluster.NodeAccess) *terminal.SSH {
+	x := &terminal.SSH{User: a.User, Key: []byte(a.Key)}
+	for _, n := range a.Nodes {
+		ip, err := netip.ParseAddr(n.IP)
+		if err != nil {
+			continue
+		}
+		x.Hosts = append(x.Hosts, terminal.SSHHost{Names: []string{n.Name, n.Alias}, IP: ip})
+	}
+	return x
+}
+
 // terminal は WebSocket に切り替えて、クラスタの kubeconfig (Talos なら talosconfig も) を設定したシェルとつなぐ。
 func (s *Server) terminal(w http.ResponseWriter, r *http.Request) {
 	if s.opts.Terminal == nil {
@@ -363,6 +380,12 @@ func (s *Server) terminal(w http.ResponseWriter, r *http.Request) {
 	f := terminal.Files{Cluster: name, Kubeconfig: kc}
 	if _, tc, err := s.clusters.ClientConfig(r.Context(), name); err == nil {
 		f.Talosconfig = tc
+	} else if !errors.Is(err, backend.ErrNotSupported) {
+		s.writeError(w, err)
+		return
+	}
+	if a, err := s.clusters.NodeAccess(r.Context(), name); err == nil {
+		f.SSH = terminalSSH(a)
 	} else if !errors.Is(err, backend.ErrNotSupported) {
 		s.writeError(w, err)
 		return
@@ -442,7 +465,7 @@ type errorBody struct {
 
 func statusFor(err error) int {
 	switch {
-	case errors.Is(err, machine.ErrInvalid), errors.Is(err, backend.ErrImageNotFound):
+	case errors.Is(err, machine.ErrInvalid), errors.Is(err, backend.ErrImageNotFound), errors.Is(err, practice.ErrUnsupported):
 		return http.StatusBadRequest
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, backend.ErrNotFound), errors.Is(err, practice.ErrNotFound):
 		return http.StatusNotFound

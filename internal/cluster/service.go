@@ -30,6 +30,7 @@ import (
 	"github.com/sat0ken/niwakube/internal/kube"
 	"github.com/sat0ken/niwakube/internal/machine"
 	"github.com/sat0ken/niwakube/internal/netx"
+	"github.com/sat0ken/niwakube/internal/nodeexec"
 	"github.com/sat0ken/niwakube/internal/pki"
 	"github.com/sat0ken/niwakube/internal/store"
 )
@@ -386,6 +387,9 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (*Cluster, erro
 	if err != nil {
 		return nil, err
 	}
+	if secrets.NodeSSHKey, err = nodeexec.NewKey("niwakube-" + req.Name); err != nil {
+		return nil, err
+	}
 	rawSecrets, err := json.Marshal(secrets)
 	if err != nil {
 		return nil, err
@@ -450,10 +454,18 @@ func (s *Service) workerNode(rec *store.Cluster, i int) distro.Node {
 
 // createNode はノードのマシンを作って起動する (user-data はディストリが作る)。
 func (s *Service) createNode(ctx context.Context, d distro.Distro, dc *distro.Cluster, rec *store.Cluster, n distro.Node, size store.NodeSize) error {
+	keys := append([]string{}, rec.Spec.SSHKeys...)
+	if dc.Secrets != nil && dc.Secrets.NodeSSHKey != "" {
+		pub, err := nodeexec.AuthorizedKey(dc.Secrets.NodeSSHKey)
+		if err != nil {
+			return fmt.Errorf("node ssh key: %w", err)
+		}
+		keys = append(keys, pub)
+	}
 	req := machine.CreateRequest{
 		Name: n.Name, Backend: rec.Spec.Backend, Image: rec.Spec.Image,
 		CPUs: size.CPUs, MemoryMiB: size.MemoryMiB, DiskGiB: size.DiskGiB,
-		SSHAuthorizedKeys: rec.Spec.SSHKeys,
+		SSHAuthorizedKeys: keys,
 		IP:                n.IP, Cluster: rec.Name, Role: string(n.Role),
 	}
 	var err error

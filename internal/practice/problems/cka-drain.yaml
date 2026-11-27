@@ -1,0 +1,76 @@
+id: cka-drain
+exam: CKA
+domain: クラスタの構築と管理
+title: メンテナンスのためにノードを空ける
+weight: 5
+requires: kubeadm
+namespaces: [maint]
+setup: |
+  apiVersion: v1
+  kind: Namespace
+  metadata:
+    name: maint
+  ---
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: cache
+    namespace: maint
+  spec:
+    replicas: 2
+    selector:
+      matchLabels:
+        app: cache
+    template:
+      metadata:
+        labels:
+          app: cache
+      spec:
+        containers:
+          - name: cache
+            image: registry.k8s.io/e2e-test-images/agnhost:2.39
+            args: ["netexec", "--http-port=8080"]
+cleanup:
+  - node: cp
+    run: sudo kubectl --kubeconfig /etc/kubernetes/admin.conf uncordon {{worker}} >/dev/null 2>&1 || true
+task: |
+  ワーカーのノードを、OS の更新のために空けてください。
+
+  - これからは新しい Pod がこのノードに置かれないようにする
+  - いま動いている Pod は、DaemonSet のものを除いて追い出す (emptyDir のデータは消えてよい)
+
+  この問題では、作業のあとにノードを元に戻さずに採点してください (元に戻すのは、次に出題したときに niwakube が行います)。
+checks:
+  - description: ワーカーに新しい Pod が置かれない (unschedulable)
+    apiVersion: v1
+    kind: Node
+    name: '{{worker}}'
+    jsonpath: '{.spec.unschedulable}'
+    equals: "true"
+  - description: Namespace maint の Pod がワーカーに残っていない
+    apiVersion: v1
+    kind: Pod
+    namespace: maint
+    fieldSelector: spec.nodeName={{worker}}
+    jsonpath: '{.items[*].metadata.name}'
+    equals: ""
+  - description: Deployment cache は残っている
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: maint
+    name: cache
+hint: |
+  kubectl drain は cordon (unschedulable にする) と Pod の追い出しをまとめて行います。
+  DaemonSet の Pod や emptyDir を使う Pod があると止まるので、それぞれ許可するオプションを付けます。
+solution: |
+  kubectl get nodes でワーカーの名前を確かめて、
+
+  kubectl drain <ワーカーの名前> --ignore-daemonsets --delete-emptydir-data
+
+  コントローラー (Deployment など) に属さない Pod があると drain は止まります。そのときは --force で消してよいかを考えます
+  (消した Pod は作り直されません)。PodDisruptionBudget で追い出せない Pod があると、drain は待ち続けます。
+  メンテナンスが終わったら kubectl uncordon <ワーカーの名前> で戻します。
+  コントロールプレーンに taint があるクラスタでは、追い出された Pod の置き場所が無く Pending になります。
+answerRun:
+  - node: cp
+    run: sudo kubectl --kubeconfig /etc/kubernetes/admin.conf drain {{worker}} --ignore-daemonsets --delete-emptydir-data --force --timeout=180s

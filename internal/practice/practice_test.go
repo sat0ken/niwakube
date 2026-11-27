@@ -9,10 +9,13 @@ import (
 	"time"
 
 	"github.com/sat0ken/niwakube/internal/kube"
+	"github.com/sat0ken/niwakube/internal/nodeexec"
 )
 
 // fakeCluster はマニフェストを覚えておくだけのクラスタ。apply は同じ名前のオブジェクトを丸ごと置き換える。
 type fakeCluster struct {
+	canICalls   []string
+	allowed     map[string]bool // "verb resource" → できるか
 	objs        map[string]map[string]any
 	deleted     []string
 	terminating map[string]int // Namespace ごとに、消えるまでに NamespaceExists が true を返す回数
@@ -45,7 +48,7 @@ func (f *fakeCluster) Get(_ context.Context, apiVersion, kind, ns, name string) 
 	return f.objs[key(apiVersion, kind, ns, name)], nil
 }
 
-func (f *fakeCluster) List(_ context.Context, apiVersion, kind, ns, _ string) (map[string]any, error) {
+func (f *fakeCluster) List(_ context.Context, apiVersion, kind, ns, _, _ string) (map[string]any, error) {
 	var items []any
 	for k, o := range f.objs {
 		if strings.HasPrefix(k, apiVersion+"/"+kind+"/"+ns+"/") {
@@ -73,20 +76,50 @@ func (f *fakeCluster) NamespaceExists(_ context.Context, name string) (bool, err
 	return false, nil
 }
 
+func (f *fakeCluster) CanI(_ context.Context, user string, groups []string, verb, group, resource, ns string) (bool, error) {
+	f.canICalls = append(f.canICalls, user+" "+strings.Join(groups, ",")+" "+verb+" "+group+"/"+resource+" "+ns)
+	return f.allowed[verb+" "+resource], nil
+}
+
+// fakeNodes はノードで動かしたコマンドを記録する。exit に書いたコマンドはその終了コードを返す (ほかは 0)。
+type fakeNodes struct {
+	log  []string
+	exit map[string]int
+}
+
+func (n *fakeNodes) run(_ context.Context, node, script string) (*nodeexec.Result, error) {
+	n.log = append(n.log, node+": "+script)
+	return &nodeexec.Result{ExitCode: n.exit[script]}, nil
+}
+
+func target(fc *fakeCluster, nodes *fakeNodes) *Target {
+	t := &Target{Kube: fc, Distro: "kubeadm"}
+	if nodes != nil {
+		t.Nodes = map[string]string{"cp": "demo-cp-1", "worker": "demo-worker-1"}
+		t.Run = nodes.run
+	}
+	return t
+}
+
+func serviceFor(t *testing.T, ps []*Problem, tg *Target) *Service {
+	t.Helper()
+	s := newService(ps, func(_ context.Context, cluster string) (*Target, error) {
+		if cluster != "demo" {
+			return nil, errors.New("no such cluster")
+		}
+		return tg, nil
+	})
+	s.poll = time.Millisecond
+	return s
+}
+
 func service(t *testing.T, fc *fakeCluster) *Service {
 	t.Helper()
 	ps, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := newService(ps, func(_ context.Context, cluster string) (Cluster, error) {
-		if cluster != "demo" {
-			return nil, errors.New("no such cluster")
-		}
-		return fc, nil
-	})
-	s.poll = time.Millisecond
-	return s
+	return serviceFor(t, ps, target(fc, &fakeNodes{}))
 }
 
 func TestLoadEmbedded(t *testing.T) {
@@ -98,7 +131,7 @@ func TestLoadEmbedded(t *testing.T) {
 		t.Fatalf("want at least 10 problems, got %d", len(ps))
 	}
 	for _, p := range ps {
-		if p.Answer == "" || p.Solution == "" {
+		if (p.Answer == "" && len(p.AnswerRun) == 0) || p.Solution == "" {
 			t.Errorf("%s: every problem needs a solution and an answer (CI applies the answer)", p.ID)
 		}
 		if _, err := kube.Decode(p.Setup + "\n---\n" + p.Answer); err != nil {
@@ -107,8 +140,18 @@ func TestLoadEmbedded(t *testing.T) {
 	}
 }
 
-// 解答を当てると、状態 (.status) やコントローラーが作るオブジェクトを見ない項目はすべて合格し、
-// 出題直後は合格しない項目があること。(残りの項目は、本物のクラスタで E2E が確かめる)
+// static は本物のクラスタが無くても確かめられる項目か。状態 (.status)、コントローラーや kubelet が作る・変える
+// オブジェクト (selector で選ぶもの、Node、ノードの名前を使うもの)、ノードでのコマンド、権限は E2E で確かめる。
+func static(c Check) bool {
+	eq := ""
+	if c.Equals != nil {
+		eq = *c.Equals
+	}
+	return c.CanI == nil && c.Node == "" && c.Kind != "Node" && c.Selector == "" && c.FieldSelector == "" &&
+		!strings.Contains(c.JSONPath, ".status") && !phRe.MatchString(c.Name+c.JSONPath+eq)
+}
+
+// 解答を当てると static な項目はすべて合格すること。全項目が static な問題は、出題直後は満点でないこと。
 func TestAnswersSatisfyChecks(t *testing.T) {
 	ctx := context.Background()
 	fc := newFake()
@@ -122,22 +165,28 @@ func TestAnswersSatisfyChecks(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if before.Passed == before.Total {
-			t.Errorf("%s: all checks pass right after setup", p.ID)
+		staticPass, staticTotal := 0, 0
+		for i, c := range before.Checks {
+			if static(p.Checks[i]) {
+				staticTotal++
+				if c.Passed {
+					staticPass++
+				}
+			}
 		}
-		if err := fc.Apply(ctx, p.Answer); err != nil {
-			t.Fatalf("%s: answer: %v", p.ID, err)
+		// 全項目が static な問題だけ、出題直後に満点でないことをここで確かめる (残りは E2E)
+		if staticTotal == len(p.Checks) && staticPass == staticTotal {
+			t.Errorf("%s: all static checks pass right after setup", p.ID)
+		}
+		if err := s.Solve(ctx, "demo", p.ID); err != nil {
+			t.Fatalf("%s: solve: %v", p.ID, err)
 		}
 		after, err := s.Check(ctx, "demo", p.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
 		for i, c := range after.Checks {
-			// 状態 (.status) や、コントローラーが作るオブジェクト (selector で選ぶ EndpointSlice など) は本物のクラスタでしか確かめられない
-			if strings.Contains(p.Checks[i].JSONPath, ".status") || p.Checks[i].Selector != "" {
-				continue
-			}
-			if !c.Passed {
+			if static(p.Checks[i]) && !c.Passed {
 				t.Errorf("%s: answer fails %q: %s", p.ID, c.Description, c.Message)
 			}
 		}
@@ -229,6 +278,10 @@ checks:
 		"bad exam":          {"x-1", strings.Replace(base, "CKAD", "CKS", 1), "exam"},
 		"protected ns":      {"x-1", strings.Replace(base, "[a]", "[kube-system]", 1), "cannot be used"},
 		"name and selector": {"x-1", base + "    selector: app=x\n", "exactly one"},
+		"object and node":   {"x-1", base + "    node: cp\n    run: x\n", "exactly one"},
+		"bad node":          {"x-1", strings.Replace(base, "    apiVersion: v1\n    kind: ConfigMap\n    namespace: a\n    name: cm\n", "    node: master\n    run: x\n", 1), "node check"},
+		"canI w/o allowed":  {"x-1", strings.Replace(base, "    apiVersion: v1\n    kind: ConfigMap\n    namespace: a\n    name: cm\n", "    canI: {serviceAccount: a/b, verb: get, resource: pods}\n", 1), "allowed"},
+		"bad requires":      {"x-1", base + "requires: talos\n", "requires"},
 		"bad jsonpath":      {"x-1", base + "    jsonpath: '{.spec[}'\n", "jsonpath"},
 		"equals w/o path":   {"x-1", base + "    equals: v\n", "need a jsonpath"},
 		"unknown field":     {"x-1", base + "extra: 1\n", "unknown field"},
@@ -240,5 +293,161 @@ checks:
 		case c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)):
 			t.Errorf("%s: want error containing %q, got %v", name, c.want, err)
 		}
+	}
+}
+
+const nodeProblems = `id: n-1
+exam: CKA
+domain: d
+title: node problem
+weight: 4
+requires: kubeadm
+namespaces: [n1]
+setup: |
+  apiVersion: v1
+  kind: Namespace
+  metadata:
+    name: n1
+nodeSetup:
+  - node: worker
+    run: break {{worker}}
+cleanup:
+  - node: cp
+    run: uncordon {{worker}}
+task: fix it
+checks:
+  - description: node command
+    node: worker
+    run: verify {{cp}}
+  - description: can deploy
+    canI:
+      serviceAccount: n1/deployer
+      verb: create
+      group: apps
+      resource: deployments
+      namespace: n1
+    allowed: true
+  - description: cannot delete pods
+    canI:
+      serviceAccount: n1/deployer
+      verb: delete
+      resource: pods
+      namespace: n1
+    allowed: false
+  - description: scheduled on the worker
+    apiVersion: v1
+    kind: Pod
+    namespace: n1
+    fieldSelector: spec.nodeName={{worker}}
+    jsonpath: '{.items[*].metadata.name}'
+    equals: ""
+answerRun:
+  - node: cp
+    run: fix {{worker}}
+solution: s
+`
+
+const plainProblem = `id: p-1
+exam: CKAD
+domain: d
+title: plain
+weight: 1
+namespaces: [p1]
+cleanup:
+  - node: worker2
+    run: never runs (no such node)
+task: t
+checks:
+  - description: c
+    apiVersion: v1
+    kind: ConfigMap
+    namespace: p1
+    name: cm
+answer: |
+  apiVersion: v1
+  kind: ConfigMap
+  metadata:
+    name: cm
+    namespace: p1
+solution: s
+`
+
+func TestNodeSteps(t *testing.T) {
+	ctx := context.Background()
+	ps, err := load(fstest.MapFS{
+		"problems/n-1.yaml": {Data: []byte(nodeProblems)},
+		"problems/p-1.yaml": {Data: []byte(plainProblem)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fc := newFake()
+	nodes := &fakeNodes{exit: map[string]int{"verify demo-cp-1": 1}}
+	s := serviceFor(t, ps, target(fc, nodes))
+
+	if sum := s.List(); !sum[0].Nodes || sum[0].Requires != "kubeadm" || sum[1].Nodes {
+		t.Errorf("summaries: %+v", sum)
+	}
+
+	// 出題: 全問の cleanup (無いノードの手順は飛ばす) → マニフェスト → nodeSetup。{{...}} はノードの名前になる
+	if err := s.Setup(ctx, "demo", "n-1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(nodes.log, " | "); got != "cp: uncordon demo-worker-1 | worker: break demo-worker-1" {
+		t.Errorf("node steps: %s", got)
+	}
+	if fc.objs[key("v1", "Namespace", "", "n1")] == nil {
+		t.Error("the setup manifest must be applied")
+	}
+
+	// 採点: ノードのコマンドは終了コード、権限は ServiceAccount のユーザーとグループで問い合わせる
+	fc.allowed = map[string]bool{"create deployments": true}
+	r, err := s.Check(ctx, "demo", "n-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Passed != 3 || r.Checks[0].Passed || r.Checks[0].Message != "ノードでの確認が通りません" || !r.Checks[1].Passed || !r.Checks[2].Passed {
+		t.Errorf("check: %+v", r)
+	}
+	if want := "system:serviceaccount:n1:deployer system:serviceaccounts,system:serviceaccounts:n1,system:authenticated create apps/deployments n1"; fc.canICalls[0] != want {
+		t.Errorf("canI call: %q", fc.canICalls[0])
+	}
+	fc.allowed["delete pods"] = true // 余計な権限があると不合格
+	if r, _ := s.Check(ctx, "demo", "n-1"); r.Checks[2].Passed || r.Checks[2].Message != "権限が違います" {
+		t.Errorf("extra permission must fail: %+v", r.Checks[2])
+	}
+	nodes.exit["verify demo-cp-1"] = 0
+	fc.allowed["delete pods"] = false
+	if r, _ := s.Check(ctx, "demo", "n-1"); r.Passed != r.Total || r.Score != 4 {
+		t.Errorf("all pass: %+v", r)
+	}
+
+	// 模範解答
+	nodes.log = nil
+	if err := s.Solve(ctx, "demo", "n-1"); err != nil || strings.Join(nodes.log, "|") != "cp: fix demo-worker-1" {
+		t.Errorf("solve: %v %v", err, nodes.log)
+	}
+	// ノードのコマンドが失敗したら、出力つきのエラー
+	nodes.exit["break demo-worker-1"] = 2
+	if err := s.Setup(ctx, "demo", "n-1"); err == nil || !strings.Contains(err.Error(), "exited with 2") {
+		t.Errorf("failing node step: %v", err)
+	}
+
+	// ノードに入れないクラスタ、ディストリが違うクラスタでは出せない
+	for name, tg := range map[string]*Target{
+		"no ssh":    target(fc, nil),
+		"k3s":       {Kube: fc, Distro: "k3s", Nodes: map[string]string{"cp": "x", "worker": "y"}, Run: nodes.run},
+		"no worker": {Kube: fc, Distro: "kubeadm", Nodes: map[string]string{"cp": "x"}, Run: nodes.run},
+	} {
+		s2 := serviceFor(t, ps, tg)
+		if err := s2.Setup(ctx, "demo", "n-1"); !errors.Is(err, ErrUnsupported) {
+			t.Errorf("%s: want ErrUnsupported, got %v", name, err)
+		}
+	}
+	// ノードを使わない問題は、ノードに入れないクラスタでも出せる (cleanup は動かさない)
+	nodes.log = nil
+	s3 := serviceFor(t, ps, target(fc, nil))
+	if err := s3.Setup(ctx, "demo", "p-1"); err != nil || len(nodes.log) != 0 {
+		t.Errorf("plain problem without ssh: %v %v", err, nodes.log)
 	}
 }

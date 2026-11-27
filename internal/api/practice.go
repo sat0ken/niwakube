@@ -84,3 +84,19 @@ func (s *Server) checkProblem(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, res)
 }
+
+// solveProblem は模範解答をクラスタに当てる ({"cluster":"demo"})。CI と、解説を読んだあとの確認用。
+func (s *Server) solveProblem(w http.ResponseWriter, r *http.Request) {
+	if !s.practiceEnabled(w) {
+		return
+	}
+	cluster, ok := s.practiceCluster(w, r)
+	if !ok {
+		return
+	}
+	if err := s.opts.Practice.Solve(r.Context(), cluster, r.PathValue("id")); err != nil {
+		s.writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
