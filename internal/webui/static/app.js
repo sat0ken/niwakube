@@ -66,6 +66,19 @@ function stateBadge(state) {
 function operationLabel(op) {
   if (!op) return "";
   if (op.startsWith("failed:")) return `失敗: ${op.slice(7).trim()}`;
+  const snap = op.match(/^(snapshot|restore) ([^:]+): (.+)$/);
+  if (snap) {
+    const step = snap[3]
+      .replace(/^starting nodes$/, "ノードを起動しています")
+      .replace(/^stopping nodes$/, "ノードを止めています")
+      .replace(/^starting$/, "準備しています")
+      .replace(/^copying NFS data$/, "NFS のデータを複製しています")
+      .replace(/^restoring NFS data$/, "NFS のデータを戻しています")
+      .replace(/^copying (\S+) (.+)$/, "$1 を複製しています $2")
+      .replace(/^restoring (\S+) (.+)$/, "$1 を戻しています $2")
+      .replace(/^removing (\S+)$/, "$1 を消しています");
+    return `${snap[1] === "snapshot" ? "スナップショット" : "復元"} ${snap[2]}: ${step}`;
+  }
   for (const [re, label] of [[/^resizing (.+)$/, "サイズを変更中"], [/^adding (.+)$/, "ワーカーを追加中"], [/^removing (.+)$/, "ワーカーを削除中"]]) {
     const m = op.match(re);
     if (m) return `${label}: ${m[1]}`;
@@ -303,14 +316,16 @@ async function loadSerial(name) {
 
 async function viewCluster(name) {
   setNav("");
-  const [c, forwards] = await Promise.all([
+  const [c, forwards, snapshots] = await Promise.all([
     api("GET", `/api/clusters/${encodeURIComponent(name)}`),
     api("GET", `/api/clusters/${encodeURIComponent(name)}/forwards`),
+    api("GET", `/api/clusters/${encodeURIComponent(name)}/snapshots`).catch(() => null), // 使えなければカードを出さない
   ]);
   if (!serialState.machine || !c.machines.some((m) => m.name === serialState.machine)) {
     serialState.machine = c.machines[0] ? c.machines[0].name : "";
   }
   const enc = encodeURIComponent(c.name);
+  const clusterBusy = !!c.operation && !c.operation.startsWith("failed:");
   app.innerHTML = html`
     <h1>${c.name} ${phaseBadge(c.status.phase)}
       <span class="hint">${c.status.readyNodes} / ${c.status.nodes} ノード Ready${c.status.message ? ` · ${c.status.message}` : ""}</span>
@@ -382,6 +397,23 @@ async function viewCluster(name) {
       </form>
       <div class="actions spaced-top">${Object.entries(SIZES).map(([k, s]) => html`<button type="button" data-size-preset="${k}">${s.label} (${s.cpus} vCPU · ${gib(s.memoryMiB)} GiB)</button>`)}</div>
     </div>
+    ${snapshots ? html`<div class="card">
+      <h2>スナップショット</h2>
+      <p class="hint">クラスタをいったん止めて、全ノードのディスク (etcd を含む) と NFS の PV のデータを丸ごと保存し、また起動します。
+        戻すと、ノードの台数・サイズ・中身がその時点に戻ります (あとで足したノードは消え、消したノードは戻ります)。
+        止めている間 (1〜2 分) はクラスタを使えません。XFS なら容量はほとんど使いません。</p>
+      ${snapshots.length ? html`<div class="table-wrap"><table>
+        <thead><tr><th>名前</th><th>日時</th><th>ノード</th><th></th></tr></thead>
+        <tbody>${snapshots.map((sn) => html`<tr><td><strong>${sn.name}</strong></td><td>${new Date(sn.createdAt).toLocaleString()}</td>
+          <td>${sn.nodes.length} 台${sn.nfs ? " + NFS" : ""}</td>
+          <td class="actions"><button data-restore-snap="${sn.name}" ${clusterBusy ? raw("disabled") : ""}>戻す</button>
+            <button class="danger" data-del-snap="${sn.name}" ${clusterBusy ? raw("disabled") : ""}>削除</button></td></tr>`)}</tbody>
+      </table></div>` : html`<p class="hint">まだありません。</p>`}
+      <form id="snap-form" class="inline spaced-top" autocomplete="off">
+        <input name="name" placeholder="before-upgrade (省略すると日時)" pattern="[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?" title="英小文字・数字・-">
+        <button class="primary" type="submit" ${clusterBusy ? raw("disabled") : ""}>スナップショットを取る</button>
+      </form>
+    </div>` : ""}
     <div class="card">
       <h2>ポートの転送 (LAN からの入口)</h2>
       <p class="hint">ミニPC のポートをクラスタの IP (LoadBalancer の IP など) に転送します。LAN の PC から <code>&lt;ミニPC の IP&gt;:ポート</code> で届きます。</p>
@@ -457,6 +489,28 @@ async function viewCluster(name) {
       render();
     } catch (err) { toast(err.message, true); }
   });
+  const snapForm = document.getElementById("snap-form");
+  if (snapForm) snapForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const n = snapForm.name.value.trim();
+    if (!confirm(`クラスタ ${c.name} をいったん止めてスナップショット${n ? ` ${n}` : ""} を取ります。止めている間はクラスタを使えません。よろしいですか?`)) return;
+    try {
+      await api("POST", `/api/clusters/${enc}/snapshots`, n ? { name: n } : {});
+      toast("スナップショットを取り始めました");
+      document.activeElement.blur();
+      render();
+    } catch (err) { toast(err.message, true); }
+  });
+  app.querySelectorAll("[data-restore-snap]").forEach((b) => b.addEventListener("click", async () => {
+    const n = b.dataset.restoreSnap;
+    if (!confirm(`クラスタ ${c.name} をスナップショット ${n} の状態に戻します。それ以降の変更 (Kubernetes の中身、ノードの台数・サイズ、NFS のデータ) はすべて消えます。よろしいですか?`)) return;
+    try { await api("POST", `/api/clusters/${enc}/snapshots/${encodeURIComponent(n)}/restore`); toast(`${n} に戻し始めました`); render(); } catch (err) { toast(err.message, true); }
+  }));
+  app.querySelectorAll("[data-del-snap]").forEach((b) => b.addEventListener("click", async () => {
+    const n = b.dataset.delSnap;
+    if (!confirm(`スナップショット ${n} を削除します。よろしいですか?`)) return;
+    try { await api("DELETE", `/api/clusters/${enc}/snapshots/${encodeURIComponent(n)}`); toast("削除しました"); render(); } catch (err) { toast(err.message, true); }
+  }));
   const sf = document.getElementById("scale-form");
   sf.addEventListener("submit", async (e) => {
     e.preventDefault();

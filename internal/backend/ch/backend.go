@@ -330,6 +330,23 @@ func (b *Backend) Resize(ctx context.Context, name string, r backend.Resources) 
 	return os.Rename(tmp, b.statePath(name))
 }
 
+// Snapshot は止まっている VM のディレクトリ (ディスク、seed、設定) を dest に複製する。
+// XFS なら reflink で一瞬で終わり、容量もほとんど使わない。
+func (b *Backend) Snapshot(ctx context.Context, name, dest string) error {
+	if b.unitActive(ctx, name) {
+		return fmt.Errorf("%s: stop it before taking a snapshot: %w", name, backend.ErrRunning)
+	}
+	return backend.SnapshotDir(b.vmDir(name), dest)
+}
+
+// Restore は VM のディレクトリを src の状態に戻す (無ければ作る)。tap は次の Start で作る。
+func (b *Backend) Restore(ctx context.Context, name, src string) error {
+	if b.unitActive(ctx, name) {
+		return fmt.Errorf("%s: stop it before restoring: %w", name, backend.ErrRunning)
+	}
+	return backend.RestoreDir(b.vmDir(name), src)
+}
+
 // SerialLog はシリアルコンソールのログの末尾 maxBytes を返す。
 func (b *Backend) SerialLog(_ context.Context, name string, maxBytes int64) ([]byte, error) {
 	f, err := os.Open(filepath.Join(b.vmDir(name), "serial.log"))

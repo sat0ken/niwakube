@@ -503,6 +503,43 @@ id=${problem_ids[0]}
 practice "$id" check >/dev/null
 [[ $(jq -r '.passed < .total' "$LOG_DIR/practice.json") == true ]] || die "$id: やり直したのに解いた状態が残っています"
 
+# --- スナップショット: 取る → 変える → 戻す ---
+log "スナップショット: 取って、変えて、戻すと、取ったときの状態に戻ること"
+# wait_ready <説明>: クラスタが ready に戻るまで待つ (止めて起動し直したあと)
+wait_ready() {
+  local what=$1 start=$SECONDS st
+  while :; do
+    st=$(curl -s "$API/clusters/$NAME" | jq -r '"\(.status.phase) \(.status.readyNodes)/\(.status.nodes)"')
+    [[ $st == ready* ]] && break
+    (( SECONDS - start < CLUSTER_TIMEOUT )) || die "$what: ${CLUSTER_TIMEOUT}s 待っても ready に戻りません ($st)"
+    sleep 5
+  done
+  log "$what: ready に戻りました ($((SECONDS - start))s)"
+}
+k create configmap snap-marker --from-literal=when=before >/dev/null
+code=$(curl -s -o "$LOG_DIR/snapshot.json" -w '%{http_code}' -X POST "$API/clusters/$NAME/snapshots" -d '{"name":"e2e"}')
+[[ $code == 202 ]] || die "スナップショットを受け付けません: $code $(cat "$LOG_DIR/snapshot.json")"
+wait_op "スナップショット"
+[[ -f $NIWAKUBE_DIR/snapshots/$NAME/e2e/meta.json ]] || die "スナップショットのファイルがありません"
+du -sh --apparent-size "$NIWAKUBE_DIR/snapshots/$NAME/e2e" | sed 's/^/    見かけの大きさ: /'
+du -sh "$NIWAKUBE_DIR/snapshots/$NAME/e2e" | sed 's/^/    実際に使っている容量: /'
+wait_ready "スナップショットのあと"
+k get configmap snap-marker >/dev/null || die "スナップショットのあと、ConfigMap が消えています"
+
+# 変える: マーカーを消し、別の ConfigMap を作る
+k delete configmap snap-marker >/dev/null
+k create configmap snap-after --from-literal=when=after >/dev/null
+code=$(curl -s -o "$LOG_DIR/snapshot.json" -w '%{http_code}' -X POST "$API/clusters/$NAME/snapshots/e2e/restore")
+[[ $code == 202 ]] || die "復元を受け付けません: $code $(cat "$LOG_DIR/snapshot.json")"
+wait_op "復元"
+wait_ready "復元のあと"
+[[ $(k get configmap snap-marker -o jsonpath='{.data.when}') == before ]] || die "復元したのに、スナップショットのときの ConfigMap が戻っていません"
+k get configmap snap-after >/dev/null 2>&1 && die "復元したのに、スナップショットのあとに作った ConfigMap が残っています"
+k get nodes -o wide
+code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$API/clusters/$NAME/snapshots/e2e")
+[[ $code == 204 ]] || die "スナップショットを削除できません: $code"
+[[ ! -e $NIWAKUBE_DIR/snapshots/$NAME/e2e ]] || die "スナップショットのファイルが残っています"
+
 log "クラスタを削除"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$API/clusters/$NAME")
 [[ $code == 204 ]] || die "削除に失敗しました: HTTP $code"

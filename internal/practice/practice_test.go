@@ -451,3 +451,12 @@ func TestNodeSteps(t *testing.T) {
 		t.Errorf("plain problem without ssh: %v %v", err, nodes.log)
 	}
 }
+
+func TestFindNullArray(t *testing.T) {
+	// EndpointSlice がまだ endpoints を持たない (null) ときも、エラーではなく「値が無い」
+	obj := map[string]any{"items": []any{map[string]any{"endpoints": nil}}}
+	got, err := find(obj, `{.items[*].endpoints[?(@.conditions.ready==true)].targetRef.kind}`)
+	if err != nil || got != "" {
+		t.Errorf("got %q %v", got, err)
+	}
+}
