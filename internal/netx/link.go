@@ -48,6 +48,11 @@ func (l Links) Delete(ctx context.Context, name string) error {
 		return nil
 	}
 	if _, err := l.Run.Run(ctx, "ip", "link", "del", "dev", name); err != nil {
+		// netns を消すと、対になった veth はカーネルが少し遅れて消す。その間に消そうとして
+		// 「Cannot find device」になったときは、消えていれば成功とする
+		if !l.exists(ctx, name) {
+			return nil
+		}
 		return fmt.Errorf("delete link %s: %w", name, err)
 	}
 	return nil

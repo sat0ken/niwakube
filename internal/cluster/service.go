@@ -772,6 +772,15 @@ func (s *Service) Stop(ctx context.Context, name string) (*Cluster, error) {
 }
 
 func (s *Service) setState(ctx context.Context, name, state string) (*Cluster, error) {
+	rec, err := s.applyState(ctx, name, state)
+	if err != nil {
+		return nil, err
+	}
+	return s.view(ctx, rec)
+}
+
+// applyState はクラスタのノードをすべて起動 / 停止する (起動は CP から、停止はワーカーから)。
+func (s *Service) applyState(ctx context.Context, name, state string) (*store.Cluster, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rec, err := s.store.GetCluster(ctx, name)
@@ -815,7 +824,7 @@ func (s *Service) setState(ctx context.Context, name, state string) (*Cluster, e
 	if len(errs) > 0 {
 		return nil, errors.Join(errs...)
 	}
-	return s.view(ctx, rec)
+	return rec, nil
 }
 
 func addonsOf(cni string, hubble bool, rt store.Runtime) distro.Addons {

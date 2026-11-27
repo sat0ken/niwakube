@@ -613,7 +613,9 @@ func find(obj map[string]any, expr string) (string, error) {
 	}
 	var b strings.Builder
 	if err := j.Execute(&b, obj); err != nil {
-		return "", err
+		// 式は読み込むときに確かめてある。ここでの失敗は、まだ値が無い (フィルターする配列が null など) ということなので、
+		// 「値が無い」(不合格) として扱う
+		return "", nil
 	}
 	return strings.TrimSpace(b.String()), nil
 }

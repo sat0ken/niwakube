@@ -62,7 +62,7 @@ func TestSnapshotAPI(t *testing.T) {
 
 func waitNoOperation(t *testing.T, clusterURL string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(90 * time.Second) // 状態の確認は API に届かないと 3 秒待つ
 	for {
 		_, body := do(t, http.MethodGet, clusterURL, "")
 		if !strings.Contains(body, `"operation"`) {

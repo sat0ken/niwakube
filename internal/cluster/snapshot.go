@@ -286,13 +286,13 @@ func (s *Service) withClusterStopped(ctx context.Context, cluster, what string, 
 	}
 	wasRunning := rec.DesiredState == machine.DesiredRunning
 	s.setOperation(cluster, what+": stopping nodes")
-	if _, err := s.setState(ctx, cluster, machine.DesiredStopped); err != nil {
+	if _, err := s.applyState(ctx, cluster, machine.DesiredStopped); err != nil {
 		return fmt.Errorf("stop: %w", err)
 	}
 	ferr := fn(rec)
 	if wasRunning {
 		s.setOperation(cluster, what+": starting nodes")
-		if _, err := s.setState(ctx, cluster, machine.DesiredRunning); err != nil {
+		if _, err := s.applyState(ctx, cluster, machine.DesiredRunning); err != nil {
 			return errors.Join(ferr, fmt.Errorf("start: %w", err))
 		}
 	}
