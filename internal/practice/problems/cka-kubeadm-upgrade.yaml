@@ -92,3 +92,10 @@ answerRun:
       sudo apt-mark hold kubeadm kubelet kubectl >/dev/null
       sudo systemctl daemon-reload
       sudo systemctl restart kubelet
+      # 新しい kubelet は static Pod (API サーバーなど) を作り直すので、API サーバーが落ち着くまで待つ (1 分続けて応答する)
+      ok=0
+      for i in $(seq 1 180); do
+        if sudo kubectl --kubeconfig /etc/kubernetes/admin.conf get --raw /readyz >/dev/null 2>&1; then ok=$((ok + 1)); else ok=0; fi
+        [ "$ok" -ge 30 ] && break
+        sleep 2
+      done
