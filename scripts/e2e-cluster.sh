@@ -153,8 +153,10 @@ while :; do
   if (( SECONDS - start >= CLUSTER_TIMEOUT )); then
     # CP の構築 (kubeadm init・CNI のインストール) の出力。シリアルのログには最後しか残らないので、ここで見る
     cp_ip=$(curl -fs "$API/clusters/$NAME" | jq -r '.machines[] | select(.role == "control-plane") | .ip' | head -n 1)
-    echo "----- $cp_ip: /var/log/cloud-init-output.log (grep error)"
-    ssh_to "$cp_ip" sudo grep -n -i -E 'error|fail' /var/log/cloud-init-output.log 2>/dev/null | grep -v 'daemonsets.apps "cilium" not found' | tail -n 40 || true
+    echo "----- $cp_ip: /var/log/cloud-init-output.log (最初の cilium install と、エラーらしい行)"
+    ssh_to "$cp_ip" sudo grep -m 1 -A 12 -- '^+ cilium install' /var/log/cloud-init-output.log || true
+    ssh_to "$cp_ip" sudo grep -n -i -E 'error|fail|unable|invalid|denied' /var/log/cloud-init-output.log 2>/dev/null |
+      grep -v -E 'daemonsets.apps "cilium" not found|errors\b' | tail -n 30 || true
     echo "----- $cp_ip: /var/log/cloud-init-output.log (tail)"
     ssh_to "$cp_ip" sudo tail -n 40 /var/log/cloud-init-output.log || true
     die "${CLUSTER_TIMEOUT}s 待っても準備完了になりませんでした"
