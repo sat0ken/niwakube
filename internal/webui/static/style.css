@@ -63,6 +63,12 @@ nav { display: flex; gap: 4px; flex-wrap: wrap; }
 nav a { padding: 6px 12px; border-radius: 8px; color: var(--muted); text-decoration: none; }
 nav a.active, nav a:hover { background: var(--code-bg); color: var(--text); }
 .host { margin-left: auto; color: var(--muted); font-size: 13px; }
+.user { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+.user[hidden] { display: none; }
+.user button { font-size: 12px; padding: 2px 10px; }
+.login { max-width: 420px; margin: 80px auto; text-align: center; }
+.login h1 { justify-content: center; }
+.login-buttons { display: flex; flex-direction: column; gap: 10px; margin-top: 16px; }
 
 main { max-width: 1180px; margin: 0 auto; padding: 24px; }
 main.wide { max-width: 1720px; }

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/sat0ken/niwakube/internal/api"
+	"github.com/sat0ken/niwakube/internal/auth"
 	"github.com/sat0ken/niwakube/internal/backend"
 	"github.com/sat0ken/niwakube/internal/backend/ch"
 	"github.com/sat0ken/niwakube/internal/backend/fake"
@@ -115,6 +116,7 @@ func run() error {
 		regPort     = flag.Int("registry-cache-port", 5000, "イメージのキャッシュの待ち受けポート (ブリッジのアドレスで待ち受ける)")
 		regMaxGiB   = flag.Int("registry-cache-max-gib", 30, "イメージのキャッシュの上限 (GiB)。超えたら使われていない順に消す。0 なら上限なし")
 		regMaxAge   = flag.Duration("registry-cache-max-age", 30*24*time.Hour, "これより長く使われていないイメージのキャッシュは消す。0 なら消さない")
+		authConfig  = flag.String("auth-config", "/etc/niwakube/auth.json", "ログイン (Google / GitHub) と API トークンの設定。無ければログインなし")
 	)
 	flag.Parse()
 	if *showVer {
@@ -283,6 +285,28 @@ func run() error {
 		clusters.Reconcile(ctx)
 	}()
 
+	// ログイン。設定ファイルが無ければ今までどおりログインなし (localhost だけで待ち受けるので、ミニPC に入れる人だけが使える)
+	var authn *auth.Authenticator
+	switch acfg, err := auth.LoadFile(*authConfig); {
+	case errors.Is(err, auth.ErrNoConfig):
+		log.Info("login is disabled (no auth config)", "path", *authConfig)
+	case err != nil:
+		return fmt.Errorf("auth config: %w", err)
+	default:
+		if acfg.Key, err = auth.LoadKey(filepath.Join(*dataDir, "auth", "session.key")); err != nil {
+			return fmt.Errorf("auth session key: %w", err)
+		}
+		acfg.Log = log
+		if authn, err = auth.New(acfg); err != nil {
+			return err
+		}
+		var names []string
+		for _, p := range acfg.Providers {
+			names = append(names, p.Name)
+		}
+		log.Info("login is enabled", "providers", names, "apiToken", acfg.Token != "")
+	}
+
 	srv := &http.Server{
 		Addr: *listen,
 		Handler: api.New(svc, clusters, log, api.Options{
@@ -294,6 +318,7 @@ func run() error {
 			Practice:     drills,
 			Cache:        cache,
 			Handson:      handson.New(),
+			Auth:         authn,
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}

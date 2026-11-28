@@ -45,21 +45,63 @@ sudo make install
 sudo systemctl enable --now niwakubed
 ```
 
-既定では `127.0.0.1:8080` で待ち受ける (認証がまだ無いため)。LAN から使う場合は
-`deploy/niwakubed.service` の `--listen` を変える。
+既定では `127.0.0.1:8080` で待ち受ける。LAN の PC からは SSH のポート転送で使う (下記)。
+Google / GitHub でのログインも入れられる (「ログイン」を参照)。
 
 ### Web UI
 
 niwakubed は `127.0.0.1:8080` で Web UI も配信する。クラスタの作成・削除・起動・停止、kubeconfig のダウンロード、
 ポートの転送、シリアルログの確認、単体 VM の作成ができる。
 
-LAN の PC からは SSH のポート転送で開く (niwakubed は認証が無いので、既定では LAN に公開しない):
+LAN の PC からは SSH のポート転送で開く (既定では LAN に公開しない):
 
 ```bash
 ssh -L 18080:localhost:8080 niwa
 ```
 
 そのまま PC のブラウザで `http://localhost:18080/` を開く (PC 側のポートは 18080。ほかのアプリの 8080 とぶつからないように)。
+
+### ログイン (Google / GitHub)
+
+`/etc/niwakube/auth.json` を置くと、Web UI と API にログインが要るようになる (無ければ今までどおりログインなし)。
+許可リストに載せたアカウントだけが入れ、入った人はみな同じ権限 (すべてのクラスタを操作できる)。
+
+1. OAuth のクライアントを作る。戻り先 (redirect / callback URL) は、ブラウザで開く URL (SSH のポート転送なら `http://localhost:18080`) に `/auth/callback/<google|github>` を付けたもの
+   - Google: Google Cloud コンソールの「API とサービス」→「認証情報」→「OAuth クライアント ID を作成」(種類は「ウェブ アプリケーション」)。
+     「承認済みのリダイレクト URI」に `http://localhost:18080/auth/callback/google`。OAuth 同意画面がテスト中なら、ログインする人をテストユーザーに足す
+   - GitHub: Settings →「Developer settings」→「OAuth Apps」→「New OAuth App」。
+     Homepage URL は `http://localhost:18080`、Authorization callback URL は `http://localhost:18080/auth/callback/github`
+2. 設定を書いて、niwakubed を再起動する (クライアントシークレットが入るので 0600。ほかのユーザーが読めると niwakubed は起動しない)
+
+```bash
+sudo install -m 600 /dev/stdin /etc/niwakube/auth.json <<'EOF'
+{
+  "allow": ["alice@example.com", "github:alice"],
+  "google": {"clientID": "xxxx.apps.googleusercontent.com", "clientSecret": "GOCSPX-..."},
+  "github": {"clientID": "Ov23li...", "clientSecret": "..."},
+  "apiToken": "openssl rand -hex 32 で作った値"
+}
+EOF
+```
+
+```bash
+sudo systemctl restart niwakubed
+```
+
+- `allow` (必須): `alice@example.com` (確認済みのメールアドレス)、`@example.com` (そのドメイン)、`github:alice` (GitHub のユーザー名)、
+  `github-org:myorg` (GitHub の Organization のメンバー。ログインのときに `read:org` の権限を求める)
+- `google` と `github` はどちらか片方でもよい
+- `apiToken`: curl やスクリプトから API を使うときのトークン (16 文字以上)。`Authorization: Bearer <トークン>` で渡す
+- `baseURL`: 戻り先の URL の前半 (例: `http://localhost:18080`)。省略するとブラウザが開いている URL から作る。
+  Google は登録した URI と完全に一致しないと断るので、別のポートで開くことがあるなら指定する
+- ログインは署名した Cookie で 7 日間覚える (鍵は `/var/lib/niwakube/auth/session.key`)。許可リストから外した人は、再起動のあと Cookie が残っていても入れない
+
+```bash
+curl -s -H "Authorization: Bearer $(sudo jq -r .apiToken /etc/niwakube/auth.json)" localhost:8080/api/clusters | jq .
+```
+
+ログインは、Web UI と API を使う人を絞るためのもの。ミニPC に SSH で入れる人は、設定ファイルやデータディレクトリを直接読めるので、
+ミニPC のアカウントの管理はこれまでどおり必要。
 
 KVM の無い PC で UI だけを触るときは、VM を実際には作らない fake バックエンドで起動できる:
 
@@ -73,6 +115,9 @@ go run ./cmd/niwakubed --dev-fake-backend --data-dir /tmp/niwakube-dev --run-dir
 |---|---|---|
 | GET | `/api/host` | ホストの CPU・メモリ・ディスクと、VM に割り当てた量 |
 | GET | `/api/backends` | 使えるバックエンドの一覧 |
+| GET | `/auth/providers` / `/auth/me` | ログインに使えるプロバイダー / ログインしている人 (ログインを使うときだけ。下記) |
+| GET | `/auth/login/{provider}` | Google / GitHub のログインへ (`?next=/#/...` で戻り先) |
+| POST | `/auth/logout` | ログアウト |
 | GET | `/api/vms` | VM 一覧 (望ましい状態と現在の状態) |
 | POST | `/api/vms` | VM を作成して起動する |
 | GET | `/api/vms/{name}` | VM の詳細 |
