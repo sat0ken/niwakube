@@ -268,7 +268,7 @@ curl -s localhost:8080/healthz
 
 ### 6.5 Web UI を開く
 
-niwakubed は認証が無いので `127.0.0.1:8080` だけで待ち受けている。普段使う PC から SSH のポート転送でつなぐ
+niwakubed は `127.0.0.1:8080` だけで待ち受けている。普段使う PC から SSH のポート転送でつなぐ
 (`niwa` はミニPC のホスト名か IP アドレス):
 
 ```bash
@@ -276,6 +276,9 @@ ssh -L 18080:localhost:8080 niwa
 ```
 
 PC のブラウザで `http://localhost:18080/` を開く (PC 側のポートは 18080。ほかのアプリの 8080 とぶつからないように)。
+
+Google / GitHub でのログインを入れるなら、README の「ログイン (Google / GitHub)」の手順で `/etc/niwakube/auth.json` を置く。
+OAuth の戻り先は、ここで開いた `http://localhost:18080` を使う。
 
 使い方は [README](../README.md) を参照。
 

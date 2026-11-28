@@ -31,6 +31,11 @@ async function api(method, path, body) {
     opts.body = JSON.stringify(body);
   }
   const res = await fetch(path, opts);
+  if (res.status === 401 && path.startsWith("/api/")) {
+    // ログインが切れた (または、まだしていない)。ログインの画面に切り替える
+    showLogin();
+    throw new Error("ログインしてください");
+  }
   const text = await res.text();
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { data = text; }
@@ -1116,6 +1121,7 @@ async function render() {
     // CSP で style 属性は使えないので、メーターの幅はここで設定する
     app.querySelectorAll("[data-pct]").forEach((el) => { el.style.width = `${el.dataset.pct}%`; });
   } catch (err) {
+    if (loginShown) return; // ログインの画面に切り替えた
     app.innerHTML = html`<div class="card error">読み込めませんでした: ${err.message}</div>`;
   }
 }
@@ -1140,5 +1146,47 @@ setInterval(() => {
   if (!isEditing()) render();
 }, REFRESH_MS);
 
-api("GET", "/api/host").then((h) => { document.getElementById("host-name").textContent = `${h.hostname} · ${h.version}`; }).catch(() => {});
-render();
+// ---------- ログイン (Google / GitHub。niwakubed に設定があるときだけ) ----------
+
+let loginShown = false;
+
+// showLogin は、ログインのボタンを並べた画面を出す (API が 401 を返したとき)。
+async function showLogin() {
+  if (loginShown) return;
+  loginShown = true;
+  if (teardown) { teardown(); teardown = null; }
+  current = { view: showLogin, live: false };
+  document.querySelector(".topbar nav").hidden = true;
+  let providers = [];
+  try { providers = await (await fetch("/auth/providers")).json(); } catch { /* 下で案内する */ }
+  const next = location.pathname + location.hash;
+  app.innerHTML = html`
+    <div class="card login">
+      <h1>niwakube にログイン</h1>
+      ${providers.length
+        ? html`<p class="hint">許可されたアカウントでログインしてください。</p>
+          <div class="login-buttons">${providers.map((p) => html`<a class="button primary" href="/auth/login/${encodeURIComponent(p.name)}?next=${encodeURIComponent(next)}">${p.label}</a>`)}</div>`
+        : html`<p>この niwakubed は API トークンでだけ使えます (ログインのプロバイダーが設定されていません)。</p>`}
+    </div>`;
+}
+
+// loadUser は、ログインしている人を上のバーに出す。ログインを使っていなければ (/auth/me が無い) 何も出さない。
+async function loadUser() {
+  const res = await fetch("/auth/me").catch(() => null);
+  if (!res || res.status === 404) return true; // ログインなし
+  if (res.status === 401) { showLogin(); return false; }
+  const me = await res.json();
+  document.getElementById("user-name").textContent = me.name;
+  document.getElementById("user").hidden = false;
+  document.getElementById("logout").addEventListener("click", async () => {
+    await fetch("/auth/logout", { method: "POST" });
+    location.reload();
+  });
+  return true;
+}
+
+loadUser().then((ok) => {
+  if (!ok) return;
+  api("GET", "/api/host").then((h) => { document.getElementById("host-name").textContent = `${h.hostname} · ${h.version}`; }).catch(() => {});
+  render();
+});

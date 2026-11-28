@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/sat0ken/niwakube/internal/auth"
 	"github.com/sat0ken/niwakube/internal/backend"
 	"github.com/sat0ken/niwakube/internal/cluster"
 	"github.com/sat0ken/niwakube/internal/handson"
@@ -46,6 +47,8 @@ type Options struct {
 	Cache *regcache.Cache
 	// Handson は CloudNative Days のハンズオンの資料。nil なら使えない (501)
 	Handson *handson.Service
+	// Auth はログイン (Google / GitHub) と API トークン。nil ならログインなし (今までどおり)
+	Auth *auth.Authenticator
 }
 
 func New(svc *machine.Service, clusters *cluster.Service, log *slog.Logger, opts ...Options) *Server {
@@ -162,7 +165,13 @@ func (s *Server) Handler() http.Handler {
 	if s.opts.UI != nil {
 		mux.Handle("GET /", s.opts.UI)
 	}
-	return s.logging(protect(mux, s.opts.LoopbackOnly))
+	var h http.Handler = mux
+	if s.opts.Auth != nil {
+		// /api/ はログインかトークンが要る。Web UI の静的ファイルと /auth/ (ログインの画面) と /healthz は通す
+		s.opts.Auth.Register(mux)
+		h = s.opts.Auth.Protect("/api/", mux)
+	}
+	return s.logging(protect(h, s.opts.LoopbackOnly))
 }
 
 func (s *Server) listVMs(w http.ResponseWriter, r *http.Request) {
