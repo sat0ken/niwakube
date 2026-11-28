@@ -30,6 +30,8 @@ type Addons struct {
 	DefaultRuntime string
 	// Runtimes は runc 以外に入れるランタイム。それぞれ同じ名前の RuntimeClass も作る。
 	Runtimes []string
+	// Handson は CloudNative Days のハンズオン用の設定で Cilium を入れ、Envoy Gateway も入れる (handson.go)
+	Handson bool
 }
 
 // Validate は組み合わせを検証する。
@@ -39,6 +41,9 @@ func (a Addons) Validate() error {
 	case CNIFlannel:
 		if a.Hubble {
 			return fmt.Errorf("hubble needs cni: cilium")
+		}
+		if a.Handson {
+			return fmt.Errorf("the hands-on profile needs cni: cilium")
 		}
 	default:
 		return fmt.Errorf("cni must be cilium or flannel: %q", a.CNI)
@@ -146,6 +151,11 @@ func (a Addons) CiliumInstallScript(kubeconfig, apiHost string, apiPort int) str
 		sets = append(sets, "hubble.relay.enabled=true", "hubble.ui.enabled=true")
 	}
 	var args strings.Builder
+	before, after := "", ""
+	if a.Handson {
+		args.WriteString(handsonCiliumArgs())
+		before, after = handsonBeforeCilium(), handsonAfterCilium()
+	}
 	for _, s := range sets {
 		args.WriteString(" --set " + s)
 	}
@@ -153,6 +163,8 @@ func (a Addons) CiliumInstallScript(kubeconfig, apiHost string, apiPort int) str
 # niwakube: Cilium のインストール
 set -euxo pipefail
 export KUBECONFIG=%s
+# cloud-init のスクリプトには HOME が無い。cilium CLI はバージョンを指定すると chart を HOME のキャッシュに取る
+export HOME=/root
 arch=$(dpkg --print-architecture)
 tarball=cilium-linux-${arch}.tar.gz
 tmp=$(mktemp -d)
@@ -165,11 +177,12 @@ cd /
 rm -rf "$tmp"
 
 until kubectl get --raw /readyz >/dev/null 2>&1; do sleep 5; done
+%s
 for i in $(seq 1 10); do
   kubectl -n kube-system get daemonset cilium >/dev/null 2>&1 && break
   cilium install%s && break
   sleep 15
 done
 cilium status --wait --wait-duration 15m
-`, kubeconfig, args.String())
+%s`, kubeconfig, before, args.String(), after)
 }

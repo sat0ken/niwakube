@@ -30,6 +30,8 @@ type ClusterSpec struct {
 	CNI           string   `json:"cni,omitempty"` // 空はフェーズ2b までに作ったクラスタ (flannel)
 	Hubble        bool     `json:"hubble,omitempty"`
 	Runtime       Runtime  `json:"runtime"`
+	// Profile は決まった用途の設定 (cnd-handson: CloudNative Days のハンズオン用)。空なら普通のクラスタ
+	Profile string `json:"profile,omitempty"`
 }
 
 // Runtime はコンテナランタイムの設定。

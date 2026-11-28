@@ -27,7 +27,7 @@ func TestForwarderRuleset(t *testing.T) {
 	for _, want := range []string{
 		"delete table ip niwakube_fwd",
 		`iifname != "nkbr0" tcp dport 8080 dnat to 172.30.1.100:80`,
-		"fib daddr type local tcp dport 8080 dnat to 172.30.1.100:80",
+		"fib daddr type local ip daddr != 127.0.0.0/8 tcp dport 8080 dnat to 172.30.1.100:80",
 		`iifname != "nkbr0" udp dport 5353 dnat to 172.30.1.101:53`,
 		"ct status dnat accept",
 	} {

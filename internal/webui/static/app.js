@@ -220,6 +220,11 @@ async function viewNewCluster() {
       <div class="row"><label for="f-name">名前</label>
         <div><input id="f-name" name="name" required pattern="[a-z0-9]([a-z0-9\\-]{0,18}[a-z0-9])?" placeholder="demo" maxlength="20">
         <div class="hint">英小文字・数字・ハイフン、20 文字まで。ノードは「名前-cp-1」「名前-worker-1」…になる</div></div></div>
+      <div class="row"><label for="f-profile">用途</label>
+        <div><select id="f-profile" name="profile">
+          <option value="">普通のクラスタ</option>
+          <option value="cnd-handson">CloudNative Days のハンズオン (cnd-handson)</option></select>
+        <div class="hint" id="f-profile-note"></div></div></div>
       <div class="row"><label for="f-distro">ディストリ</label>
         <div class="inline"><select id="f-distro" name="distro">${distros.map((d) => html`<option value="${d.name}" ${d.name === def.name ? raw("selected") : ""}>${d.name}</option>`)}</select>
         <input id="f-version" name="version" placeholder="${def.defaultVersion}"><span class="hint">空なら既定のバージョン</span></div></div>
@@ -252,11 +257,26 @@ async function viewNewCluster() {
   }));
 
   const sync = () => {
+    // ハンズオン用は kind と同じ kubeadm、ハンズオンの設定の Cilium + Hubble に決まっている
+    const handson = form.profile.value === "cnd-handson";
+    if (handson) {
+      form.distro.value = "kubeadm";
+      form.cni.value = "cilium";
+      form.hubble.checked = true;
+    }
+    form.distro.disabled = handson;
+    form.cni.disabled = handson;
+    document.getElementById("f-profile-note").innerHTML = handson
+      ? html`<a href="https://github.com/cloudnativedaysjp/cnd-handson" target="_blank" rel="noopener">cnd-handson</a> の
+        chapter_cluster-create の環境 (Kubernetes v1.36、Cilium、Envoy Gateway、Gateway handson-gateway) を作り、
+        ホストの 80・8080・8443・18080・18443 番をクラスタにつなぎます (ハンズオン用のクラスタは同時に 1 つまで)。
+        Prometheus や KubeVirt まで進めるなら、ワーカーは large がおすすめです。`
+      : "";
     const d = distros.find((x) => x.name === form.distro.value);
-    form.version.placeholder = d.defaultVersion;
+    form.version.placeholder = handson ? "v1.36" : d.defaultVersion;
     const talos = d.name === "talos";
     const cilium = form.cni.value === "cilium";
-    form.hubble.disabled = !cilium;
+    form.hubble.disabled = !cilium || handson;
     if (!cilium) form.hubble.checked = false;
     form.runtimeDefault.disabled = talos;
     form.querySelectorAll("input[name=install]").forEach((i) => { i.disabled = talos; if (talos) i.checked = false; });
@@ -267,6 +287,7 @@ async function viewNewCluster() {
   };
   form.distro.addEventListener("change", sync);
   form.cni.addEventListener("change", sync);
+  form.profile.addEventListener("change", sync);
   sync();
 
   form.addEventListener("submit", async (e) => {
@@ -287,6 +308,7 @@ async function viewNewCluster() {
       runtime: { default: form.runtimeDefault.value, install },
     };
     if (form.version.value.trim()) body.version = form.version.value.trim();
+    if (form.profile.value) body.profile = form.profile.value;
     try {
       const c = await api("POST", "/api/clusters", body);
       toast(`クラスタ ${c.name} を作りました。構築は数分かかります`);
@@ -321,12 +343,40 @@ async function loadSerial(name) {
   }
 }
 
+// ハンズオン (cnd-handson) のクラスタで、PC の hosts と、資料の読み替えを案内する
+const HANDSON_HOSTS = ["hello-world", "rollout", "blue-green", "app", "prometheus", "grafana", "jaeger", "argocd",
+  "app-argocd", "app-cicd", "dev-kustomize-argocd", "prd-kustomize-argocd", "helm-argocd", "app-preview-argocd",
+  "headlamp", "argocdupdate", "app-rollouts", "app-preview-rollouts", "kiali", "kiali-ambient", "app-cilium",
+  "hubble-cilium", "pyroscope", "troubleshoot", "cnd-web"];
+
+function handsonCard(c, host) {
+  const ip = (host && host.lanAddress) || "<ミニPC の IP>";
+  const hosts = HANDSON_HOSTS.map((h) => `${ip}    ${h}.example.com`).join("\n");
+  return html`<div class="card">
+    <h2>CloudNative Days のハンズオン</h2>
+    <div class="actions spaced-bottom"><a class="button primary" href="#/clusters/${encodeURIComponent(c.name)}/handson">資料とターミナルを並べて開く</a></div>
+    <p><a href="https://github.com/cloudnativedaysjp/cnd-handson" target="_blank" rel="noopener">cnd-handson</a> の
+      chapter_cluster-create (kind・Cilium・Envoy Gateway・Gateway) までは済んでいます。
+      <code>helmfile sync -f helm/helmfile.yaml</code> は実行せず、「アプリケーションのデプロイ」から進めてください。
+      ほかの読み替えは <a href="https://github.com/sat0ken/niwakube/blob/main/docs/cnd-handson.md" target="_blank" rel="noopener">docs/cnd-handson.md</a> にあります。</p>
+    <ul class="hint">
+      <li>作業は「ターミナル」で。ホームは閉じても残り、<code>git clone https://github.com/cloudnativedaysjp/cnd-handson.git</code> から始めます。
+        helmfile・cilium・hubble も入っています。sudo は使えないので、資料の <code>sudo mv ... /usr/local/bin</code> は <code>~/bin</code> に置きます</li>
+      <li>ターミナルでは <code>*.example.com</code> がミニPC に向いているので、資料の <code>curl</code> はそのまま動きます</li>
+      <li><code>docker exec kind-worker</code> は <code>ssh worker</code>、kind のノード名 (kind-control-plane など) は ${c.name}-cp-1 などに読み替えます</li>
+    </ul>
+    <p>ブラウザで開く PC の hosts (Windows は <code>C:\\Windows\\System32\\drivers\\etc\\hosts</code>、Mac / Linux は <code>/etc/hosts</code>) に足すもの:</p>
+    <pre class="log">${hosts}</pre>
+  </div>`;
+}
+
 async function viewCluster(name) {
   setNav("");
-  const [c, forwards, snapshots] = await Promise.all([
+  const [c, forwards, snapshots, host] = await Promise.all([
     api("GET", `/api/clusters/${encodeURIComponent(name)}`),
     api("GET", `/api/clusters/${encodeURIComponent(name)}/forwards`),
     api("GET", `/api/clusters/${encodeURIComponent(name)}/snapshots`).catch(() => null), // 使えなければカードを出さない
+    api("GET", "/api/host").catch(() => null),
   ]);
   if (!serialState.machine || !c.machines.some((m) => m.name === serialState.machine)) {
     serialState.machine = c.machines[0] ? c.machines[0].name : "";
@@ -353,6 +403,7 @@ async function viewCluster(name) {
       <p class="hint spaced-top">「SSH 経由用の kubeconfig${c.distro === "talos" ? " / talosconfig" : ""}」は、PC で <code>ssh -N -D 1080 &lt;ユーザー&gt;@&lt;ミニPC&gt;</code> をつないだまま、
         PC の kubectl${c.distro === "talos" ? " / talosctl" : ""} で使います (クラスタがいくつあっても SSH は 1 本でよい)。ミニPC の上では普通の kubeconfig を使います。</p>
     </div>
+    ${c.profile === "cnd-handson" ? handsonCard(c, host) : ""}
     <div class="card">
       <h2>概要</h2>
       <dl class="kv">
@@ -738,12 +789,15 @@ function mountTerminal(el, name, statusEl, reconnectBtn) {
   reconnectBtn.addEventListener("click", onReconnect);
   connect();
 
-  return () => {
+  const cleanup = () => {
     window.removeEventListener("resize", onWindowResize);
     reconnectBtn.removeEventListener("click", onReconnect);
     if (ws) { ws.onclose = null; ws.close(); }
     term.dispose();
   };
+  // paste は文字列をターミナルに貼る (実行はしない。複数行は bracketed paste で 1 度に貼る)
+  cleanup.paste = (text) => { term.paste(text); term.focus(); };
+  return cleanup;
 }
 
 // viewTerminal はクラスタの kubeconfig を設定したシェルを開く。
@@ -908,6 +962,134 @@ async function viewProblem(id) {
   }));
 }
 
+// ---------- CloudNative Days のハンズオン (資料とターミナルを並べる) ----------
+
+const HANDSON_KEY = "niwakube.handson.doc"; // クラスタごとに、最後に開いた資料
+
+const ALERTS = { NOTE: "Note", TIP: "Tip", IMPORTANT: "Important", WARNING: "Warning", CAUTION: "Caution" };
+
+// decorateDoc は資料の HTML に、ターミナルに貼るボタンと GitHub の注記 ([!NOTE] など) の見た目を足す。
+function decorateDoc(el, paste) {
+  el.querySelectorAll("pre > code").forEach((code) => {
+    const lang = (code.className.match(/language-(\S+)/) || [])[1] || "";
+    if (lang && !["bash", "sh", "shell", "console", "zsh"].includes(lang)) return; // yaml や出力の例には付けない
+    const text = code.textContent.replace(/\n+$/, "");
+    const bar = document.createElement("div");
+    bar.className = "code-actions";
+    const pasteBtn = document.createElement("button");
+    pasteBtn.type = "button";
+    pasteBtn.textContent = "ターミナルに貼る";
+    pasteBtn.title = "右のターミナルに貼ります (Enter で実行)";
+    pasteBtn.addEventListener("click", () => paste(text));
+    const copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.textContent = "コピー";
+    copyBtn.addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(text); toast("コピーしました"); } catch { toast("コピーできませんでした", true); }
+    });
+    bar.append(pasteBtn, copyBtn);
+    code.parentElement.before(bar);
+  });
+  el.querySelectorAll("blockquote").forEach((q) => {
+    const p = q.querySelector("p");
+    const m = p && p.firstChild && p.firstChild.nodeType === Node.TEXT_NODE && p.firstChild.textContent.match(/^\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*/);
+    if (!m) return;
+    p.firstChild.textContent = p.firstChild.textContent.slice(m[0].length);
+    q.classList.add("alert", `alert-${m[1].toLowerCase()}`);
+    const title = document.createElement("p");
+    title.className = "alert-title";
+    title.textContent = ALERTS[m[1]];
+    q.prepend(title);
+  });
+}
+
+// viewHandson は、左にハンズオンの資料 (GitHub の README)、右にクラスタのターミナルを並べる。
+async function viewHandson(name, chapterId, file) {
+  setNav("");
+  const enc = encodeURIComponent(name);
+  const chapters = await api("GET", "/api/handson/chapters");
+  if (!chapterId) {
+    const saved = (storageGet(`${HANDSON_KEY}.${name}`) || "").split("/");
+    if (chapters.some((c) => c.id === saved[0])) [chapterId, file] = saved;
+  }
+  if (!chapters.some((c) => c.id === chapterId)) chapterId = chapters[0].id;
+  app.innerHTML = html`
+    <h1><a href="#/clusters/${enc}">${name}</a> / CloudNative Days のハンズオン</h1>
+    <div class="practice-grid handson-grid">
+      <div>
+        <div class="card">
+          <div class="inline">
+            <label class="inline">章 <select id="ho-chapter">${chapters.map((c, i) => html`<option value="${c.id}" ${c.id === chapterId ? raw("selected") : ""}>${i}. ${c.title}</option>`)}</select></label>
+            <span id="ho-docs" class="inline"></span>
+            <a class="button" id="ho-source" target="_blank" rel="noopener">GitHub で開く</a>
+          </div>
+          <p class="hint">資料は <a href="https://github.com/cloudnativedaysjp/cnd-handson" target="_blank" rel="noopener">cloudnativedaysjp/cnd-handson</a> から取っています。
+            コマンドの「ターミナルに貼る」で右に貼り、Enter で実行します。</p>
+        </div>
+        <div id="ho-notes"></div>
+        <div class="card md" id="ho-doc"><p class="hint">読み込み中…</p></div>
+      </div>
+      <div>
+        <div class="inline spaced-bottom"><strong>ターミナル</strong> <span class="badge" id="term-status">未接続</span> <button id="term-reconnect" hidden>再接続</button></div>
+        <div class="term-wrap" id="term"></div>
+      </div>
+    </div>`;
+
+  app.classList.add("wide");
+  await loadXterm();
+  const closeTerm = mountTerminal(document.getElementById("term"), name, document.getElementById("term-status"), document.getElementById("term-reconnect"));
+  teardown = () => { closeTerm(); app.classList.remove("wide"); };
+
+  const docEl = document.getElementById("ho-doc");
+  // 章を変えてもターミナルはつないだまま (hashchange を起こさないように replaceState で URL だけ変える)
+  const load = async (id, f, anchor) => {
+    const c = chapters.find((x) => x.id === id);
+    f = f && c.docs.some((d) => d.file === f) ? f : c.docs[0].file;
+    document.getElementById("ho-chapter").value = id;
+    history.replaceState(null, "", `#/clusters/${enc}/handson/${encodeURIComponent(id)}/${encodeURIComponent(f)}`);
+    storageSet(`${HANDSON_KEY}.${name}`, `${id}/${f}`);
+    document.getElementById("ho-docs").innerHTML = c.docs.length > 1
+      ? c.docs.map((d) => html`<button type="button" class="${d.file === f ? "primary" : ""}" data-doc="${d.file}">${d.title}</button>`).join("")
+      : "";
+    document.getElementById("ho-notes").innerHTML = c.notes && c.notes.length
+      ? html`<div class="card notes"><h2>niwakube での読み替え</h2><ul>${c.notes.map((n) => html`<li>${n}</li>`)}</ul>
+        <p class="hint">ほかの章も含めた一覧は <a href="https://github.com/sat0ken/niwakube/blob/main/docs/cnd-handson.md" target="_blank" rel="noopener">docs/cnd-handson.md</a></p></div>`
+      : "";
+    docEl.innerHTML = html`<p class="hint">読み込み中…</p>`;
+    try {
+      const page = await api("GET", `/api/handson/chapters/${encodeURIComponent(id)}?doc=${encodeURIComponent(f)}`);
+      document.getElementById("ho-source").href = page.source;
+      docEl.innerHTML = page.html; // サーバーで決まったタグと属性だけにしてある
+      decorateDoc(docEl, closeTerm.paste);
+      const target = anchor && document.getElementById(anchor);
+      if (target) target.scrollIntoView(); else window.scrollTo(0, 0);
+    } catch (err) {
+      docEl.innerHTML = html`<p class="error">資料を読み込めませんでした: ${err.message}</p>
+        <p class="hint">ミニPC から GitHub (raw.githubusercontent.com) に届くか確かめてください。</p>`;
+    }
+  };
+  document.getElementById("ho-chapter").addEventListener("change", (e) => load(e.target.value));
+  document.getElementById("ho-docs").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-doc]");
+    if (b) load(document.getElementById("ho-chapter").value, b.dataset.doc);
+  });
+  // 資料の中のリンク: ほかの章の資料はこの画面で開き、見出しへのリンクはスクロールする
+  docEl.addEventListener("click", (e) => {
+    const a = e.target.closest("a[href^='#']");
+    if (!a) return;
+    const href = a.getAttribute("href");
+    e.preventDefault();
+    if (href.startsWith("#doc:")) {
+      const [id, f] = href.slice(5).split("/");
+      load(id, f);
+    } else if (href.startsWith("#md-")) {
+      const target = document.getElementById(href.slice(1));
+      if (target) target.scrollIntoView({ behavior: "smooth" });
+    }
+  });
+  await load(chapterId, file);
+}
+
 // ---------- ルーター ----------
 
 // 表示中の画面の後片付け (ターミナルの WebSocket を閉じるなど)
@@ -917,6 +1099,7 @@ function route() {
   const parts = location.hash.replace(/^#\/?/, "").split("/").map(decodeURIComponent);
   if (parts[0] === "clusters" && parts[1] === "new") return { view: viewNewCluster, live: false };
   if (parts[0] === "clusters" && parts[1] && parts[2] === "terminal") return { view: () => viewTerminal(parts[1]), live: false };
+  if (parts[0] === "clusters" && parts[1] && parts[2] === "handson") return { view: () => viewHandson(parts[1], parts[3], parts[4]), live: false };
   if (parts[0] === "clusters" && parts[1]) return { view: () => viewCluster(parts[1]), live: true, serial: true };
   if (parts[0] === "practice" && parts[1]) return { view: () => viewProblem(parts[1]), live: false };
   if (parts[0] === "practice") return { view: viewPractice, live: false };

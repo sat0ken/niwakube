@@ -57,6 +57,8 @@ type Config struct {
 	NodeOps NodeOps
 	// SnapshotDir はクラスタのスナップショットの置き場所。空ならスナップショットは使えない
 	SnapshotDir string
+	// Gateway はブリッジのホスト側のアドレス (例: 172.30.0.1)。ハンズオンのターミナルの hosts で使う。空なら Subnet の .0.1
+	Gateway netip.Addr
 	// RegistryMirror はノードがイメージを取るときに使うキャッシュの URL (例: http://172.30.0.1:5000)。空なら使わない
 	RegistryMirror string
 }
@@ -139,7 +141,7 @@ func NewService(cfg Config, st *store.Store, ms *machine.Service, prober Prober,
 		return nil, fmt.Errorf("cluster subnet must be an IPv4 /16: %s", cfg.Subnet)
 	}
 	cfg.Defaults = cfg.Defaults.withFallback()
-	if err := addonsOf(cfg.Defaults.CNI, cfg.Defaults.Hubble, cfg.Defaults.Runtime).Validate(); err != nil {
+	if err := addonsOf(cfg.Defaults.CNI, cfg.Defaults.Hubble, cfg.Defaults.Runtime, "").Validate(); err != nil {
 		return nil, fmt.Errorf("invalid cluster defaults: %w", err)
 	}
 	if len(distros) == 0 {
@@ -201,6 +203,8 @@ type CreateRequest struct {
 	CNI               string         `json:"cni,omitempty"`    // cilium (既定) | flannel
 	Hubble            *bool          `json:"hubble,omitempty"` // 既定は Cilium なら true
 	Runtime           store.Runtime  `json:"runtime,omitempty"`
+	// Profile は決まった用途の設定。cnd-handson なら CloudNative Days のハンズオン用 (handson.go)
+	Profile string `json:"profile,omitempty"`
 }
 
 // Status はクラスタの現在の状態。
@@ -225,6 +229,7 @@ type Cluster struct {
 	CNI           string         `json:"cni"`
 	Hubble        bool           `json:"hubble"`
 	Runtime       store.Runtime  `json:"runtime"`
+	Profile       string         `json:"profile,omitempty"`
 	Subnet        string         `json:"subnet"`
 	Endpoint      string         `json:"endpoint"`
 	// LoadBalancerPool は Service type: LoadBalancer に割り当てる IP の範囲 (Cilium のときだけ)
@@ -262,6 +267,9 @@ func defaultSize(sz *store.NodeSize) {
 func (s *Service) normalize(req *CreateRequest) (distro.Distro, error) {
 	if !nameRe.MatchString(req.Name) {
 		return nil, invalid("cluster name must match %s", nameRe)
+	}
+	if err := applyProfile(req); err != nil {
+		return nil, err
 	}
 	if req.Distro == "" {
 		req.Distro = s.defDist
@@ -325,7 +333,7 @@ func (s *Service) normalize(req *CreateRequest) (distro.Distro, error) {
 	}
 	slices.Sort(req.Runtime.Install)
 	req.Runtime.Install = slices.Compact(req.Runtime.Install)
-	addons := addonsOf(req.CNI, *req.Hubble, req.Runtime)
+	addons := addonsOf(req.CNI, *req.Hubble, req.Runtime, req.Profile)
 	if err := addons.Validate(); err != nil {
 		return nil, invalid("%v", err)
 	}
@@ -387,6 +395,9 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (*Cluster, erro
 	if index == 0 {
 		return nil, fmt.Errorf("no free cluster subnet: %w", store.ErrExists)
 	}
+	if err := s.checkProfileForwards(ctx, req.Profile); err != nil {
+		return nil, err
+	}
 
 	secrets, err := d.GenerateSecrets(req.Name)
 	if err != nil {
@@ -405,7 +416,7 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (*Cluster, erro
 			Version: req.Version, Backend: req.Backend, Image: d.Image(req.Version),
 			ControlPlanes: req.ControlPlanes, Workers: *req.Workers,
 			ControlPlane: req.ControlPlane, Worker: req.Worker, SSHKeys: req.SSHAuthorizedKeys,
-			CNI: req.CNI, Hubble: *req.Hubble, Runtime: req.Runtime,
+			CNI: req.CNI, Hubble: *req.Hubble, Runtime: req.Runtime, Profile: req.Profile,
 		},
 		Secrets: rawSecrets, DesiredState: machine.DesiredRunning, CreatedAt: time.Now(),
 	}
@@ -424,6 +435,10 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (*Cluster, erro
 		s.rollback(context.WithoutCancel(ctx), rec.Name)
 		return nil, err
 	}
+	if err := s.addProfileForwards(ctx, rec); err != nil {
+		s.rollback(context.WithoutCancel(ctx), rec.Name)
+		return nil, err
+	}
 	s.startPostCreate(rec)
 	return s.view(ctx, rec)
 }
@@ -433,7 +448,7 @@ func (s *Service) createNodes(ctx context.Context, d distro.Distro, rec *store.C
 	dc := &distro.Cluster{
 		Name: rec.Name, Version: rec.Spec.Version, Secrets: secrets,
 		APIAddr:        s.hostIP(rec.Index, cpHostBase+1),
-		Addons:         addonsOf(cniOf(rec), rec.Spec.Hubble, rec.Spec.Runtime),
+		Addons:         addonsOf(cniOf(rec), rec.Spec.Hubble, rec.Spec.Runtime, rec.Spec.Profile),
 		Container:      caps.Isolation == backend.IsolationContainer,
 		RegistryMirror: s.cfg.RegistryMirror,
 	}
@@ -537,7 +552,7 @@ func (s *Service) view(ctx context.Context, rec *store.Cluster) (*Cluster, error
 		Name: rec.Name, Distro: rec.Distro, Version: rec.Spec.Version, Backend: rec.Spec.Backend,
 		ControlPlanes: rec.Spec.ControlPlanes, Workers: rec.Spec.Workers,
 		ControlPlane: rec.Spec.ControlPlane, Worker: rec.Spec.Worker,
-		CNI: cniOf(rec), Hubble: rec.Spec.Hubble, Runtime: runtimeOf(rec),
+		CNI: cniOf(rec), Hubble: rec.Spec.Hubble, Runtime: runtimeOf(rec), Profile: rec.Spec.Profile,
 		Subnet: s.subnetOf(rec.Index).String(), Endpoint: s.endpoint(rec), LoadBalancerPool: s.lbPoolString(rec),
 		Addons: s.addonStatus(rec.Name), StorageClasses: s.storageClasses(rec), Operation: s.operation(rec.Name),
 		DesiredState: rec.DesiredState, Machines: ms, CreatedAt: rec.CreatedAt,
@@ -831,12 +846,12 @@ func (s *Service) applyState(ctx context.Context, name, state string) (*store.Cl
 	return rec, nil
 }
 
-func addonsOf(cni string, hubble bool, rt store.Runtime) distro.Addons {
+func addonsOf(cni string, hubble bool, rt store.Runtime, profile string) distro.Addons {
 	def := rt.Default
 	if def == "" {
 		def = distro.RuntimeRunc
 	}
-	return distro.Addons{CNI: cni, Hubble: hubble, DefaultRuntime: def, Runtimes: rt.Install}
+	return distro.Addons{CNI: cni, Hubble: hubble, DefaultRuntime: def, Runtimes: rt.Install, Handson: profile == ProfileHandson}
 }
 
 // cniOf は CNI を返す。CNI を選べるようになる前に作ったクラスタは flannel。
@@ -868,7 +883,7 @@ func (s *Service) distroCluster(rec *store.Cluster) (*distro.Cluster, distro.Dis
 	return &distro.Cluster{
 		Name: rec.Name, Version: rec.Spec.Version, Secrets: sec,
 		APIAddr:        s.hostIP(rec.Index, cpHostBase+1),
-		Addons:         addonsOf(cniOf(rec), rec.Spec.Hubble, rec.Spec.Runtime),
+		Addons:         addonsOf(cniOf(rec), rec.Spec.Hubble, rec.Spec.Runtime, rec.Spec.Profile),
 		Container:      caps.Isolation == backend.IsolationContainer,
 		RegistryMirror: s.cfg.RegistryMirror,
 	}, d, nil

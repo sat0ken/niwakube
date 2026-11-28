@@ -24,6 +24,8 @@ TALOS_SCHEMATIC=${TALOS_SCHEMATIC:-376567988ad370138ad8b2698212367b8edcb69b5fd68
 KUBECTL_VERSION=${KUBECTL_VERSION:-v1.37.2}
 # Web UI のターミナルで使う helm のバージョン。latest なら get.helm.sh の最新。空にすると入れない
 HELM_VERSION=${HELM_VERSION-latest}
+# CloudNative Days のハンズオン (クラスタの profile: cnd-handson) で使う helmfile・cilium・hubble を入れる。空にすると入れない
+HANDSON_TOOLS=${HANDSON_TOOLS-1}
 
 # 動作確認したバージョンに固定する (CI の E2E で検証済み)。最新を試すなら CH_VERSION=latest
 CH_VERSION=${CH_VERSION:-v55.0}
@@ -67,7 +69,7 @@ install_packages() {
   apt-get update -qq
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
     qemu-utils cloud-image-utils nftables curl jq xz-utils iproute2 openssh-client netcat-openbsd nfs-kernel-server \
-    bash-completion
+    bash-completion git openssl procps
   if [[ $BACKEND == nspawn ]]; then
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends systemd-container
   fi
@@ -123,6 +125,48 @@ install_helm() {
   echo "    $(helm version --short 2>/dev/null)"
 }
 
+# latest_tag <owner/repo> は GitHub の最新リリースのタグを返す (API を使わず、latest のリダイレクト先から)。
+latest_tag() {
+  curl -fsSIL --retry 3 -o /dev/null -w '%{url_effective}' "https://github.com/$1/releases/latest" | sed 's#.*/tag/##'
+}
+
+# install_tarball <url> <sha256> <tar の中のファイル> <入れる先> は、tar.gz を確かめて 1 つのファイルを入れる。
+install_tarball() {
+  local tmp
+  tmp=$(mktemp -d)
+  curl -fsSL --retry 3 -o "$tmp/a.tar.gz" "$1"
+  if ! echo "$2  $tmp/a.tar.gz" | sha256sum -c --quiet -; then
+    rm -rf "$tmp"
+    die "$1 の SHA256 が一致しません"
+  fi
+  tar -xzf "$tmp/a.tar.gz" -C "$tmp" "$3"
+  install -m 0755 "$tmp/$3" "$4"
+  rm -rf "$tmp"
+}
+
+# install_handson_tools はハンズオンで使うコマンドを入れる (ターミナルでは sudo が使えないので、先に入れておく)。
+install_handson_tools() {
+  local arch=$1 ver url sum
+  ver=$(latest_tag helmfile/helmfile)
+  [[ $ver == v* ]] || die "helmfile の最新バージョンがわかりません ($ver)"
+  log "helmfile のインストール ($ver)"
+  url=https://github.com/helmfile/helmfile/releases/download/$ver
+  sum=$(curl -fsSL --retry 3 "$url/helmfile_${ver#v}_checksums.txt" | awk -v f="helmfile_${ver#v}_linux_$arch.tar.gz" '$2 == f {print $1}')
+  [[ -n $sum ]] || die "helmfile $ver の SHA256 が見つかりません"
+  install_tarball "$url/helmfile_${ver#v}_linux_$arch.tar.gz" "$sum" helmfile /usr/local/bin/helmfile
+
+  local tool repo
+  for tool in cilium hubble; do
+    repo=cilium/$tool
+    [[ $tool == cilium ]] && repo=cilium/cilium-cli
+    log "$tool CLI のインストール ($(latest_tag "$repo"))"
+    url=https://github.com/$repo/releases/latest/download/$tool-linux-$arch.tar.gz
+    sum=$(curl -fsSL --retry 3 "$url.sha256sum" | awk '{print $1}')
+    [[ -n $sum ]] || die "$tool の SHA256 が見つかりません"
+    install_tarball "$url" "$sum" "$tool" "/usr/local/bin/$tool"
+  done
+}
+
 install_clients() {
   local arch sum talos
   arch=$(dpkg --print-architecture)
@@ -132,6 +176,8 @@ install_clients() {
   echo "    $(kubectl version --client 2>/dev/null | head -n1)"
 
   install_helm "$arch"
+
+  [[ -z $HANDSON_TOOLS ]] || install_handson_tools "$arch"
 
   talos=${TALOS_VERSIONS%% *}
   [[ -n $talos ]] || return 0

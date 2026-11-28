@@ -28,6 +28,7 @@ import (
 	"github.com/sat0ken/niwakube/internal/distro/k3s"
 	"github.com/sat0ken/niwakube/internal/distro/kubeadm"
 	"github.com/sat0ken/niwakube/internal/distro/talos"
+	"github.com/sat0ken/niwakube/internal/handson"
 	"github.com/sat0ken/niwakube/internal/ipam"
 	"github.com/sat0ken/niwakube/internal/kube"
 	"github.com/sat0ken/niwakube/internal/machine"
@@ -208,7 +209,7 @@ func run() error {
 		go serveRegistryCache(addr, cache, log)
 	}
 	clusters, err := cluster.NewService(cluster.Config{Subnet: cfg.Subnet, Defaults: defaults, Forwarder: fwd, NFS: nfs,
-		SnapshotDir: filepath.Join(*dataDir, "snapshots"), RegistryMirror: mirror},
+		SnapshotDir: filepath.Join(*dataDir, "snapshots"), RegistryMirror: mirror, Gateway: cfg.Gateway},
 		st, svc, nil, log, k3s.New(), kubeadm.New(), talos.New())
 	if err != nil {
 		return err
@@ -228,6 +229,10 @@ func run() error {
 		log.Warn("terminal runs without the sandbox (dev mode)")
 	}
 	term.Cleanup(ctx)
+	// ハンズオンのクラスタはターミナルのホームを残す。消したクラスタのホームはここで消す
+	if homes, err := clusters.TerminalHomes(ctx); err == nil {
+		term.PruneHomes(homes)
+	}
 	if cache != nil {
 		// 起動時と 1 時間ごとに、使われていないイメージを消す (上限・期限・ディスクの空き)
 		go cache.Run(ctx, time.Hour)
@@ -288,6 +293,7 @@ func run() error {
 			Terminal:     term,
 			Practice:     drills,
 			Cache:        cache,
+			Handson:      handson.New(),
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}

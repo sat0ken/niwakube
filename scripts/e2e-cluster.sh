@@ -18,6 +18,8 @@ RUNTIME=${RUNTIME:-runc}
 RUNTIMES=${RUNTIMES:-}
 # LIFECYCLE=1 なら、ワーカーのサイズの変更・台数の変更・スナップショットも試す (時間がかかるので CI では 1 ジョブだけ)
 LIFECYCLE=${LIFECYCLE:-}
+# PROFILE=cnd-handson なら、CloudNative Days のハンズオン用のクラスタ (Envoy Gateway・Cilium Ingress・ポートの転送) を試す
+PROFILE=${PROFILE:-}
 NAME=${NAME:-e2ek}
 CLUSTER_TIMEOUT=${CLUSTER_TIMEOUT:-900}
 LISTEN=${LISTEN:-127.0.0.1:18081}
@@ -119,7 +121,7 @@ log "$DISTRO クラスタを作成: $NAME (CP 1 + ワーカー 1、CNI $CNI、�
 # shellcheck disable=SC2086  # 空白で分割したい
 install_json=$(printf '%s\n' $RUNTIMES | jq -R . | jq -s -c 'map(select(. != ""))')
 body=$(cat <<EOF
-{"name":"$NAME","distro":"$DISTRO","workers":1,"cni":"$CNI","version":"",
+{"name":"$NAME","distro":"$DISTRO","workers":1,"cni":"$CNI","profile":"$PROFILE","version":"",
  "runtime":{"default":"$RUNTIME","install":$install_json},
  "controlPlane":{"cpus":2,"memoryMiB":3072,"diskGiB":15},
  "worker":{"cpus":2,"memoryMiB":3072,"diskGiB":15}}
@@ -148,7 +150,18 @@ while :; do
   else
     degraded_since=""
   fi
-  (( SECONDS - start < CLUSTER_TIMEOUT )) || die "${CLUSTER_TIMEOUT}s 待っても準備完了になりませんでした"
+  if (( SECONDS - start >= CLUSTER_TIMEOUT )); then
+    # CP の構築 (kubeadm init・CNI のインストール) の出力。シリアルのログには最後しか残らないので、ここで見る
+    cp_ip=$(curl -fs "$API/clusters/$NAME" | jq -r '.machines[] | select(.role == "control-plane") | .ip' | head -n 1)
+    echo "----- $cp_ip: /var/log/cloud-init-output.log (最初の cilium install と、エラーらしい行)"
+    # ssh はリモートのシェルにつないで渡すので、コマンドは 1 つの文字列にする
+    ssh_to "$cp_ip" "sudo grep -m 1 -A 12 -- '^+ cilium install' /var/log/cloud-init-output.log" || true
+    ssh_to "$cp_ip" "sudo grep -n -i -E 'error|fail|unable|invalid|denied' /var/log/cloud-init-output.log" 2>/dev/null |
+      grep -v -E 'daemonsets.apps "cilium" not found|errors\b' | tail -n 30 || true
+    echo "----- $cp_ip: /var/log/cloud-init-output.log (tail)"
+    ssh_to "$cp_ip" sudo tail -n 40 /var/log/cloud-init-output.log || true
+    die "${CLUSTER_TIMEOUT}s 待っても準備完了になりませんでした"
+  fi
   sleep 5
 done
 log "クラスタの準備完了 ($((SECONDS - start))s)"
@@ -293,6 +306,90 @@ if [[ $CNI == cilium ]]; then
     die "転送を削除しても届いてしまいます"
   fi
   echo "    転送を削除すると届かなくなる: OK"
+fi
+
+# --- ハンズオン用のクラスタ: ホストのポート → CP の NodePort → Envoy Gateway / Cilium Ingress ---
+if [[ $PROFILE == cnd-handson ]]; then
+  log "ハンズオン: ホストの 80 番 (Envoy Gateway) と 8080 番 (Cilium Ingress) から届くこと"
+  # Envoy Gateway は CP で Cilium のあとに入れるので、クラスタの準備完了より遅れる
+  start=$SECONDS
+  until k -n gateway get gateway/handson-gateway >/dev/null 2>&1; do
+    if (( SECONDS - start > 900 )); then
+      ssh_to "$(curl -fs "$API/clusters/$NAME" | jq -r '.machines[] | select(.role == "control-plane") | .ip')" \
+        sudo tail -n 40 /var/log/cloud-init-output.log || true
+      die "900s 待っても Gateway handson-gateway ができません"
+    fi
+    sleep 10
+  done
+  k -n gateway wait gateway/handson-gateway --for=condition=Programmed --timeout=600s
+  k get gatewayclass
+  k apply -f - <<'YAML'
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: hello
+spec:
+  parentRefs:
+  - name: handson-gateway
+    namespace: gateway
+  hostnames: [app.example.com]
+  rules:
+  - backendRefs:
+    - name: hello
+      port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hello
+spec:
+  ingressClassName: cilium
+  rules:
+  - host: app-cilium.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: hello
+            port:
+              number: 8080
+YAML
+  host_ip=$(hostname -I | awk '{print $1}')
+  for target in "app.example.com:80" "app-cilium.example.com:8080"; do
+    host=${target%:*} port=${target#*:} got=""
+    for _ in $(seq 1 60); do
+      got=$(curl -fsS --max-time 5 -H "Host: $host" "http://$host_ip:$port/hostname" 2>/dev/null) && break
+      sleep 5
+    done
+    [[ $got == hello-* ]] || die "$host_ip:$port ($host) から届きません: $got"
+    echo "    $host_ip:$port ($host) -> $got: OK"
+  done
+  # 127.0.0.1 宛ては転送しない (localhost で待つもの、たとえば SSH トンネルの Web UI を横取りしない)
+  if curl -fsS --max-time 3 -H "Host: app-cilium.example.com" "http://127.0.0.1:8080/hostname" >/dev/null 2>&1; then
+    die "127.0.0.1:8080 がクラスタに転送されています"
+  fi
+  echo "    127.0.0.1:8080 は転送しない: OK"
+
+  log "ハンズオン: ターミナルの hosts・コマンド・残るホーム"
+  term_cmd='getent hosts app.example.com | sed "s/^/HOSTS:/"; echo "GW:$(curl -fsS --max-time 10 http://app.example.com/hostname)"; for t in helmfile cilium hubble; do command -v $t >/dev/null && echo "T:$t"; done; echo kept > ~/kept; exit'
+  if ! "$TERMCHECK" -url "ws://$LISTEN/api/clusters/$NAME/terminal" -send "$term_cmd" \
+    -expect "HOSTS:172.30.0.1" -expect "GW:hello-" -expect "T:helmfile" -expect "T:cilium" -expect "T:hubble" \
+    -timeout 90s >"$LOG_DIR/terminal-handson.log" 2>&1; then
+    cat "$LOG_DIR/terminal-handson.log"
+    die "ハンズオンのターミナルが使えません"
+  fi
+  if ! "$TERMCHECK" -url "ws://$LISTEN/api/clusters/$NAME/terminal" -send 'echo "K:$(cat ~/kept)"; exit' \
+    -expect "K:kept" -timeout 60s >"$LOG_DIR/terminal-handson2.log" 2>&1; then
+    cat "$LOG_DIR/terminal-handson2.log"
+    die "ターミナルを閉じるとホームが消えています"
+  fi
+  echo "    hosts・helmfile / cilium / hubble・閉じても残るホーム: OK"
+  # 資料とターミナルを並べる画面で使う、ハンズオンの資料 (niwakubed が GitHub から取って HTML にする)
+  curl -fsS "$API/handson/chapters/chapter_cluster-create" | jq -e '.html | contains("<h1")' >/dev/null ||
+    die "ハンズオンの資料を取れません"
+  echo "    ハンズオンの資料 (chapter_cluster-create): OK"
 fi
 
 # pv_pod NAME PVC: PVC をマウントして /data/hello に書き込む Pod を作る

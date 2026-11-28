@@ -129,13 +129,13 @@ func TestSandboxCommand(t *testing.T) {
 }
 
 func TestBashrc(t *testing.T) {
-	rc := bashrc("tal", true, nil)
+	rc := bashrc("tal", true, nil, false)
 	for _, want := range []string{`cp "$CREDENTIALS_DIRECTORY/kubeconfig" "$HOME/.kube/config"`, `export TALOSCONFIG=`, "alias k=kubectl", "kubectl completion bash", "talosctl completion bash", "tal"} {
 		if !strings.Contains(rc, want) {
 			t.Errorf("bashrc does not contain %q:\n%s", want, rc)
 		}
 	}
-	if strings.Contains(bashrc("k3s", false, nil), "talos") {
+	if strings.Contains(bashrc("k3s", false, nil, false), "talos") {
 		t.Error("talos settings must not be in a non-Talos bashrc")
 	}
 	// bash で構文エラーが無いこと
@@ -183,7 +183,7 @@ func TestSSH(t *testing.T) {
 	// bashrc を実際に動かし、ssh の設定ができること
 	home := filepath.Join(dir, "home")
 	os.MkdirAll(home, 0o700)
-	rc := bashrc("demo", false, x)
+	rc := bashrc("demo", false, x, false)
 	script := rc + "\ncat \"$HOME/.ssh/config\"; type ssh; stat -c %a \"$HOME/.ssh/id_ed25519\"\n"
 	f := filepath.Join(dir, "rc")
 	os.WriteFile(f, []byte(script), 0o600)
@@ -217,5 +217,73 @@ func TestSSH(t *testing.T) {
 		if _, err := m.prepare(Files{Cluster: "demo", Kubeconfig: []byte("kc"), SSH: bad}); err == nil {
 			t.Errorf("%s: want an error", name)
 		}
+	}
+}
+
+func TestKeptHomeAndHosts(t *testing.T) {
+	dir := t.TempDir()
+	m := New(Config{Dir: dir, Sandbox: true, HomeBase: filepath.Join(dir, "homes"), HostsDir: filepath.Join(dir, "hosts")}, nil)
+	f := Files{Cluster: "cnd", Kubeconfig: []byte("kc"), HomeID: "cnd-1700000000",
+		Hosts: []HostAlias{{IP: netip.MustParseAddr("172.30.0.1"), Names: []string{"app.example.com", "grafana.example.com"}}}}
+	s, err := m.prepare(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hosts, err := os.ReadFile(s.hosts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(hosts), "172.30.0.1 app.example.com grafana.example.com\n") || !strings.Contains(string(hosts), "localhost") {
+		t.Errorf("hosts:\n%s", hosts)
+	}
+	if fi, _ := os.Stat(s.hosts); fi.Mode().Perm() != 0o644 || filepath.Dir(s.hosts) != filepath.Join(dir, "hosts") {
+		t.Errorf("hosts mode %v", fi.Mode().Perm())
+	}
+	args := strings.Join(m.shellCommand(s).Args, " ")
+	for _, want := range []string{
+		"--property=StateDirectory=niwakube-term/cnd-1700000000",
+		"--property=User=nkterm-cnd",
+		"--property=WorkingDirectory=/var/lib/niwakube-term/cnd-1700000000",
+		"--setenv=HOME=/var/lib/niwakube-term/cnd-1700000000",
+		"--property=BindReadOnlyPaths=" + s.hosts + ":/etc/hosts",
+	} {
+		if !strings.Contains(args, want) {
+			t.Errorf("args lack %q:\n%s", want, args)
+		}
+	}
+	rc, _ := os.ReadFile(filepath.Join(s.dir, "bashrc"))
+	if !strings.Contains(string(rc), `. "$HOME/.bashrc"`) || !strings.Contains(string(rc), "閉じても残ります") {
+		t.Errorf("bashrc for a kept home:\n%s", rc)
+	}
+	m.remove(s)
+	if _, err := os.Stat(s.hosts); !os.IsNotExist(err) {
+		t.Error("the hosts file must be removed with the session")
+	}
+	// 普通のクラスタはセッションだけのホームで、hosts も変えない
+	plain := strings.Join(m.shellCommand(&session{id: "demo-abc", cluster: "demo"}).Args, " ")
+	if strings.Contains(plain, "StateDirectory") || strings.Contains(plain, "/etc/hosts") {
+		t.Errorf("plain terminal: %s", plain)
+	}
+	for _, bad := range []Files{
+		{Cluster: "cnd", HomeID: "../x"},
+		{Cluster: "cnd", Hosts: []HostAlias{{IP: netip.MustParseAddr("172.30.0.1"), Names: []string{"bad name"}}}},
+	} {
+		if _, err := m.prepare(bad); err == nil {
+			t.Errorf("%+v must be rejected", bad)
+		}
+	}
+
+	// 消したクラスタのホームを消す
+	for _, h := range []string{"cnd-1700000000", "old-1600000000"} {
+		if err := os.MkdirAll(filepath.Join(dir, "homes", h, "cnd-handson"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m.PruneHomes([]string{"cnd-1700000000"})
+	if _, err := os.Stat(filepath.Join(dir, "homes", "old-1600000000")); !os.IsNotExist(err) {
+		t.Error("the home of a deleted cluster must be removed")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "homes", "cnd-1700000000", "cnd-handson")); err != nil {
+		t.Error("the home of an existing cluster must be kept")
 	}
 }
